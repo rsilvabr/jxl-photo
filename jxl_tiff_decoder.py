@@ -3505,268 +3505,274 @@ def process_group(group_tasks, workers, target_icc=None):
     # _abort_on_duplicate_outputs (run in every mode, before the first write)
     # is what stops two sources from being spent on one output.
     if DELETE_SOURCE:
-        deleted = 0
-        deleted_skipped = 0
-        # Map status by main_jxl path — results arrive in completion order
-        # (as_completed), NOT submission order, so a positional zip with `tasks`
-        # would cross statuses under concurrency and could delete sources of
-        # failed conversions. Key explicitly on the returned identifier.
-        status_by_main = {r[0]: r[1] for r in results}
-        # (Round 43, D-2 — the recompressor's #419 fix, ported) A skipped
-        # source is certified by the PRE-EXISTING OUTPUT's provenance
-        # markers MATCHING these sources, never by marker presence. The
-        # classifications above stay as they are; the gate reads the markers
-        # of every skipped output in ONE batched call and demands
-        # _provenance_ok — an unrelated photo's TIFF (marker-carrying or
-        # marker-less) can no longer certify the deletion of these JXLs.
-        _skip_finals = [task["final_tiff"] for task in tasks
-                        if DELETE_SKIPPED
-                        and status_by_main.get(str(task["main_jxl"])) == "skipped"]
-        _skip_marks = (_read_source_markers_batch(_skip_finals)
-                       if _skip_finals else {})
-        for task in tasks:
-            status = status_by_main.get(str(task["main_jxl"]), "error")
-            # A skip is admitted only with DELETE_SKIPPED, and only so the
-            # checks below can judge it on the FILE — never on the timestamp
-            # that produced the skip (see the DELETE_SKIPPED note).
-            was_skipped = status == "skipped"
-            if status not in ("ok", "overwrite") and not (DELETE_SKIPPED and was_skipped):
-                if was_skipped and not DELETE_SKIPPED:
-                    logger.debug(f" KEEP (output already exists; --delete-skipped covers "
-                                 f"these) | {task['main_jxl'].name}")
-                continue
-            final_tiff = task["final_tiff"]
-            if not final_tiff.exists():
-                _delete_stats["kept"] += (len(task["entries"])
-                                          + len(task.get("ignored_thumbs", [])))
-                logger.warning(f" KEEP (final output missing) | {task['main_jxl'].name}")
-                continue
-            # A staged output whose move FAILED leaves a stale pre-existing
-            # TIFF at the final path: it passes exists()+integrity below, but
-            # it is not the file this run verified and delivered. Without this
-            # check the gate would certify the old file and delete the JXLs
-            # while the fresh output sits in staging under a UUID name.
-            #
-            # A SKIPPED group is the one legitimate exception: nothing was
-            # written, so nothing was staged, so it can never appear in
-            # moved_finals. Without this exemption the flag would look like it
-            # worked and silently delete nothing whenever staging is configured.
-            if (use_staging and not was_skipped
-                    and os.path.normcase(str(final_tiff)) not in moved_finals):
-                _delete_stats["kept"] += (len(task["entries"])
-                                          + len(task.get("ignored_thumbs", [])))
-                logger.warning(f" KEEP (output never left staging) | {task['main_jxl'].name}")
-                continue
-            if not _verify_tiff_integrity(final_tiff):
-                _delete_stats["kept"] += (len(task["entries"])
-                                          + len(task.get("ignored_thumbs", [])))
-                logger.warning(f" KEEP (TIFF failed integrity check) | {task['main_jxl'].name}")
-                continue
-            # #617: the TIFF on the disk, not only in the OS cache, before the
-            # irreversible delete.
-            if not _flush_to_disk(final_tiff):
-                _delete_stats["kept"] += (len(task["entries"])
-                                          + len(task.get("ignored_thumbs", [])))
-                logger.warning(f" KEEP (TIFF could not be flushed to disk) | "
-                               f"{task['main_jxl'].name}")
-                continue
-            # A SKIPPED source is judged on the FILE — and the MATCH, not the
-            # presence, of the marker is what says whose decode this TIFF is.
-            # The skip decision itself is a timestamp comparison
-            # (convert_multipage_jxl_group checks presence in both branches,
-            # but this gate is the last line of defence): a TIFF that carries
-            # a marker pointing at DIFFERENT sources — or no marker at all,
-            # or an unreadable one — must never certify a deletion, no
-            # matter how fresh its mtime looks. Fail closed: keep the sources.
-            # A matching PATH is not enough either: a JXL replaced in place
-            # by an older-dated different file still matches it, and the
-            # stale TIFF deleted the new JXL — its srcsum must match too.
-            if was_skipped:
-                _skip_info = (_skip_marks.get(str(final_tiff))
-                              or {"src": None, "srcsum": None})
-                _skip_srcs = [e[0] for e in task["entries"]]
-                if (_provenance_ok(_skip_info, _skip_srcs, PROVENANCE_CHECK)
-                        and not _provenance_proves_archive(_skip_info, _skip_srcs,
-                                                           PROVENANCE_CHECK)):
-                    _delete_stats["kept"] += (len(task["entries"])
-                                              + len(task.get("ignored_thumbs", [])))
-                    logger.warning(
-                        f" KEPT {len(task['entries'])} source(s) | "
-                        f"{task['main_jxl'].name} | "
-                        f"the existing {final_tiff.name} was decoded from an "
-                        f"EARLIER version of these sources (their bytes no "
-                        f"longer match its jxlphoto-srcsum) — it cannot prove "
-                        f"the sources are archived; re-decode with --overwrite")
-                    continue
-                if not _provenance_ok(_skip_info, _skip_srcs, PROVENANCE_CHECK):
-                    _delete_stats["kept"] += (len(task["entries"])
-                                              + len(task.get("ignored_thumbs", [])))
-                    logger.warning(
-                        f" KEPT {len(task['entries'])} source(s) | "
-                        f"{task['main_jxl'].name} | "
-                        f"the existing {final_tiff.name} carries no jxlphoto-src "
-                        f"marker MATCHING these sources, so it is not their "
-                        f"decode — it cannot prove the sources are archived"
-                        + ("" if PROVENANCE_CHECK == "content" else
-                           "; if these sources MOVED, re-run with "
-                           "--provenance content"))
-                    continue
-                # The marker survives a retouch: a TIFF edited since the
-                # decode is no longer a copy of these JXLs (D5).
-                _edited = _decoded_tiff_edited(final_tiff)
-                if _edited:
-                    _delete_stats["kept"] += (len(task["entries"])
-                                              + len(task.get("ignored_thumbs", [])))
-                    logger.warning(
-                        f" KEPT {len(task['entries'])} source(s) | "
-                        f"{task['main_jxl'].name} | the existing "
-                        f"{final_tiff.name} {_edited}, so it cannot prove the "
-                        f"sources are archived")
-                    continue
-            # Pages of this group were not in the run. Every check above passes
-            # — the single-page TIFF written is valid and complete — so this is
-            # the only place that can stop the deletion. Fail closed: a page
-            # that exists only in the source must keep the source alive.
-            _why_kind = _incomplete_groups.get(os.path.normcase(str(task["main_jxl"])))
-            if _why_kind and not ALLOW_INCOMPLETE_GROUPS:
-                # Count the JXLs actually preserved, not 1: the whole point of
-                # this KEEP is that N sources survive.
-                _delete_stats["kept"] += (len(task["entries"])
-                                          + len(task.get("ignored_thumbs", [])))
-                _tail = ("the markers disagree about the size of the split, so nothing "
-                         "here proves this TIFF is complete"
-                         if _why_kind == "inconsistent" else
-                         "re-run against the folder holding every page of the split, or "
-                         "pass --allow-incomplete-groups if the missing page is gone "
-                         "for good")
-                logger.warning(
-                    f" KEEP (incomplete multi-page group) | {task['main_jxl'].name} | "
-                    f"{_tail}")
-                continue
-            # A multipage-marker read that FAILED this run (exiftool timeout,
-            # crash, rc≠0) leaves the affected files standing at the standalone
-            # defaults — the safe fallback for DECODING a page, and exactly
-            # what splits a marked multi-page group into one-page groups whose
-            # TIFFs pass every integrity check below. No downstream check can
-            # then tell that the other pages only exist in the JXLs about to be
-            # removed. Same fail-closed recipe as _incomplete_groups (and as
-            # the recompressor's mpg_complete=False, round 38): retain every
-            # source of an affected group for THIS run. Not overridable —
-            # --allow-incomplete-groups speaks to archive state, not to a
-            # broken exiftool.
-            _unread = [e[0] for e in task["entries"]
-                       if os.path.normcase(str(e[0])) in _mpg_marker_failures]
-            if _unread:
-                _delete_stats["kept"] += (len(task["entries"])
-                                          + len(task.get("ignored_thumbs", [])))
-                logger.warning(
-                    f" KEPT {len(task['entries'])} source(s) | {task['main_jxl'].name} | "
-                    f"the multipage markers of "
-                    f"{', '.join(p.name for p in _unread)} could not be read this "
-                    f"run, so this group cannot be proven complete — nothing is "
-                    f"deleted; fix the exiftool failure and re-run")
-                continue
-            # Delete only the sources whose pixels actually made it into the
-            # TIFF. Thumbnails excluded by --thumbnail-handling ignore are NOT
-            # in the output, so deleting them destroys data the user never got
-            # back — "don't put it in the TIFF" is not "erase it". They are
-            # kept and reported instead; the cost is a skip-forever
-            # thumbnail-only group on later runs, which is noisy but harmless.
-            # Matrix mode decodes through PPM (RGB, no alpha). Whether a source
-            # carried alpha cannot be proven without a second decode, so no
-            # source of a matrix run is deleted: the gate's rule is that only
-            # sources whose pixels all reached the TIFF may go, and matrix
-            # cannot prove that. Fail closed, like ignored thumbnails.
-            if USE_MATRIX_MODE:
-                _delete_stats["kept"] += (len(task["entries"])
-                                          + len(task.get("ignored_thumbs", [])))
-                logger.warning(
-                    f" KEPT {len(task['entries'])} source(s) | {task['main_jxl'].name} | "
-                    f"--matrix decodes through PPM and cannot prove alpha was not "
-                    f"dropped; use roundtrip/basic mode to delete them")
-                continue
-            # #622: a float, deeper-than-16-bit or animated JXL is not fully in
-            # the TIFF (16-bit integers, first frame). Positive evidence only:
-            # no jxlinfo answer leaves the gate as it was.
-            _red = None
-            for _e in task["entries"]:
-                _why_red = _reduced_by_integer_decode(_jxlinfo_text(_e[0]),
-                                                      frames_kept=False)
-                if _why_red:
-                    _red = (_e[0], _why_red)
-                    break
-            if _red:
-                _delete_stats["kept"] += (len(task["entries"])
-                                          + len(task.get("ignored_thumbs", [])))
-                logger.warning(
-                    f" KEPT {len(task['entries'])} source(s) | {task['main_jxl'].name} | "
-                    f"{_red[0].name} holds {_red[1]}: the TIFF is not a full copy of "
-                    f"it, so the JXL stays the archive")
-                continue
-            # D2 (2026-10-08 audit): a decode the user degraded on purpose
-            # (--depth 8 from 16 bits, --basic dropping the XMP profile) is a
-            # derivative, and a derivative never deletes its master.
-            _degr = [(e[0], _degraded_decodes[os.path.normcase(str(e[0]))])
-                     for e in task["entries"]
-                     if os.path.normcase(str(e[0])) in _degraded_decodes]
-            if _degr:
-                _delete_stats["kept"] += (len(task["entries"])
-                                          + len(task.get("ignored_thumbs", [])))
-                logger.warning(
-                    f" KEPT {len(task['entries'])} source(s) | {task['main_jxl'].name} | "
-                    f"the TIFF is a degraded copy ({_degr[0][1]}), not the master — "
-                    f"decode without that option to delete the JXL")
-                continue
-            # R1 (2026-10-08 audit): a page decoded by CONVERTING into an
-            # A2B-only profile is an approximation, not a copy of the master.
-            _approx = [e[0] for e in task["entries"]
-                       if os.path.normcase(str(e[0])) in _unfaithful_decodes]
-            if _approx:
-                _delete_stats["kept"] += (len(task["entries"])
-                                          + len(task.get("ignored_thumbs", [])))
-                logger.warning(
-                    f" KEPT {len(task['entries'])} source(s) | {task['main_jxl'].name} | "
-                    f"{', '.join(p.name for p in _approx)} store(s) a scanner "
-                    f"profile (no B2A table) as a lossy ICC blob: the TIFF's colours "
-                    f"are an approximation, so the JXL stays the archive")
-                continue
-            _orphan_thumbs = list(task.get("ignored_thumbs", []))
-            if _orphan_thumbs:
-                _delete_stats["kept"] += len(_orphan_thumbs)
-                logger.warning(
-                    f" KEPT {len(_orphan_thumbs)} ignored thumbnail source(s) | "
-                    f"{task['main_jxl'].name} | their pixels are NOT in the TIFF "
-                    f"(--thumbnail-handling ignore); delete them yourself if you "
-                    f"do not want them")
-            _changed = [e[0] for e in task["entries"]
-                        if _source_changed_since_read(e[0])]
-            if _changed:
-                _delete_stats["kept"] += (len(task["entries"])
-                                          + len(task.get("ignored_thumbs", [])))
-                logger.warning(
-                    f" KEPT {len(task['entries'])} source(s) | {task['main_jxl'].name} | "
-                    f"{', '.join(p.name for p in _changed)}: source changed since this run read it (re-exported or rewritten during the run?) — its current version was never archived")
-                continue
-            _tag = " (already archived)" if was_skipped else ""
-            for jxl_path, _, _, _, _, _, _ in task["entries"]:
-                try:
-                    jxl_path.unlink()
-                    # Named apart from a fresh delete: this source was cleared
-                    # by a TIFF this run did not write.
-                    logger.info(f" DELETED source{_tag} | {jxl_path.name}")
-                    deleted += 1
-                    _delete_stats["deleted"] += 1
-                    if was_skipped:
-                        deleted_skipped += 1
-                        _delete_stats["deleted_archived"] += 1
-                except Exception as e:
-                    _delete_stats["kept"] += 1
-                    logger.warning(f" KEEP (could not delete) | {jxl_path.name}: {e}")
-        if deleted:
-            _sk = f" ({deleted_skipped} already archived)" if deleted_skipped else ""
-            logger.info(f" >Deleted {deleted} source JXL(s){_sk}")
+        _delete_decoded_sources(results, tasks, moved_finals, use_staging)
 
     return results
+
+
+def _delete_decoded_sources(results, tasks, moved_finals, use_staging):
+    """The delete gate of process_group, moved here unchanged (refactor plan 261113, A2)."""
+    deleted = 0
+    deleted_skipped = 0
+    # Map status by main_jxl path — results arrive in completion order
+    # (as_completed), NOT submission order, so a positional zip with `tasks`
+    # would cross statuses under concurrency and could delete sources of
+    # failed conversions. Key explicitly on the returned identifier.
+    status_by_main = {r[0]: r[1] for r in results}
+    # (Round 43, D-2 — the recompressor's #419 fix, ported) A skipped
+    # source is certified by the PRE-EXISTING OUTPUT's provenance
+    # markers MATCHING these sources, never by marker presence. The
+    # classifications above stay as they are; the gate reads the markers
+    # of every skipped output in ONE batched call and demands
+    # _provenance_ok — an unrelated photo's TIFF (marker-carrying or
+    # marker-less) can no longer certify the deletion of these JXLs.
+    _skip_finals = [task["final_tiff"] for task in tasks
+                    if DELETE_SKIPPED
+                    and status_by_main.get(str(task["main_jxl"])) == "skipped"]
+    _skip_marks = (_read_source_markers_batch(_skip_finals)
+                   if _skip_finals else {})
+    for task in tasks:
+        status = status_by_main.get(str(task["main_jxl"]), "error")
+        # A skip is admitted only with DELETE_SKIPPED, and only so the
+        # checks below can judge it on the FILE — never on the timestamp
+        # that produced the skip (see the DELETE_SKIPPED note).
+        was_skipped = status == "skipped"
+        if status not in ("ok", "overwrite") and not (DELETE_SKIPPED and was_skipped):
+            if was_skipped and not DELETE_SKIPPED:
+                logger.debug(f" KEEP (output already exists; --delete-skipped covers "
+                             f"these) | {task['main_jxl'].name}")
+            continue
+        final_tiff = task["final_tiff"]
+        if not final_tiff.exists():
+            _delete_stats["kept"] += (len(task["entries"])
+                                      + len(task.get("ignored_thumbs", [])))
+            logger.warning(f" KEEP (final output missing) | {task['main_jxl'].name}")
+            continue
+        # A staged output whose move FAILED leaves a stale pre-existing
+        # TIFF at the final path: it passes exists()+integrity below, but
+        # it is not the file this run verified and delivered. Without this
+        # check the gate would certify the old file and delete the JXLs
+        # while the fresh output sits in staging under a UUID name.
+        #
+        # A SKIPPED group is the one legitimate exception: nothing was
+        # written, so nothing was staged, so it can never appear in
+        # moved_finals. Without this exemption the flag would look like it
+        # worked and silently delete nothing whenever staging is configured.
+        if (use_staging and not was_skipped
+                and os.path.normcase(str(final_tiff)) not in moved_finals):
+            _delete_stats["kept"] += (len(task["entries"])
+                                      + len(task.get("ignored_thumbs", [])))
+            logger.warning(f" KEEP (output never left staging) | {task['main_jxl'].name}")
+            continue
+        if not _verify_tiff_integrity(final_tiff):
+            _delete_stats["kept"] += (len(task["entries"])
+                                      + len(task.get("ignored_thumbs", [])))
+            logger.warning(f" KEEP (TIFF failed integrity check) | {task['main_jxl'].name}")
+            continue
+        # #617: the TIFF on the disk, not only in the OS cache, before the
+        # irreversible delete.
+        if not _flush_to_disk(final_tiff):
+            _delete_stats["kept"] += (len(task["entries"])
+                                      + len(task.get("ignored_thumbs", [])))
+            logger.warning(f" KEEP (TIFF could not be flushed to disk) | "
+                           f"{task['main_jxl'].name}")
+            continue
+        # A SKIPPED source is judged on the FILE — and the MATCH, not the
+        # presence, of the marker is what says whose decode this TIFF is.
+        # The skip decision itself is a timestamp comparison
+        # (convert_multipage_jxl_group checks presence in both branches,
+        # but this gate is the last line of defence): a TIFF that carries
+        # a marker pointing at DIFFERENT sources — or no marker at all,
+        # or an unreadable one — must never certify a deletion, no
+        # matter how fresh its mtime looks. Fail closed: keep the sources.
+        # A matching PATH is not enough either: a JXL replaced in place
+        # by an older-dated different file still matches it, and the
+        # stale TIFF deleted the new JXL — its srcsum must match too.
+        if was_skipped:
+            _skip_info = (_skip_marks.get(str(final_tiff))
+                          or {"src": None, "srcsum": None})
+            _skip_srcs = [e[0] for e in task["entries"]]
+            if (_provenance_ok(_skip_info, _skip_srcs, PROVENANCE_CHECK)
+                    and not _provenance_proves_archive(_skip_info, _skip_srcs,
+                                                       PROVENANCE_CHECK)):
+                _delete_stats["kept"] += (len(task["entries"])
+                                          + len(task.get("ignored_thumbs", [])))
+                logger.warning(
+                    f" KEPT {len(task['entries'])} source(s) | "
+                    f"{task['main_jxl'].name} | "
+                    f"the existing {final_tiff.name} was decoded from an "
+                    f"EARLIER version of these sources (their bytes no "
+                    f"longer match its jxlphoto-srcsum) — it cannot prove "
+                    f"the sources are archived; re-decode with --overwrite")
+                continue
+            if not _provenance_ok(_skip_info, _skip_srcs, PROVENANCE_CHECK):
+                _delete_stats["kept"] += (len(task["entries"])
+                                          + len(task.get("ignored_thumbs", [])))
+                logger.warning(
+                    f" KEPT {len(task['entries'])} source(s) | "
+                    f"{task['main_jxl'].name} | "
+                    f"the existing {final_tiff.name} carries no jxlphoto-src "
+                    f"marker MATCHING these sources, so it is not their "
+                    f"decode — it cannot prove the sources are archived"
+                    + ("" if PROVENANCE_CHECK == "content" else
+                       "; if these sources MOVED, re-run with "
+                       "--provenance content"))
+                continue
+            # The marker survives a retouch: a TIFF edited since the
+            # decode is no longer a copy of these JXLs (D5).
+            _edited = _decoded_tiff_edited(final_tiff)
+            if _edited:
+                _delete_stats["kept"] += (len(task["entries"])
+                                          + len(task.get("ignored_thumbs", [])))
+                logger.warning(
+                    f" KEPT {len(task['entries'])} source(s) | "
+                    f"{task['main_jxl'].name} | the existing "
+                    f"{final_tiff.name} {_edited}, so it cannot prove the "
+                    f"sources are archived")
+                continue
+        # Pages of this group were not in the run. Every check above passes
+        # — the single-page TIFF written is valid and complete — so this is
+        # the only place that can stop the deletion. Fail closed: a page
+        # that exists only in the source must keep the source alive.
+        _why_kind = _incomplete_groups.get(os.path.normcase(str(task["main_jxl"])))
+        if _why_kind and not ALLOW_INCOMPLETE_GROUPS:
+            # Count the JXLs actually preserved, not 1: the whole point of
+            # this KEEP is that N sources survive.
+            _delete_stats["kept"] += (len(task["entries"])
+                                      + len(task.get("ignored_thumbs", [])))
+            _tail = ("the markers disagree about the size of the split, so nothing "
+                     "here proves this TIFF is complete"
+                     if _why_kind == "inconsistent" else
+                     "re-run against the folder holding every page of the split, or "
+                     "pass --allow-incomplete-groups if the missing page is gone "
+                     "for good")
+            logger.warning(
+                f" KEEP (incomplete multi-page group) | {task['main_jxl'].name} | "
+                f"{_tail}")
+            continue
+        # A multipage-marker read that FAILED this run (exiftool timeout,
+        # crash, rc≠0) leaves the affected files standing at the standalone
+        # defaults — the safe fallback for DECODING a page, and exactly
+        # what splits a marked multi-page group into one-page groups whose
+        # TIFFs pass every integrity check below. No downstream check can
+        # then tell that the other pages only exist in the JXLs about to be
+        # removed. Same fail-closed recipe as _incomplete_groups (and as
+        # the recompressor's mpg_complete=False, round 38): retain every
+        # source of an affected group for THIS run. Not overridable —
+        # --allow-incomplete-groups speaks to archive state, not to a
+        # broken exiftool.
+        _unread = [e[0] for e in task["entries"]
+                   if os.path.normcase(str(e[0])) in _mpg_marker_failures]
+        if _unread:
+            _delete_stats["kept"] += (len(task["entries"])
+                                      + len(task.get("ignored_thumbs", [])))
+            logger.warning(
+                f" KEPT {len(task['entries'])} source(s) | {task['main_jxl'].name} | "
+                f"the multipage markers of "
+                f"{', '.join(p.name for p in _unread)} could not be read this "
+                f"run, so this group cannot be proven complete — nothing is "
+                f"deleted; fix the exiftool failure and re-run")
+            continue
+        # Delete only the sources whose pixels actually made it into the
+        # TIFF. Thumbnails excluded by --thumbnail-handling ignore are NOT
+        # in the output, so deleting them destroys data the user never got
+        # back — "don't put it in the TIFF" is not "erase it". They are
+        # kept and reported instead; the cost is a skip-forever
+        # thumbnail-only group on later runs, which is noisy but harmless.
+        # Matrix mode decodes through PPM (RGB, no alpha). Whether a source
+        # carried alpha cannot be proven without a second decode, so no
+        # source of a matrix run is deleted: the gate's rule is that only
+        # sources whose pixels all reached the TIFF may go, and matrix
+        # cannot prove that. Fail closed, like ignored thumbnails.
+        if USE_MATRIX_MODE:
+            _delete_stats["kept"] += (len(task["entries"])
+                                      + len(task.get("ignored_thumbs", [])))
+            logger.warning(
+                f" KEPT {len(task['entries'])} source(s) | {task['main_jxl'].name} | "
+                f"--matrix decodes through PPM and cannot prove alpha was not "
+                f"dropped; use roundtrip/basic mode to delete them")
+            continue
+        # #622: a float, deeper-than-16-bit or animated JXL is not fully in
+        # the TIFF (16-bit integers, first frame). Positive evidence only:
+        # no jxlinfo answer leaves the gate as it was.
+        _red = None
+        for _e in task["entries"]:
+            _why_red = _reduced_by_integer_decode(_jxlinfo_text(_e[0]),
+                                                  frames_kept=False)
+            if _why_red:
+                _red = (_e[0], _why_red)
+                break
+        if _red:
+            _delete_stats["kept"] += (len(task["entries"])
+                                      + len(task.get("ignored_thumbs", [])))
+            logger.warning(
+                f" KEPT {len(task['entries'])} source(s) | {task['main_jxl'].name} | "
+                f"{_red[0].name} holds {_red[1]}: the TIFF is not a full copy of "
+                f"it, so the JXL stays the archive")
+            continue
+        # D2 (2026-10-08 audit): a decode the user degraded on purpose
+        # (--depth 8 from 16 bits, --basic dropping the XMP profile) is a
+        # derivative, and a derivative never deletes its master.
+        _degr = [(e[0], _degraded_decodes[os.path.normcase(str(e[0]))])
+                 for e in task["entries"]
+                 if os.path.normcase(str(e[0])) in _degraded_decodes]
+        if _degr:
+            _delete_stats["kept"] += (len(task["entries"])
+                                      + len(task.get("ignored_thumbs", [])))
+            logger.warning(
+                f" KEPT {len(task['entries'])} source(s) | {task['main_jxl'].name} | "
+                f"the TIFF is a degraded copy ({_degr[0][1]}), not the master — "
+                f"decode without that option to delete the JXL")
+            continue
+        # R1 (2026-10-08 audit): a page decoded by CONVERTING into an
+        # A2B-only profile is an approximation, not a copy of the master.
+        _approx = [e[0] for e in task["entries"]
+                   if os.path.normcase(str(e[0])) in _unfaithful_decodes]
+        if _approx:
+            _delete_stats["kept"] += (len(task["entries"])
+                                      + len(task.get("ignored_thumbs", [])))
+            logger.warning(
+                f" KEPT {len(task['entries'])} source(s) | {task['main_jxl'].name} | "
+                f"{', '.join(p.name for p in _approx)} store(s) a scanner "
+                f"profile (no B2A table) as a lossy ICC blob: the TIFF's colours "
+                f"are an approximation, so the JXL stays the archive")
+            continue
+        _orphan_thumbs = list(task.get("ignored_thumbs", []))
+        if _orphan_thumbs:
+            _delete_stats["kept"] += len(_orphan_thumbs)
+            logger.warning(
+                f" KEPT {len(_orphan_thumbs)} ignored thumbnail source(s) | "
+                f"{task['main_jxl'].name} | their pixels are NOT in the TIFF "
+                f"(--thumbnail-handling ignore); delete them yourself if you "
+                f"do not want them")
+        _changed = [e[0] for e in task["entries"]
+                    if _source_changed_since_read(e[0])]
+        if _changed:
+            _delete_stats["kept"] += (len(task["entries"])
+                                      + len(task.get("ignored_thumbs", [])))
+            logger.warning(
+                f" KEPT {len(task['entries'])} source(s) | {task['main_jxl'].name} | "
+                f"{', '.join(p.name for p in _changed)}: source changed since this run read it (re-exported or rewritten during the run?) — its current version was never archived")
+            continue
+        _tag = " (already archived)" if was_skipped else ""
+        for jxl_path, _, _, _, _, _, _ in task["entries"]:
+            try:
+                jxl_path.unlink()
+                # Named apart from a fresh delete: this source was cleared
+                # by a TIFF this run did not write.
+                logger.info(f" DELETED source{_tag} | {jxl_path.name}")
+                deleted += 1
+                _delete_stats["deleted"] += 1
+                if was_skipped:
+                    deleted_skipped += 1
+                    _delete_stats["deleted_archived"] += 1
+            except Exception as e:
+                _delete_stats["kept"] += 1
+                logger.warning(f" KEEP (could not delete) | {jxl_path.name}: {e}")
+    if deleted:
+        _sk = f" ({deleted_skipped} already archived)" if deleted_skipped else ""
+        logger.info(f" >Deleted {deleted} source JXL(s){_sk}")
+
 
 # Matched case-insensitively: globbing "*.jxl"/"*.JXL" missed "Photo.Jxl" on
 # case-sensitive filesystems (Linux/macOS) — skipped without a word.
