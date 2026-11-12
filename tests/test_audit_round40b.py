@@ -127,17 +127,6 @@ def test_encoder_ignore_mode_plans_page0_subfiletype(tmp_path, monkeypatch):
         "TIFF decoded back without its role")
 
 
-def test_encoder_solo_marker_reached_for_mask_page0(tmp_path):
-    """The solo marker block must no longer be gated on `page_idx > 0`."""
-    src = (REPO / "jxl_tiff_encoder.py").read_text(encoding="utf-8")
-    marker = "if not multipage_group and not STRIP_METADATA and (\n"
-    assert marker in src.split("r_solo = _run_exiftool_argfile")[0], (
-        "the solo marker block is still gated on page_idx > 0 alone")
-    block = src.split("if not multipage_group and not STRIP_METADATA and (")[1]
-    block = block[:block.index("r_solo = _run_exiftool_argfile")]
-    assert "subfiletype != (1 if is_thumbnail else 0)" in block
-
-
 def test_encoder_solo_marker_real_run(tmp_path):
     """Real-codec subset of the round-36 test: a mask TIFF encoded directly
     through convert_one must carry the subfiletype marker after the marker

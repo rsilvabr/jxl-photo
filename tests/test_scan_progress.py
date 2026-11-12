@@ -156,11 +156,21 @@ def test_a_missing_root_does_not_crash(mod, logged, monkeypatch):
     assert any("Searching for files" in x for x in lines)
 
 
-def test_finders_pass_their_root_through(tmp_path):
-    """Without the root the announcement cannot name the folder being scanned."""
-    (tmp_path / "a.tif").write_bytes(b"x")
-    src = Path(enc.__file__).read_text(encoding="utf-8")
-    assert '_iter_tiffs(input_path.glob("*"), input_path)' in src
-    assert '_iter_tiffs(input_path.rglob("*"), input_path)' in src
-    # and it still returns what it always did
-    assert [p.name for p in enc.find_files_mode0(tmp_path)] == ["a.tif"]
+def test_finders_pass_their_root_through(tmp_path, monkeypatch):
+    """Without the root the announcement cannot name the folder being scanned:
+    both encoder finders hand their own input folder to _iter_tiffs."""
+    root = tmp_path / "250118_吾妻山 [FINAL] 100%off"
+    (root / "sub dir").mkdir(parents=True)
+    (root / "a.tif").write_bytes(b"x")
+    (root / "sub dir" / "b (2).tif").write_bytes(b"x")
+    roots = []
+    real = enc._iter_tiffs
+
+    def spy(paths, root=None):
+        roots.append(root)
+        return real(paths, root)
+    monkeypatch.setattr(enc, "_iter_tiffs", spy)
+    # and they still return what they always did
+    assert [p.name for p in enc.find_files_mode0(root)] == ["a.tif"]
+    assert sorted(p.name for p in enc.find_tiffs_recursive(root)) == ["a.tif", "b (2).tif"]
+    assert roots == [root, root]

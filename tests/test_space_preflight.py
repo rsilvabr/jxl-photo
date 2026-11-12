@@ -22,6 +22,7 @@ Two properties matter more than accuracy, and are what these tests pin:
 
 import collections
 import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -282,11 +283,31 @@ def test_multipage_source_is_counted_once(tmp_path, monkeypatch, small_threshold
         f"3 pages inflated a 6 MB source: {line}"
 
 
-def test_preflight_failure_cannot_kill_the_run():
-    """The call site in main() must swallow anything the estimate throws."""
-    src = Path(enc.__file__).read_text(encoding="utf-8")
-    call = "_preflight_space(_preflight_groups(groups), CJXL_DISTANCE"
-    assert call in src, "preflight call site not found"
-    idx = src.index(call)
-    assert "except Exception" in src[idx:idx + 400], \
-        "main() must swallow preflight failures"
+@pytest.mark.skipif(not all(shutil.which(t) for t in ("cjxl", "djxl", "exiftool")),
+                    reason="main() checks the tools before it plans")
+def test_preflight_failure_cannot_kill_the_run(tmp_path, monkeypatch):
+    """An estimate that raises must not stop the run: main() goes on to the
+    conversion (the behaviour, not the text of main())."""
+    import numpy as np
+    import tifffile
+    src = tmp_path / "250118_吾妻山 [FINAL] 100%off" / "TIFF16"
+    src.mkdir(parents=True)
+    tifffile.imwrite(str(src / "DSC_0001 (2).tif"), np.zeros((16, 16, 3), np.uint16),
+                     photometric="rgb")
+
+    def boom(*a, **k):
+        raise RuntimeError("the estimate exploded")
+    converted = []
+
+    def no_conversion(items, workers, mode=0):
+        converted.append(len(items))
+        return []
+    monkeypatch.setattr(enc, "_preflight_space", boom)
+    monkeypatch.setattr(enc, "process_group", no_conversion)
+    monkeypatch.setattr(sys, "argv", ["jxl_tiff_encoder.py", str(src),
+                                      str(src.parent / "16B_JXL"), "--mode", "0"])
+    try:
+        enc.main()
+    except SystemExit:
+        pass
+    assert converted == [1], "the run stopped at the space estimate"

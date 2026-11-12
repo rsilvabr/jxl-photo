@@ -18,6 +18,7 @@
 
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import numpy as np
@@ -133,11 +134,42 @@ def test_a_stored_checksum_is_the_one_the_decode_side_reads_back(tmp_path):
 
 # ── #288: the gates the three scripts must agree on ─────────────────────────
 
-def test_every_script_checks_the_patch_level_of_the_minimum(tmp_path):
-    """0.11.2 is the documented minimum in all three messages."""
-    src = (REPO / "jxl_jpeg_transcoder.py").read_text(encoding="utf-8")
-    assert "(0, 11, 2)" in src
-    assert "_v[:2] < (0, 11)" not in src
+@pytest.mark.parametrize("mod", [enc, dec], ids=["encoder", "decoder"])
+def test_every_script_checks_the_patch_level_of_the_minimum(mod, monkeypatch):
+    """0.11.2 is the documented minimum: 0.11.1 is warned about, 0.11.2 is not
+    (the behaviour, not the text of the check)."""
+    warned = []
+    monkeypatch.setattr(mod.logger, "warning", lambda m, *a, **k: warned.append(str(m)))
+    for version, expect in (("0.11.1", True), ("0.11.2", False)):
+        warned.clear()
+        if mod is enc:
+            monkeypatch.setattr(enc, "_tool_version",
+                                lambda exe, v=version: tuple(int(x) for x in v.split(".")))
+        else:
+            monkeypatch.setattr(dec.subprocess, "run", lambda *a, v=version, **k:
+                                types.SimpleNamespace(stdout=f"djxl v{v} [AVX2]", stderr=""))
+        mod._warn_if_libjxl_too_old("cjxl" if mod is enc else "djxl")
+        assert bool(warned) is expect, (version, warned)
+
+
+def test_the_transcoder_checks_the_patch_level_of_the_minimum(tmp_path, monkeypatch, capsys):
+    """The transcoder's copy is in main(): 0.11.1 is warned about, 0.11.2 is
+    not (it used to test major.minor only, so 0.11.0/0.11.1 passed in silence)."""
+    src = tmp_path / "250118_吾妻山 [FINAL] 100%off"
+    src.mkdir()
+    monkeypatch.setattr(tr.shutil, "which", lambda c, *a, **k: "C:/tools/" + str(c))
+    for name in ("cmd_transcode", "cmd_convert", "cmd_auto"):
+        monkeypatch.setattr(tr, name, lambda *a, **k: (0, False))
+    for version, expect in (((0, 11, 1), True), ((0, 11, 2), False)):
+        monkeypatch.setattr(tr, "_tool_version", lambda exe, v=version: v)
+        monkeypatch.setattr(sys, "argv", ["jxl_jpeg_transcoder.py", str(src),
+                                          str(tmp_path / "out")])
+        try:
+            tr.main()
+        except SystemExit:
+            pass
+        out = capsys.readouterr().out
+        assert ("older than the supported minimum (0.11.2)" in out) is expect, out[-1500:]
 
 
 @pytest.mark.parametrize("mod", [enc, dec, tr], ids=["encoder", "decoder", "transcoder"])

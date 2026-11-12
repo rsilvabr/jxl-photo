@@ -171,6 +171,10 @@ def test_a_missing_directory_is_survivable(mod, tmp_path):
 
 @BACKENDS
 def test_clean_staging_is_opt_in(mod):
-    """A delete must never be the default."""
-    src = Path(mod.__file__).read_text(encoding="utf-8")
-    assert '"--clean-staging", action="store_true"' in src
+    """A delete must never be the default: --clean-staging is a plain switch,
+    off unless given (read from the script's own parser)."""
+    actions = [a for a in mod.build_parser()._actions
+               if "--clean-staging" in a.option_strings]
+    assert len(actions) == 1
+    switch = actions[0]
+    assert (switch.nargs, switch.const, switch.default) == (0, True, False)

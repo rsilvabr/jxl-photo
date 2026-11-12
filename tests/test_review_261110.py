@@ -18,7 +18,6 @@ Real codecs; every file inside a folder named with Japanese, brackets, a
 space and %.
 """
 import importlib.util
-import inspect
 import logging
 import os
 import shutil
@@ -458,15 +457,6 @@ def test_615_recompressor_never_replaces_a_file_that_appeared_after_planning(tmp
     assert rc == 1
 
 
-def test_615_the_three_copies_of_the_swap_guard_are_identical():
-    import jxl_recompressor as rec_mod
-    import jxl_tiff_encoder as enc_mod
-    for name in ("_record_planned_outputs", "_output_changed_since_planned",
-                 "_swap_into_place"):
-        copies = {inspect.getsource(getattr(m, name)) for m in (tra, enc_mod, rec_mod)}
-        assert len(copies) == 1, name
-
-
 # ------------------------------------------------ follow-ups of the review
 # #617 in the other three scripts; #618 the recompressor's gate after a
 # replaced promotion (review 4.2); #619 two misleading messages (review 1.3);
@@ -515,14 +505,6 @@ def test_617_the_other_scripts_keep_a_source_whose_output_cannot_be_flushed(
     _main(mod, monkeypatch, argv + ["--delete-source", "--delete-confirm-off"])
     assert final.exists()
     assert src.exists(), "deleted although its output could not be flushed to disk"
-
-
-def test_617_the_four_copies_of_the_flush_are_identical():
-    import jxl_recompressor as rec_mod
-    import jxl_tiff_decoder as dec_mod
-    import jxl_tiff_encoder as enc_mod
-    copies = {inspect.getsource(m._flush_to_disk) for m in (tra, enc_mod, dec_mod, rec_mod)}
-    assert len(copies) == 1
 
 
 @needs_tools

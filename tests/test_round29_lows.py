@@ -167,10 +167,14 @@ def test_delete_stats_reset_with_the_abort_latch(mod):
     assert all(v == 0 for v in mod._delete_stats.values()), mod._delete_stats
 
 
-def test_the_transcoder_does_not_log_a_zeroed_delete_summary_at_startup():
-    src = (REPO / "jxl_jpeg_transcoder.py").read_text(encoding="utf-8")
-    setup = src[src.index("def setup_logger("):src.index("def setup_logger(") + 1400]
-    assert "_log_delete_summary()" not in setup
+def test_the_transcoder_does_not_log_a_zeroed_delete_summary_at_startup(monkeypatch):
+    """Setting the logger up must not print the delete summary: every count is
+    still zero at that point (the call, not the text of setup_logger)."""
+    calls = []
+    monkeypatch.setattr(tr, "_log_delete_summary", lambda: calls.append(1))
+    monkeypatch.setattr(tr, "DELETE_SOURCE", True)   # the summary prints only then
+    tr.setup_logger()
+    assert calls == []
 
 
 # ── the content id is hashed once per source, not once per page ─────────────
