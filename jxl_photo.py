@@ -9248,13 +9248,28 @@ class InteractiveMenu:
                         # This walk is the slow part on large trees (recursive glob
                         # + per-file stat + resolver per source file) — say so.
                         self.ui.markup(f"[grey70]Collision check: scanning {_rich_safe(src_root)} ...[/grey70]", f"Collision check: scanning {src_root} ...")
+                        # The encoder, the decoder and the recompressor answer
+                        # WHICH files this row's run takes (_planned_sources:
+                        # their own finders, exclusion and skips — refactor
+                        # C1), so none of those rules is copied here; the
+                        # recompressor's derivatives are checked below only
+                        # where files collide. The transcoder has no such
+                        # answer yet: its rows keep the walk and the mirror.
+                        _asks_child = hasattr(_child, '_planned_sources')
                         try:
-                            files = sorted(src_root.rglob('*') if mode >= 2 else src_root.iterdir())
-                        except OSError:
+                            if _asks_child:
+                                files = sorted(_child._planned_sources(
+                                    argparse.Namespace(input=src_root, output=Path(dest_path),
+                                                       mode=mode), read_markers=False))
+                            else:
+                                files = sorted(src_root.rglob('*') if mode >= 2
+                                               else src_root.iterdir())
+                        except (OSError, SystemExit):
                             continue
 
                         def _resolve_all(files, mode=mode, src_root=src_root, dest_path=dest_path,
-                                         rf=rf, rt=rt, _excl_names=_excl_names):
+                                         rf=rf, rt=rt, _excl_names=_excl_names,
+                                         _asks_child=_asks_child):
                             for f in files:
                                 # Filter BEFORE resolving: the child resolvers are
                                 # only meaningful for real source files, and running
@@ -9264,18 +9279,17 @@ class InteractiveMenu:
                                         continue
                                 except OSError:
                                     continue
-                                # The entry's --exclude-folders: the walk never
-                                # passes through the child's finders, so the
-                                # ONLY place the exclusion can bite is here.
-                                # Skipping an excluded file before resolving is
-                                # what keeps a flat-output row from aborting on
-                                # a collision the run would never produce
-                                # (the file is not even processed).
-                                if _excl_names and _path_excluded_below_root(
-                                        f, src_root, _excl_names):
-                                    continue
-                                if _skip_check is not None and _skip_check(f, src_root, mode):
-                                    continue
+                                if not _asks_child:
+                                    # The entry's --exclude-folders and the child's
+                                    # skips, mirrored for the transcoder's walk:
+                                    # skipping an excluded file before resolving
+                                    # keeps a flat-output row from aborting on a
+                                    # collision the run would never produce.
+                                    if _excl_names and _path_excluded_below_root(
+                                            f, src_root, _excl_names):
+                                        continue
+                                    if _skip_check is not None and _skip_check(f, src_root, mode):
+                                        continue
                                 out = resolver(f, mode, src_root, dest_path, rf, rt)
                                 # out is None for files the child skips (e.g. outside
                                 # the export marker in modes 6/7).

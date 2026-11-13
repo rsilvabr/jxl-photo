@@ -5020,10 +5020,13 @@ def _configure_run(parser, args):
     return log_file, _floor, _der_what
 
 
-def _find_sources(args):
+def _find_sources(args, drop_derivatives=True):
     """Which JXLs this run takes and their input root, per mode: moved out of
     main() unchanged (refactor plan 261113, A3). One place that answers
-    "which files", for the wrapper to ask later (C1)."""
+    "which files", for the wrapper to ask later (C1). drop_derivatives=False
+    keeps the modes 6/7 derivatives (#602) without reading their markers: the
+    wrapper's collision scan checks only the files that collide."""
+    keep = _drop_derivative_inputs if drop_derivatives else (lambda files: files)
     single_file = args.input.is_file()
     if single_file:
         if args.input.suffix.lower() not in JXL_EXTS:
@@ -5035,12 +5038,12 @@ def _find_sources(args):
         files = find_files_mode0(args.input)
         input_root = args.input
     elif args.mode == 6:
-        files = _drop_derivative_inputs(find_jxls_mode6(args.input))
+        files = keep(find_jxls_mode6(args.input))
         input_root = args.input
     elif args.mode == 7:
         files = find_jxls_mode7(args.input)
         if not EXPORT_JXL_SUBFOLDER:
-            files = _drop_derivative_inputs(files)
+            files = keep(files)
         input_root = args.input
     else:
         files = find_jxls_recursive(args.input)
@@ -5048,13 +5051,15 @@ def _find_sources(args):
     return single_file, files, input_root
 
 
-def _planned_sources(args) -> list:
+def _planned_sources(args, read_markers=True) -> list:
     """The JXLs a run with these arguments takes (_find_sources, derivatives
     left out in modes 6/7 as the run does, #602): what the wrapper counts and
     scans before a run, asking this script instead of copying its rules
     (refactor C1). Needs args.input, args.output and args.mode; the marker and
-    folder settings are this module's globals."""
-    return list(_find_sources(args)[1])
+    folder settings are this module's globals. read_markers=False keeps the
+    derivatives without reading every file's markers (the wrapper's
+    collision scan checks only the files that collide)."""
+    return list(_find_sources(args, drop_derivatives=read_markers)[1])
 
 
 def main():
