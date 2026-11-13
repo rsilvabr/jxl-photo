@@ -7130,7 +7130,12 @@ class InteractiveMenu:
                     with _with_child_marker(child, marker, subfolder, jxl_folder,
                                             exclude_folders=workflow.get('exclude_folders')):
                         args = argparse.Namespace(input=root, output=None, mode=mode)
-                        return len(child._planned_sources(args))
+                        # read_markers=False: the review redraws this count on
+                        # every turn, and the recompressor's modes 6/7 would read
+                        # the derivative markers of every JXL with exiftool each
+                        # time, silently (review V1). The count stays the one
+                        # v2.29.1 showed: derivatives included.
+                        return len(child._planned_sources(args, read_markers=False))
                 except SystemExit:
                     return -1      # the child refuses this input: no count to promise
                 finally:
