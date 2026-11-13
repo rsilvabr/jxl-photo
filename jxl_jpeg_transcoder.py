@@ -3708,6 +3708,147 @@ def _apply_staging_args(args) -> None:
         _clean_staging(TEMP2_DIR)
 
 
+# --------------------------------------------─
+# PLANNING: which files a run takes, and where each output goes
+# --------------------------------------------─
+# One answer for the three commands (cmd_transcode, cmd_convert, cmd_auto's
+# groups) and for the wrapper's file count and collision scan, which import
+# this module and ask instead of copying these rules (refactor C1).
+
+def _route(cmd, auto_decode, args):
+    """main()'s routing of a determine_command answer: ("transcode", decode),
+    ("convert", from_jxl) or ("auto", None). An auto run with --decode is the
+    lossless recovery (cmd_transcode). main() and _planned_sources route
+    through here."""
+    if cmd == "transcode":
+        return "transcode", bool(args.decode or auto_decode)
+    if cmd == "convert":
+        return "convert", bool(args.input.suffix.lower() == '.jxl' or args.decode)
+    if cmd == "auto":
+        if args.decode:
+            return "transcode", True
+        return "auto", None
+    return cmd, None
+
+
+def _lossless_route(src: Path, args):
+    """main()'s routing for one source: True on the bit-exact route, False
+    on the convert route, None for a JXL of an auto run (its jbrd box
+    decides: cmd_auto)."""
+    cmd, auto_decode, _why = determine_command(args.input, args.force_transcode,
+                                               args.force_convert)
+    route, _flag = _route(cmd, auto_decode, args)
+    if route == "transcode":
+        return True
+    if route != "auto":
+        return False
+    ext = src.suffix.lower()
+    if ext in JPEG_EXTS:
+        return True
+    if ext in JXL_EXTS:
+        return None
+    return False
+
+
+def _convert_ext(args) -> str:
+    """The extension of a JXL decoded on the convert route: png for --format
+    png and for a 16-bit JPEG request (JPEG has no 16-bit), jpg otherwise —
+    the rule cmd_convert and _process_file_group apply before their pairs."""
+    fmt = args.format or "jpeg"
+    if fmt in ("jpeg", "jpg"):
+        return "png" if args.bit_depth == 16 else "jpg"
+    return "png"
+
+
+def _planned_output(src: Path, args, lossless: Optional[bool] = None):
+    """Where a run with these arguments writes src's output, or None when
+    modes 6/7 leave src out (outside the export marker or the mode-7
+    subfolder). One answer for cmd_transcode, cmd_convert, cmd_auto's groups
+    and the wrapper's collision scan (refactor C1).
+
+    lossless: True on the bit-exact route (a JPEG -> JXL transcode, a JXL
+    recovered as its JPEG: the original name, never renamed), False on the
+    convert route (a re-encode: --rename-from applies) — what each cmd_*
+    already knows. None, for a caller that does not (the wrapper): decided
+    like main() routes the run (_lossless_route). A JXL of an auto run is
+    the one source its jbrd box decides, and the box is read only when the
+    two routes would write different paths (a rename, a PNG). The
+    resolvers' warnings are then logged twice: only the wrapper, whose
+    logger copy is silent, passes None.
+
+    Needs args.input, args.output, args.mode, args.force_transcode,
+    args.force_convert, args.decode, args.format, args.bit_depth,
+    args.output_name, args.output_suffix, args.rename_from and
+    args.rename_to; the marker and folder settings are this module's
+    globals."""
+    if lossless is None:
+        lossless = _lossless_route(src, args)
+    if lossless is None:
+        on_transcode = _planned_output(src, args, True)
+        on_convert = _planned_output(src, args, False)
+        if str(on_transcode) == str(on_convert):
+            return on_transcode
+        lossless = has_jbrd_box(src) and not _is_derivative()
+    single_file = args.input.is_file()
+    _input_root = args.input.parent if single_file else args.input
+    output_root = args.output or _input_root
+    if lossless:
+        return resolve_output_transcode(src, args.mode, output_root,
+                                        src.suffix.lower() not in JPEG_EXTS,
+                                        single_file=single_file)
+    decode = src.suffix.lower() in JXL_EXTS
+    # Mode 2: an explicit output dir -> flat into it. Otherwise: opt-in
+    # --output-suffix -> <folder><suffix>/ sibling folders; default -> flat
+    # into the input root (same layout as the transcode path). For a FILE
+    # input the "root" is its parent folder.
+    _suffix = args.output_suffix if args.output_suffix is not None else (CONVERT_OUTPUT_SUFFIX or None)
+    resolve_root = (args.output or (None if _suffix else _input_root)) if args.mode == 2 else output_root
+    _eff_suffix = args.output_suffix if args.output_suffix is not None else (CONVERT_OUTPUT_SUFFIX or "")
+    return resolve_output_convert(src, args.mode, args.output_name, _eff_suffix,
+                                  _convert_ext(args) if decode else "jxl",
+                                  args.rename_from, args.rename_to,
+                                  resolve_root, decode=decode,
+                                  single_file=single_file)
+
+
+def _planned_sources(args, read_markers=True) -> list:
+    """The files a run with these arguments takes: main()'s routing
+    (determine_command, _route), the finders its command uses
+    (_transcode_sources, _convert_sources, _auto_sources — without the walks
+    that only feed a log line) and the modes 6/7 filter (_planned_output).
+    What the wrapper counts and scans before a run, asking this script
+    instead of copying its rules (refactor C1). A JXL of an auto run is
+    filtered without reading its jbrd box: both routes leave out the same
+    files. read_markers=False keeps the derivatives a decode leaves out in
+    modes 6/7 (#602) without reading every JXL's markers; the thumbnail
+    pages a resized/colour-converted run skips (#555) are never left out
+    here. Needs the arguments _planned_output reads."""
+    cmd, auto_decode, _why = determine_command(args.input, args.force_transcode,
+                                               args.force_convert)
+    route, flag = _route(cmd, auto_decode, args)
+    if route == "transcode":
+        files, _root = _transcode_sources(args, flag)
+        groups = [(files, True)]
+    elif route == "convert":
+        files, _root, _direction = _convert_sources(
+            args, "from_jxl" if flag else "to_jxl", announce=False)
+        groups = [(files, False)]
+    elif route == "auto":
+        jpeg_files, png_files, jxl_files = _auto_sources(args, announce=False)
+        groups = [(jpeg_files, True), (png_files, False), (jxl_files, False)]
+    else:
+        return []
+    pairs = []
+    for files, lossless in groups:
+        for f in files:
+            out = _planned_output(f, args, lossless)
+            if out is not None:
+                pairs.append((f, out))
+    if read_markers and route != "transcode" and not args.input.is_file():
+        pairs = _drop_derivative_pairs(pairs, args.mode)
+    return [f for f, _o in pairs]
+
+
 def _transcode_sources(args, decode):
     """The files a lossless transcode run takes (JXLs to decode, else JPEGs;
     flat in modes 0/1) and its output root: moved out of cmd_transcode
@@ -3796,10 +3937,8 @@ def cmd_transcode(args, auto_decode: bool = False):
 
     # Build pairs
     pairs = []
-    _single_file = args.input.is_file()
     for f in files:
-        out = resolve_output_transcode(f, args.mode, output_root, decode,
-                                       single_file=_single_file)
+        out = _planned_output(f, args, lossless=True)
         if out is None:
             continue  # Skip files outside _EXPORT for modes 6/7
         pairs.append((f, out))
@@ -5830,17 +5969,22 @@ def process_group_convert(group_pairs: list, workers: int, direction: str,
     # the old file and delete the source anyway).
     return results, moved_finals
 
-def _convert_sources(args, direction):
+def _convert_sources(args, direction, announce=True):
     """The files a convert run takes, its output root and its direction (a
     JPEG/PNG -> JXL run over a folder with neither falls back to its JXLs):
-    moved out of cmd_convert unchanged, so _planned_sources asks the same
-    finders (refactor C1)."""
+    moved out of cmd_convert, so _planned_sources asks the same finders
+    (refactor C1). announce=False skips the walks whose files the run never
+    takes and only names in a log line (the PNGs --from-jpeg leaves out, the
+    JXLs of a JPEG/PNG folder): the file list is the same."""
     if args.input.is_file():
         files = [args.input]
         output_root = args.output or args.input.parent
     elif direction == "to_jxl":
         jpegs = find_jpegs_flat(args.input) if args.mode in (0, 1) else find_jpegs_recursive(args.input)
-        pngs = find_pngs_flat(args.input) if args.mode in (0, 1) else find_pngs_recursive(args.input)
+        if announce or not getattr(args, "from_jpeg", False):
+            pngs = find_pngs_flat(args.input) if args.mode in (0, 1) else find_pngs_recursive(args.input)
+        else:
+            pngs = []
         # --from-jpeg: restrict to JPEG inputs only. The wrapper's
         # "JPEG -> JXL lossy" workflow uses this so PNGs in the folder are
         # never converted (or deleted in mode 8) behind the user's back.
@@ -5863,7 +6007,7 @@ def _convert_sources(args, direction):
                 if args.bit_depth is None:
                     args.bit_depth = PNG_DEFAULT_BIT_DEPTH if args.format == "png" else 8
                 logger.debug("Auto-detected JXL content, switching to from_jxl")
-        elif direction == "to_jxl":
+        elif direction == "to_jxl" and announce:
             # Mixed folder with --force-convert: JXLs are silently ignored
             # without this note (use auto mode for mixed content instead).
             jxls_present = find_jxls_flat(args.input) if args.mode in (0, 1) else find_jxls_recursive(args.input)
@@ -5989,32 +6133,11 @@ def cmd_convert(args, from_jxl: bool = True):
                        "source path is overwritten (and logged) instead of refused.")
     logger.info(f"Files found: {len(files)}")
 
-    # Build pairs
+    # Build pairs (the direction follows each file: JXLs are decoded, the
+    # JPEGs/PNGs of a to_jxl run encoded — _planned_output)
     pairs = []
     for f in files:
-        # Mode 2: explicit output dir -> flat into it. Otherwise: opt-in
-        # --output-suffix -> <folder><suffix>/ sibling folders; default ->
-        # flat into the input root (same layout as the transcode path).
-        # For a FILE input the "root" is its parent folder.
-        _suffix = args.output_suffix if args.output_suffix is not None else (CONVERT_OUTPUT_SUFFIX or None)
-        _input_root = args.input.parent if args.input.is_file() else args.input
-        resolve_root = (args.output or (None if _suffix else _input_root)) if args.mode == 2 else output_root
-        _eff_suffix = args.output_suffix if args.output_suffix is not None else (CONVERT_OUTPUT_SUFFIX or "")
-        if direction == "to_jxl":
-            out = resolve_output_convert(f, args.mode, args.output_name,
-                                         _eff_suffix, "jxl",
-                                         args.rename_from, args.rename_to,
-                                         resolve_root, decode=False,
-                                         single_file=args.input.is_file())
-        else:
-            # Default to jpg if format is somehow None, else use specified
-            fmt = args.format if args.format else "jpeg"
-            ext = "jpg" if fmt == "jpeg" else "png"
-            out = resolve_output_convert(f, args.mode, args.output_name,
-                                         _eff_suffix, ext,
-                                         args.rename_from, args.rename_to,
-                                         resolve_root, decode=True,
-                                         single_file=args.input.is_file())
+        out = _planned_output(f, args, lossless=False)
         if out is None:
             continue  # Skip files outside _EXPORT for modes 6/7
         pairs.append((f, out))
@@ -6288,19 +6411,25 @@ def _delete_converted_sources(results, pairs, moved_finals):
 # AUTO MODE (Per-file detection for directories)
 # --------------------------------------------─
 
-def _auto_sources(args):
+def _auto_sources(args, announce=True):
     """The JPEGs, PNGs and JXLs an auto run takes, after --from-jxl,
     --from-jpeg and the one-direction rule of a deleting run (#542): moved
-    out of cmd_auto unchanged, so _planned_sources asks the same finders
-    (refactor C1)."""
+    out of cmd_auto, so _planned_sources asks the same finders (refactor
+    C1). announce=False skips the walks whose files the rules below drop
+    anyway and only name in a log line: the three lists are the same."""
+    _from_jxl = getattr(args, "from_jxl", False)
+    _from_jpeg = getattr(args, "from_jpeg", False)
+    _walk_jpeg = announce or not _from_jxl
+    _walk_png = announce or not (_from_jxl or _from_jpeg)
+    _walk_jxl = announce or not (DELETE_SOURCE and not (args.decode or _from_jxl))
     if args.mode in (0, 1):
-        jpeg_files = find_jpegs_flat(args.input)
-        png_files = find_pngs_flat(args.input)
-        jxl_files = find_jxls_flat(args.input)
+        jpeg_files = find_jpegs_flat(args.input) if _walk_jpeg else []
+        png_files = find_pngs_flat(args.input) if _walk_png else []
+        jxl_files = find_jxls_flat(args.input) if _walk_jxl else []
     else:
-        jpeg_files = find_jpegs_recursive(args.input)
-        png_files = find_pngs_recursive(args.input)
-        jxl_files = find_jxls_recursive(args.input)
+        jpeg_files = find_jpegs_recursive(args.input) if _walk_jpeg else []
+        png_files = find_pngs_recursive(args.input) if _walk_png else []
+        jxl_files = find_jxls_recursive(args.input) if _walk_jxl else []
 
     # --from-jxl: restrict auto mode to the JXL decode direction. JPEG/PNG
     # inputs are left untouched (used by the wrapper's "JXL -> JPEG auto"
@@ -6601,52 +6730,29 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
     'to_jxl' (encode image to JXL, e.g. PNG inputs in auto mode).
     collect_only: when a list is given, only build output pairs into it and
     return (pre-pass for cross-group duplicate detection)."""
-    # Use explicit output directory if provided, otherwise fall back to input
-    # root. Mode 2 convert is the exception: it needs the RAW args.output
-    # (possibly None) so the suffix-folder branch in resolve_output_convert
-    # can fire (see cmd_convert). For a FILE input the "root" is its parent.
-    output_root = args.output if args.output is not None else args.input
-    _suffix = args.output_suffix if args.output_suffix is not None else (CONVERT_OUTPUT_SUFFIX or None)
-    _input_root = args.input.parent if args.input.is_file() else args.input
-    resolve_root = (args.output or (None if _suffix else _input_root)) if args.mode == 2 else output_root
+    # Each output's path: _planned_output (lossless JPEG<->JXL, direction per
+    # extension, or the convert route; mode 2 convert reads the RAW
+    # args.output there, so the suffix-folder branch of resolve_output_convert
+    # can fire, as in cmd_convert).
 
     # Build output pairs
     pairs = []
     default_depth = 8  # safe default; refined below for lossy convert output
-    if not use_transcode:
-        if direction == "to_jxl":
-            out_ext = "jxl"
-        else:
-            # Lossy convert: output format defaults to JPEG if not specified.
-            # Compute once (loop-invariant).
-            fmt_eff = args.format or "jpeg"
-            # Default bit depth per format, matching cmd_convert behavior
-            default_depth = 8 if fmt_eff in ("jpeg", "jpg") else PNG_DEFAULT_BIT_DEPTH
-            bit_depth_eff = args.bit_depth or default_depth
-            # JPEG does not support 16-bit: switch to PNG *here* so staging files
-            # and final paths agree (same fix as cmd_convert #124). Otherwise
-            # decode_to_image switches extension at runtime and the staged file is
-            # orphaned (never promoted to the destination).
-            if fmt_eff in ("jpeg", "jpg") and bit_depth_eff == 16:
-                if collect_only is None:
-                    logger.warning("JPEG output does not support 16-bit; switching to PNG")
-                out_ext = "png"
-            else:
-                out_ext = "jpg" if fmt_eff in ("jpeg", "jpg") else "png"
+    if not use_transcode and direction != "to_jxl":
+        # Lossy convert: output format defaults to JPEG if not specified.
+        fmt_eff = args.format or "jpeg"
+        # Default bit depth per format, matching cmd_convert behavior
+        default_depth = 8 if fmt_eff in ("jpeg", "jpg") else PNG_DEFAULT_BIT_DEPTH
+        bit_depth_eff = args.bit_depth or default_depth
+        # JPEG does not support 16-bit: the output is a PNG (_convert_ext)
+        # so staging files and final paths agree (same fix as cmd_convert
+        # #124). Otherwise decode_to_image switches extension at runtime and
+        # the staged file is orphaned (never promoted to the destination).
+        if fmt_eff in ("jpeg", "jpg") and bit_depth_eff == 16:
+            if collect_only is None:
+                logger.warning("JPEG output does not support 16-bit; switching to PNG")
     for f in files:
-        if use_transcode:
-            # Lossless transcode: direction depends on input extension
-            is_jpeg_input = f.suffix.lower() in ('.jpg', '.jpeg', '.jfif', '.jpe')
-            out = resolve_output_transcode(f, args.mode, output_root, decode=not is_jpeg_input,
-                                           single_file=args.input.is_file())
-        else:
-            out = resolve_output_convert(
-                f, args.mode, args.output_name,
-                args.output_suffix if args.output_suffix is not None else (CONVERT_OUTPUT_SUFFIX or ""),
-                out_ext, args.rename_from, args.rename_to,
-                resolve_root, decode=(direction == "from_jxl"),
-                single_file=args.input.is_file()
-            )
+        out = _planned_output(f, args, lossless=use_transcode)
         if out:
             pairs.append((f, out))
 
@@ -7458,22 +7564,18 @@ def main():
 
     # Route to appropriate command. Each cmd_* returns a (errors, cancelled)
     # tuple so automation/wrappers can detect failures and user cancellations.
-    if cmd == "transcode":
-        errors, cancelled = cmd_transcode(args, auto_decode)
-    elif cmd == "convert":
-        # Determine direction for convert
-        if args.input.suffix.lower() == '.jxl' or args.decode:
-            errors, cancelled = cmd_convert(args, from_jxl=True)
-        else:
-            errors, cancelled = cmd_convert(args, from_jxl=False)
-    elif cmd == "auto":
-        # Auto-detect per-file for directories. --decode forces the lossless
-        # recovery direction: JXL-only, jbrd-gated (non-jbrd files error out
-        # per file instead of being silently lossy-converted).
-        if args.decode:
-            errors, cancelled = cmd_transcode(args, auto_decode=True)
-        else:
-            errors, cancelled = cmd_auto(args)
+    # _route is the routing _planned_sources asks too: the convert direction
+    # (a JXL input, or --decode), and an auto run with --decode is the
+    # lossless recovery — JXL-only, jbrd-gated (non-jbrd files error out per
+    # file instead of being silently lossy-converted).
+    route, flag = _route(cmd, auto_decode, args)
+    if route == "transcode":
+        errors, cancelled = cmd_transcode(args, flag)
+    elif route == "convert":
+        errors, cancelled = cmd_convert(args, from_jxl=flag)
+    elif route == "auto":
+        # Auto-detect per-file for directories.
+        errors, cancelled = cmd_auto(args)
     else:
         # Fallback - should not reach here
         print(f"ERROR: Unknown command state: {cmd}")
