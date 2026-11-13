@@ -43,7 +43,7 @@ def _wf(**over):
 
 
 CASES = {
-    "ambiguous_delete_flags": (_wf(expert_flags="--delete"), {}, "ambiguous abbreviation"),
+    "ambiguous_delete_flags": (_wf(expert_flags="--delete-source=1"), {}, "take no value"),
     "mode_in_expert_flags": (_wf(expert_flags="--mode 8"), {}, "the mode is chosen in the wizard"),
     "expert_flags_parse": (_wf(expert_flags="--no-such-flag"), {}, "Expert flags cannot run"),
     "direct_derivatives": (_wf(mode=8, advanced_options={"output_icc": "sRGB"}), {},

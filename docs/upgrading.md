@@ -11,6 +11,21 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
+## v2.30.0: flags are written in full
+
+- **A shortened flag is refused.** Python's command-line reader used to
+  accept any unambiguous start of a flag: `--delete-so` worked as
+  `--delete-source`, `--work 4` as `--workers 4`. From v2.30.0 the four
+  scripts accept only the full name and stop with `unrecognized arguments:
+  --work` (exit code 2) before doing anything.
+- **What to check:** your own `.bat` files, scheduled tasks and the expert
+  flags of saved presets. The wizard writes every flag in full, and its
+  review refuses a shortened expert flag before the run. Manifests are
+  not affected (their columns are not flags).
+- **New, optional:** `python jxl_photo.py encode ARGS` runs
+  `jxl_tiff_encoder.py ARGS` (also `decode`, `recompress`, `transcode`: the
+  names of the Windows program). The scripts still run on their own.
+
 ## v2.29.1 (and the v2.29.0_beta1 pre-release): the scripts need `jxl_photo_common.py` next to them
 
 - **A release is six files that go together**: `jxl_photo.py`, the four

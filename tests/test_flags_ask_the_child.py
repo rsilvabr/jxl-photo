@@ -9,8 +9,8 @@ parse (_child_flags); the token reading stays only as the fallback when the
 child cannot be imported, where it errs towards "this deletes".
 
 One table, both implementations: CHILD is what the child's argparse does,
-TOKENS what the fallback answers. They differ only where the fallback is
-deliberately cautious.
+TOKENS what the fallback answers. Since v2.30.0 (allow_abbrev=False) they
+agree: an abbreviation is an unknown flag for both.
 """
 import sys
 from pathlib import Path
@@ -27,8 +27,8 @@ DELETE_CASES = [
     ("--delete-source", True, True),
     ("--delete-source --delete-confirm-off", True, True),
     ('--staging "E:\\my dir [x]" --delete-source', True, True),
-    ("--delete-so", True, True),                     # argparse abbreviation
-    ("--delete-so --delete-c", True, True),
+    ("--delete-so", False, False),                   # refused since v2.30.0
+    ("--delete-so --delete-c", False, False),
     ("--delete-skipped", False, False),
     ("--delete-sk", False, False),
     ("--delete-confirm-off", False, False),
@@ -38,16 +38,15 @@ DELETE_CASES = [
     ("--staging E:\\temp", False, False),
     ("", False, False),
     (None, False, False),
-    # No such spelling in any child: argparse leaves it unknown (and the
-    # parse gate refuses the run). The fallback cannot know and says delete.
-    ("--delete_so", False, True),
-    ("--delete_source", False, True),
+    # No such spelling in any child: unknown (the parse gate refuses the run).
+    ("--delete_so", False, False),
+    ("--delete_source", False, False),
 ]
 
 MODE_CASES = [
     ("--mode 8", "--mode", "--mode"),
     ("--mode=8", "--mode=8", "--mode=8"),
-    ("--mod 8", "--mod", "--mod"),
+    ("--mod 8", None, None),                         # unknown since v2.30.0
     ("--staging E:\\temp", None, None),
     ("", None, None),
     (None, None, None),
@@ -81,13 +80,14 @@ def test_the_encoder_s_modular_flag_is_not_a_mode():
 
 
 def test_a_child_that_cannot_be_imported_falls_back_closed(monkeypatch):
-    """No parser to ask: the tokens decide, and an unknown delete spelling
-    still counts as a delete (the HHMM gate is asked rather than skipped)."""
+    """No parser to ask: the exact spellings decide (an abbreviation cannot
+    delete: every child refuses it since v2.30.0)."""
     def broken(name, *a, **k):
         raise ImportError(name)
     monkeypatch.setattr(wp.importlib, "import_module", broken)
     assert wp._child_flags("tiff", "jxl", "--delete-source") is None
-    assert wp._flags_request_delete("--delete_so", "tiff", "jxl") is True
+    assert wp._flags_request_delete("--delete-source", "tiff", "jxl") is True
+    assert wp._flags_request_delete("--delete-so", "tiff", "jxl") is False
     assert wp._flags_set_mode("--mode 8", "tiff", "jxl") == "--mode"
 
 
@@ -113,8 +113,11 @@ def test_every_caller_gives_the_direction():
 
 def test_a_delete_in_the_flags_adds_the_confirm_off_for_the_child():
     cmd = []
+    wp._append_expert_flags(cmd, "--delete-source", "tiff", "jxl")
+    assert cmd == ["--delete-source", "--delete-confirm-off"]
+    cmd = []
     wp._append_expert_flags(cmd, "--delete-so", "tiff", "jxl")
-    assert cmd == ["--delete-so", "--delete-confirm-off"]
+    assert cmd == ["--delete-so"]          # refused by the child: never a delete
     cmd = []
     wp._append_expert_flags(cmd, "--delete-skipped", "tiff", "jxl")
     assert cmd == ["--delete-skipped"]

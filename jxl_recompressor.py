@@ -4605,7 +4605,8 @@ def build_parser():
     (parse_known_args) before a run, and a test can compare it with the
     documentation."""
     parser = argparse.ArgumentParser(
-        description="Batch JXL -> JXL recompressor (smaller archives, same metadata)")
+        description="Batch JXL -> JXL recompressor (smaller archives, same metadata)",
+        allow_abbrev=False)     # a shortened flag is an error (v2.30.0)
     parser.add_argument("--version", action="version",
                         version=f"{TOOLKIT_NAME} {TOOLKIT_VERSION}")
     parser.add_argument("input", type=Path, nargs="?", help="Input JXL file or root folder")

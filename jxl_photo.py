@@ -213,77 +213,32 @@ def _flags_request_delete(flags: Optional[str], origin: Optional[str] = None,
     wrapper passed, so the callers deliberately do NOT combine this with a mode
     check: expert-flag deletion is gated on its own, whatever the stored mode says.
 
-    With the direction given, the child's own parse answers (_child_flags);
-    the token reading below is the fallback when it cannot.
+    With the direction given, the child's own parse answers (_child_flags).
+    Without it, or when the child cannot be imported, the exact spelling
+    decides: since v2.30.0 the children refuse an abbreviated flag
+    (allow_abbrev=False) and `--delete-source=1` (a store_true flag takes no
+    value), so neither can delete anything.
     """
     ns = _child_flags(origin, dest, flags)
     if ns is not None:
         return bool(getattr(ns, "delete_source", False))
-    # The children run argparse with allow_abbrev=True, so any UNAMBIGUOUS
-    # prefix of --delete-source also deletes: `--delete-s` works, and paired
-    # with `--delete-c` (an abbreviation of --delete-confirm-off) a preset
-    # would sail past a gate that only matched the full spelling. Tokens that
-    # are also a prefix of --delete-confirm-off (`--delete`, `--delete-`)
-    # are ambiguous and argparse rejects them, so they are not flagged here.
-    source_spellings = ('--delete-source', '--delete_source')
-    confirm_spellings = ('--delete-confirm-off', '--delete_confirm_off')
-    # --delete-skipped exists now, so a prefix like `--delete-s` matches BOTH it
-    # and --delete-source. argparse rejects an ambiguous abbreviation outright,
-    # so such a token can never delete anything — treating it as a delete
-    # request would charge the HHMM token for a run that then dies on
-    # "ambiguous option". _flags_ambiguous_delete reports those separately so
-    # the caller can refuse before asking for the token.
-    skipped_spellings = ('--delete-skipped', '--delete_skipped')
-    for t in _split_expert_flags(flags or ''):
-        # `--delete-source=1` is NOT a delete request: the children declare
-        # these flags store_true, so argparse rejects an explicit argument
-        # (exit 2) and nothing runs. _flags_ambiguous_delete reports the token
-        # so the caller refuses up front instead of charging the HHMM token
-        # for a doomed run.
-        if '=' in t:
-            continue
-        tok = t
-        if not tok.startswith('--'):
-            continue
-        if any(c.startswith(tok) for c in confirm_spellings):
-            continue        # ambiguous with --delete-confirm-off; argparse refuses
-        if any(c.startswith(tok) for c in skipped_spellings) and not any(
-                s == tok for s in source_spellings):
-            # Matches --delete-skipped too. Only an EXACT --delete-source spelling
-            # survives this: anything shorter is ambiguous and cannot run.
-            continue
-        for spelling in source_spellings:
-            if spelling.startswith(tok):
-                return True
-    return False
+    return any(t == '--delete-source' for t in _split_expert_flags(flags or ''))
 
 
 def _flags_ambiguous_delete(flags: Optional[str]) -> Optional[str]:
-    """The first expert-flag token the child's argparse would reject, or None.
+    """The first delete-flag token the child's argparse would reject, or None.
 
-    `--delete-s` matches both --delete-source and --delete-skipped, so argparse
-    exits with "ambiguous option" and the child never runs. `--delete-source=1`
-    is rejected just as hard: the delete flags are store_true and take no
-    explicit argument. Caught up front, the user is told to spell it out
-    instead of typing a token for a doomed run.
-    """
-    families = ('--delete-source', '--delete_source',
-                '--delete-skipped', '--delete_skipped',
-                '--delete-confirm-off', '--delete_confirm_off')
+    `--delete-source=1` (or a value on --delete-skipped / --delete-confirm-off):
+    the delete flags are store_true and take no explicit argument, so argparse
+    exits 2 before the child does anything. Caught up front, with a message
+    that says why, instead of after the HHMM token for a doomed run. (Until
+    v2.30.0 this also caught `--delete-s`, ambiguous between --delete-source
+    and --delete-skipped; the children now refuse every abbreviation, and the
+    expert-flags parse names it.)"""
+    families = ('--delete-source', '--delete-skipped', '--delete-confirm-off')
     for t in _split_expert_flags(flags or ''):
-        tok = t.split('=', 1)[0]
-        if not tok.startswith('--'):
-            continue
-        if '=' in t:
-            # An explicit argument on a store_true flag: exit 2 whether the
-            # base spelling is exact or an unambiguous abbreviation.
-            if any(f.startswith(tok) for f in families):
-                return t
-            continue
-        if tok in families:
-            continue
-        if sum(1 for f in families if f.startswith(tok)) > 1:
-            return tok
+        if '=' in t and t.split('=', 1)[0] in families:
+            return t
     return None
 
 
@@ -295,19 +250,14 @@ def _flags_set_mode(flags: Optional[str], origin: Optional[str] = None,
     and delete gates, the collision scan, the counts in the confirmation. A
     `--mode 8` in the expert flags wins in the child's argparse (it comes
     last), so the run would replace files in place behind a gate that saw
-    another mode (W-B of the 2026-11-03 audit). `--mo`/`--mod` count too:
-    argparse accepts an unambiguous abbreviation (the decoder has no other
-    --mo... flag).
+    another mode (W-B of the 2026-11-03 audit).
 
-    With the direction given, the child's own parse decides whether the mode
-    is set (_child_flags); the tokens only name it in the message ("--mode"
-    when none of them looks like it)."""
-    token = None
-    for t in _split_expert_flags(flags or ''):
-        tok = t.split('=', 1)[0]
-        if tok.startswith('--') and len(tok) >= 4 and '--mode'.startswith(tok):
-            token = t
-            break
+    With the direction given, the child's own parse decides (_child_flags);
+    the token only names it in the message ("--mode" when none spells it).
+    Without it, the exact spelling: since v2.30.0 every child refuses `--mo`
+    and `--mod` (allow_abbrev=False)."""
+    token = next((t for t in _split_expert_flags(flags or '')
+                  if t.split('=', 1)[0] == '--mode'), None)
     ns = _child_flags(origin, dest, flags)
     if ns is None:
         return token
@@ -4240,17 +4190,15 @@ def _preset_session(preset: Dict) -> Dict:
 
 
 def _gate_ambiguous_delete_flags(menu, wf, ctx) -> bool:
-    # A delete flag the child's argparse rejects cannot run: it exits 2
-    # ("ambiguous option", or an explicit argument on a store_true flag)
-    # before the child does anything. Caught ahead of every gate, so the user
-    # is not charged an HHMM token for a doomed run.
+    # A delete flag with a value (`--delete-source=1`) cannot run: the child's
+    # argparse exits 2 (store_true takes none) before it does anything.
+    # Caught ahead of every gate, so the user is not charged an HHMM token
+    # for a doomed run.
     _amb = _flags_ambiguous_delete(wf.get('expert_flags'))
     if _amb:
         menu._print_error(
-            f"Expert flag {_amb!r} cannot run: the child scripts reject it (it is "
-            f"an ambiguous abbreviation of --delete-source / --delete-skipped / "
-            f"--delete-confirm-off, or an '=...' value on a flag that takes none). "
-            f"Spell the flag out in full, with no value.")
+            f"Expert flag {_amb!r} cannot run: the delete flags take no value "
+            f"(the child scripts reject '=...' on them). Write it without the value.")
         return True
     return False
 
@@ -10905,6 +10853,27 @@ def _jxl_thumbnail_tip() -> Optional[str]:
             f"jxl-thumb adds them: {JXL_THUMB_URL} ([T] in the menu opens it)")
 
 
+# `python jxl_photo.py encode ARGS` = `python jxl_tiff_encoder.py ARGS`: the
+# names jxl-photo.exe gives its backends.
+_BACKEND_COMMANDS = {
+    "encode": "jxl_tiff_encoder.py",
+    "decode": "jxl_tiff_decoder.py",
+    "recompress": "jxl_recompressor.py",
+    "transcode": "jxl_jpeg_transcoder.py",
+}
+
+
+def _run_backend(command: str, argv: List[str]) -> None:
+    """Run one backend as if it was started directly: the script next to this
+    one, as __main__ (runpy), with `argv` as its arguments. Dispatched before
+    main(), so nothing of the wizard runs and the exit code, the output and
+    Ctrl+C are the backend's own."""
+    import runpy
+    script = SCRIPT_DIR / _BACKEND_COMMANDS[command]
+    sys.argv = [str(script)] + list(argv)
+    runpy.run_path(str(script), run_name="__main__")
+
+
 def main():
     try:
         _main()
@@ -10924,7 +10893,12 @@ def main():
 
 
 def _main():
-    parser = argparse.ArgumentParser(description="JXL Tools v2 - JPEG XL Processing with Auto Mode")
+    parser = argparse.ArgumentParser(
+        description="JXL Tools v2 - JPEG XL Processing with Auto Mode",
+        epilog="One script directly: jxl_photo.py encode|decode|recompress|transcode ARGS "
+               "runs jxl_tiff_encoder.py, jxl_tiff_decoder.py, jxl_recompressor.py or "
+               "jxl_jpeg_transcoder.py with ARGS ('jxl_photo.py encode --help' lists "
+               "its options).")
     parser.add_argument("--version", action="version",
                         version=f"{TOOLKIT_NAME} {TOOLKIT_VERSION}")
     parser.add_argument("--recheck", action="store_true", help="Force dependency recheck")
@@ -11188,4 +11162,7 @@ def _main():
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1 and sys.argv[1].lower() in _BACKEND_COMMANDS:
+        _run_backend(sys.argv[1].lower(), sys.argv[2:])
+    else:
+        main()

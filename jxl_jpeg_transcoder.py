@@ -6816,6 +6816,7 @@ def build_parser():
     calls that would then drift)."""
     parser = argparse.ArgumentParser(
         description="JPEG XL Toolkit - Auto-routing edition",
+        allow_abbrev=False,     # a shortened flag is an error (v2.30.0)
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Auto-detection (no subcommand needed for single files):

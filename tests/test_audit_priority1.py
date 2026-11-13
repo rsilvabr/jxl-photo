@@ -4,11 +4,12 @@
   * E1/E2 — removed in v2.15.0: D50 "auto" no longer reads the EXIF Software
     tag (it decides from the ICC bytes; see tests/test_d50_by_bytes.py), so
     the get_exif_software locking tests left with the function.
-  * W3 — the children's argparse accepts unambiguous abbreviations
-    (allow_abbrev=True), so `--delete-s` deletes sources exactly like
+  * W3 — the children's argparse accepted unambiguous abbreviations
+    (allow_abbrev=True), so `--delete-so` deleted sources exactly like
     `--delete-source`, but _flags_request_delete only matched the full
-    spelling: a preset with `--delete-s --delete-c` passed the unattended
-    gate and deleted originals with no confirmation anywhere.
+    spelling: a preset with `--delete-so --delete-c` passed the unattended
+    gate and deleted originals with no confirmation anywhere. Since v2.30.0
+    the children refuse every abbreviation (allow_abbrev=False).
   * T1 — auto mode with `--bit-depth 16` and no `--format` (default JPEG)
     resolved .png output paths but sent fmt="jpeg" to the worker, so djxl
     ran the JPEG branch without --bits_per_sample=16 (8-bit PNGs, silently).
@@ -95,68 +96,57 @@ def test_stale_icc_stripped_with_real_reader(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# W3 — _flags_request_delete must catch argparse abbreviations
+# W3 — an abbreviated delete flag never deletes
 # ---------------------------------------------------------------------------
+# Until v2.30.0 the children accepted an unambiguous abbreviation
+# (`--delete-so` deleted like --delete-source), so the wrapper had to read
+# them. Since v2.30.0 every child refuses an abbreviation (allow_abbrev=False):
+# only the full spelling deletes, and an abbreviation is an unknown flag the
+# expert-flags parse refuses before the run.
 
 @pytest.mark.parametrize("flags", [
-    "--delete-so",
-    "--delete_so",
-    "--delete-so --delete-c",
-    '--effort 9 --delete-source --delete-c',
+    "--delete-source",
+    "--effort 9 --delete-source --delete-confirm-off",
 ])
-def test_delete_flag_abbreviations_are_detected(flags):
+def test_the_full_delete_flag_is_detected(flags):
     assert wp._flags_request_delete(flags) is True
+    assert wp._flags_request_delete(flags, "tiff", "jxl") is True
 
 
 @pytest.mark.parametrize("flags", [
-    # Ambiguous prefixes (argparse rejects these itself, so they can never
-    # delete anything), the confirm flag alone, and near-misses.
-    "--delete",
-    "--delete-",
-    "--delete-c",
-    "--delete-confirm-off",
-    "--delete-source-never",
-    "--d",
-    "--effort 9",
-    None,
-    "",
-    # Ambiguous since --delete-skipped exists: matches it AND --delete-source.
-    "--delete-s",
-    "--delete_s",
-    "--delete-s --delete-c",
-    # Unambiguous, but it is --delete-skipped, which deletes nothing on its own.
-    "--delete-sk",
-    "--delete-skipped",
+    "--delete-so", "--delete_so", "--delete-so --delete-c", "--delete-s", "--delete_s",
+    "--delete", "--delete-", "--delete-c", "--delete-confirm-off", "--delete-source-never",
+    "--d", "--effort 9", None, "", "--delete-sk", "--delete-skipped",
 ])
-def test_non_delete_or_ambiguous_flags_are_not_flagged(flags):
+def test_an_abbreviation_or_another_flag_is_not_a_delete(flags):
     assert wp._flags_request_delete(flags) is False
+    assert wp._flags_request_delete(flags, "tiff", "jxl") is False
 
 
 @pytest.mark.parametrize("flags,expected", [
-    # --delete-skipped made these prefixes ambiguous. argparse exits with
-    # "ambiguous option" before the child does anything, so the wrapper must
-    # refuse UP FRONT rather than charge an HHMM token for a doomed run.
-    ("--delete-s", "--delete-s"),
-    ("--delete_s", "--delete_s"),
-    ("--delete-", "--delete-"),
-    ("--effort 9 --delete-s", "--delete-s"),
-    # Unambiguous spellings are not flagged.
+    ("--delete-source=1", "--delete-source=1"),
+    ("--effort 9 --delete-skipped=0", "--delete-skipped=0"),
+    ("--delete-confirm-off=yes", "--delete-confirm-off=yes"),
+    ("--delete-s", None),
     ("--delete-source", None),
-    ("--delete-so", None),
-    ("--delete-skipped", None),
-    ("--delete-sk", None),
-    ("--delete-confirm-off", None),
     ("--effort 9", None),
     ("", None),
     (None, None),
 ])
-def test_ambiguous_delete_abbreviations_are_reported(flags, expected):
+def test_a_delete_flag_with_a_value_is_reported(flags, expected):
     assert wp._flags_ambiguous_delete(flags) == expected
 
 
+@pytest.mark.parametrize("flags", ["--delete-so --delete-c", "--delete-s"])
+def test_an_abbreviated_delete_is_refused_before_the_run(flags):
+    problem = wp._expert_flags_problem("tiff", "jxl", flags)
+    assert problem and "not an option of jxl_tiff_encoder.py" in problem
+
+
 def test_abbreviated_delete_is_refused_unattended(tmp_path, monkeypatch, capsys):
-    """The full gate: a preset storing `--delete-s --delete-c` must be
-    refused by the unattended path exactly like the full spelling."""
+    """The full gate: a preset storing `--delete-so --delete-c` never runs
+    unattended. Since v2.30.0 the child would refuse the abbreviation; the
+    expert-flags parse says so before anything starts."""
     monkeypatch.setattr(wp.ConfigManager, "_get_config_path",
                         lambda self: tmp_path / ".jxl_tools_config.json")
     cfg = wp.ConfigManager()
@@ -188,7 +178,7 @@ def test_abbreviated_delete_is_refused_unattended(tmp_path, monkeypatch, capsys)
 
     assert ok is False
     assert launched == [], "child launched with an abbreviated delete flag unattended"
-    assert "cannot be given unattended" in " ".join(capsys.readouterr().out.split())
+    assert "not an option of jxl_tiff_encoder.py" in " ".join(capsys.readouterr().out.split())
 
 
 # ---------------------------------------------------------------------------

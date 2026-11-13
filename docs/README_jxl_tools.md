@@ -991,6 +991,22 @@ The file is plain JSON, one object per script:
 
 You can also run any of those scripts directly — `jxl_photo.py` is optional convenience.
 
+The wrapper runs one of them for you too, with the names the Windows
+program (jxl-photo-exe) uses; the arguments go to the script unchanged, and
+its output and exit code are the script's own:
+
+```powershell
+py jxl_photo.py encode "F:\Photos\2024" --mode 7      # = py jxl_tiff_encoder.py "F:\Photos\2024" --mode 7
+py jxl_photo.py decode "photo.jxl"                       # jxl_tiff_decoder.py
+py jxl_photo.py recompress "F:\Photos\Archive" --mode 1 --distance 1.0 --dry-run
+py jxl_photo.py transcode "F:\Photos\2024" --to-srgb   # jxl_jpeg_transcoder.py
+py jxl_photo.py encode -h                                # that script's options
+```
+
+Flags are written in full: since v2.30.0 the scripts refuse a shortened
+one, which stops with "unrecognized arguments" (write `--workers 4`, not a
+start of it).
+
 * * *
 
 ## Dependency status bar

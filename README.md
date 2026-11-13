@@ -151,7 +151,7 @@ py jxl_jpeg_transcoder.py "F:\Photos\2024" --to-srgb --quality 95   # JXL → sR
 py jxl_recompressor.py "F:\Photos\Archive" --mode 1 --distance 1.0 --dry-run   # simulate a smaller archive
 ```
 
-The encoder only writes masters, by design: colour conversion, resize and sharpening live where copies are made, in the recompressor and the transcoder. More commands, the settings I recommend, what a re-run redoes and what to do after converting: [docs/commands_and_settings.md](docs/commands_and_settings.md).
+`py jxl_photo.py encode …` (or `decode`, `recompress`, `transcode`) runs the same scripts, with the names of the Windows program; flags are written in full (`--workers`, not `--work`). The encoder only writes masters, by design: colour conversion, resize and sharpening live where copies are made, in the recompressor and the transcoder. More commands, the settings I recommend, what a re-run redoes and what to do after converting: [docs/commands_and_settings.md](docs/commands_and_settings.md).
 
 ---
 

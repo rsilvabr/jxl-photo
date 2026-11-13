@@ -100,7 +100,13 @@
   (`--clear-icc-cache`), 9 Settings (wrapper defaults, script settings =
   the overlay, reset, move), D dependencies; the beta's letters R/C/S stay
   aliases. A New job = task (`TASKS`) → folder → mode step (`[A]`/`[M]`/
-  `[D]`) → quality → review (`_review_screen`)
+  `[D]`) → quality → review (`_review_screen`). `jxl_photo.py
+  encode|decode|recompress|transcode ARGS` runs that backend as if started
+  directly (`_run_backend`, runpy, the exe's names; dispatched before
+  `main()`, so its exit code and Ctrl+C are the backend's own).
+- **Flags are spelled in full (v2.30.0):** the four `build_parser` have
+  `allow_abbrev=False`. Never turn it back on: the wrapper's checks of the
+  expert flags, presets and manifests assume a flag means exactly its name.
 - `jxl_photo_common.py` — not a script: the helpers the five share, one copy
   each. It must sit next to them (see "The common module").
 

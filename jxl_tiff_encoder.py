@@ -2548,7 +2548,7 @@ _INTERNAL_RELATION_PREFIXES = (
     DERIVED_XMP_PREFIX,
     ORIGIN_PREFIX,
     # The ICC this encode writes fresh from the TIFF's own profile: a copy
-    # carried in from the source (a TIFF decoded with --no-icc-clean) would
+    # carried in from the source (a TIFF decoded with --no-icc-cleanup) would
     # be a second, possibly stale, profile.
     ICC_PROFILE_PREFIX,
 )
@@ -2733,7 +2733,7 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
 
     # 4b. CreatorTool names the program that made the photo, nothing else.
     # Up to v2.18.x the ICC went there as "ICC:<base64>"; a TIFF decoded with
-    # --no-icc-clean (or re-tagged by hand) still carries it, and the XMP copy
+    # --no-icc-cleanup (or re-tagged by hand) still carries it, and the XMP copy
     # above would bring it into the master: strip it, keeping the real text
     # ("Capture One Windows"). An empty value removes the tag.
     if xmp_original:
@@ -5933,7 +5933,10 @@ def build_parser():
     Its own function so the wrapper can check an expert flag against it
     (parse_known_args) before a run, and a test can compare it with the
     documentation."""
-    parser = argparse.ArgumentParser(description="Batch TIFF 16-bit -> JPEG XL converter")
+    # allow_abbrev=False: a shortened flag (`--delete-so`, `--work 4`) is an
+    # error, never read as the full one (v2.30.0, docs/upgrading.md).
+    parser = argparse.ArgumentParser(description="Batch TIFF 16-bit -> JPEG XL converter",
+                                     allow_abbrev=False)
     parser.add_argument("--version", action="version",
                         version=f"{TOOLKIT_NAME} {TOOLKIT_VERSION}")
     parser.add_argument("input",             type=Path, nargs="?", help="Input root folder")

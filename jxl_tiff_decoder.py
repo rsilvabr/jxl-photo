@@ -1938,7 +1938,7 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
                             or t.startswith(TIFFTAG_PREFIX)
                             or t.startswith(SCAN_PREFIX)
                             # The JXL's copy of the original ICC: the TIFF
-                            # has its real ICC tag (kept with --no-icc-clean,
+                            # has its real ICC tag (kept with --no-icc-cleanup,
                             # like the old CreatorTool marker).
                             or (CLEANUP_XMP_ICC_MARKER
                                 and t.startswith(ICC_PROFILE_PREFIX))
@@ -4482,6 +4482,7 @@ def build_parser():
     documentation."""
     parser = argparse.ArgumentParser(
         description="JPEG XL to TIFF converter with ICC preservation",
+        allow_abbrev=False,     # a shortened flag is an error (v2.30.0)
         epilog="""
 Decode modes:
   Roundtrip (default with XMP ICC) - djxl auto + original ICC from XMP
