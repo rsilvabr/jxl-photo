@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #663.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #669.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -30,6 +30,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-84 — the independent review of v2.30.0](#round-84--the-independent-review-of-v2300-2026-11-13) | 2026-11-13 | v2.30.1-rc1 | #663–#668 (6) |
 | [Round-83 — where each output goes: the wizard asks the scripts](#round-83--where-each-output-goes-the-wizard-asks-the-scripts-2026-11-13) | 2026-11-13 | v2.30.0 | #655–#662 (8) |
 | [Round-82 — the review of the Python refactor](#round-82--the-review-of-the-python-refactor-2026-11-13) | 2026-11-13 | v2.30.0_beta1 | #652–#654 (3) |
 | [Round-81 — the Python refactor](#round-81--the-python-refactor-2026-11-13) | 2026-11-13 | v2.29.1 | #648–#651 (4) |
@@ -99,6 +100,28 @@ were never tagged and never shipped.
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
 
 ---
+
+## Round-84 — the independent review of v2.30.0 (2026-11-13)
+
+An independent review of v2.30.0 (a separate session) compared the wizard's
+plan of each manifest row with the scripts' own dry runs on 1 058 cases,
+measured the file count and the collision check on 80 000 files and broke the
+new code on purpose to see which tests notice. Nothing deleted or damaged a
+file: the collision that went unseen (#663) needs a resize, a rename and a
+JPEG archive in one manifest, and its derivative never deletes a source. The
+review's other items were tests (the transcoder's side of #652, the History
+codec of the transcoder's three writers, the #660 anchor in the encoder and
+the recompressor, the recovery route of an auto run with `--decode`) and two
+texts.
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 663 | **A JXL → JPEG/PNG manifest with a resize (or sharpening) and a rename: the collision check missed two rows writing one JPEG.** The check asked the transcoder with a command line of its own (input, output, mode, conversion, format, rename) that left the resize out, and the transcoder read "is this a derivative?" from the settings `main()` fills from the flags — so a JPEG archive (jbrd) kept its own name in the plan while the run re-encodes it, resized, under the renamed one. Row A's `IMG_ProPhoto_001.jxl` (an archive) and row B's `IMG_sRGB_001.jxl` both became `IMG_sRGB_001.jpg`: the second was skipped as existing, its photo left without a JPEG, "0 errors". Also in v2.30.0_beta1's own copy of the rules | `jxl_photo.py`, `jxl_jpeg_transcoder.py` | ✅ Fixed — the plan of a run is its own argv (`build_child_cmd(..., quiet=True)`, parsed by the script: `_child_plan_args`), and the transcoder decides a derivative from the flags (`_derivative_requested`). `tests/test_plan_is_the_run.py` (the review's case; 19 rows against the scripts' real dry runs; failed before) |
+| 664 | **The wizard's "Output folder name" (`--output-name`, modes 1/3 of a lossy conversion) and the expert flags that move outputs or pick the files reached the run but not the wizard's plan**: an expert `--export-jxl-folder`, `--export-jpeg-folder`, `--export-subfolder`, `--exclude-folders` or `--output-name`. The collision check placed the outputs in the setting's folder, and the delete preview counted the files of the wizard's subfolder and exclusion. Only `--mode` was refused there | `jxl_photo.py` | ✅ Fixed — as #663: every flag of the run, the expert flags included, reaches the plan, and the marker, folders and exclusion of that same parse are the script's settings during the walk (`_child_plan_globals`). `tests/test_plan_is_the_run.py` (failed before) |
+| 665 | **The wizard's file count and collision check of a JPEG ↔ JXL run were 1.7 to 7 times slower than in v2.30.0_beta1** (v2.30.0): the transcoder's finders resolved every file's real path (two file opens each on Windows: three quarters of a 40 000-file count), a JPEG walk asked `relative_to` per file whether it sat in the transcoder's own output folders, the count placed every file's output in every mode, and the check placed each output two or three times with `main()`'s routing redone per file. 80 000 files on an SSD, JXL → JPEG: count 9.0 s → 2.4 s (mode 2), check 14.6 s → 3.6 s (mode 2) and 26.0 s → 9.9 s (mode 6); beta1 4.8 s and 8.8 s | `jxl_jpeg_transcoder.py`, `jxl_photo.py` | ✅ Fixed — one lstat per file and one real path per folder (`_iter_by_ext`); the root's own parts cut off directly (`_is_tool_output_path`); the count places files only in modes 6/7, the only ones that leave a file out; the check asks `_planned_pairs`: routed once per run, each output placed once. The same file lists. `tests/test_plan_is_the_run.py` (counted calls; failed before) |
+| 666 | **A manifest row with a FILE as its Source, mode 2 and an empty Destination always failed**: the manifest loader puts the file itself in an empty Destination (#657), and the wizard sent it as the output folder in mode 2 as well, so each script read it as a folder named after the file — "1 errors", nothing written (the recompressor: `[WinError 183]`) | `jxl_photo.py` | ✅ Fixed — the file is not sent as the output in mode 2 either (`_dest_is_source_file`): the row writes where that script's mode 2 puts a single file (the TIFF encoder and the recompressor: `converted_jxl\` next to it; the decoder and the JPEG transcoder: next to it), which is where the check placed it. `tests/test_plan_is_the_run.py` (real runs of the four scripts; failed before) |
+| 667 | **#656's other half: the delete preview counted 1 for a single JXL in modes 6/7 of the decoder, and for a single file inside an export folder of the transcoder**, which both refuse a file in those modes (exit 2) | `jxl_tiff_decoder.py`, `jxl_jpeg_transcoder.py` | ✅ Fixed — their `_planned_sources` take nothing from a file in modes 6/7, like the encoder's. `tests/test_plan_is_the_run.py` (failed before) |
+| 668 | **The decoder read the libjxl version for each output's History inside its workers** (v2.30.0): its version check ran `djxl --version` itself rather than through the per-run cache the History entry reads, so the first entry asked djxl again inside a worker — a probe that timed out there (10 s) would have left the whole run's History without "with libjxl" | `jxl_tiff_decoder.py` | ✅ Fixed — the check reads `_tool_version` (one probe, before the workers), like the encoder's. `test_the_decoder_probes_djxl_once_and_the_history_reads_that` (failed before) |
 
 ## Round-83 — where each output goes: the wizard asks the scripts (2026-11-13)
 

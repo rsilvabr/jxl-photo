@@ -10,7 +10,8 @@ as [GitHub Releases](https://github.com/rsilvabr/jxl-photo/releases).
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.30.0](version_history.md#v2300)** | 2026-11-13 | Faster metadata writing; flags must be written in full; the history names the libjxl version; modes 6/7 of the decoder and the transcoder with an output folder land next to the library's own export folder |
+| **[v2.30.1-rc1](version_history.md#v2301-rc1)** | 2026-11-13 | Pre-release (test releases are now named `-rcN`). The wizard's manifest check and delete preview read every option the run gets; a file row in mode 2 with an empty Destination runs; the count and the check as fast as before v2.30.0 |
+| [v2.30.0](version_history.md#v2300) | 2026-11-13 | Archiving a TIFF takes about half the time; flags must be written in full; the history names the libjxl version; modes 6/7 of the decoder and the transcoder with an output folder land next to the library's own export folder |
 | [v2.30.0_beta1](version_history.md#v2300_beta1) | 2026-11-13 | Pre-release. Faster metadata writing; flags must be written in full; the history names the libjxl version; a PNG named `.jpg` is refused by the lossless JPEG transcode |
 | [v2.29.1](version_history.md#v2291) | 2026-11-13 | A release is six files that go together; yes/no answers read the same way on both wizard screens; the scripts' detail lines reach the log file |
 | [v2.29.0_beta1](version_history.md#v2290_beta1) | 2026-11-12 | Pre-release. A release is six files that go together: the five scripts and `jxl_photo_common.py`, the code they share; nothing changes in what they do |
@@ -35,6 +36,17 @@ as [GitHub Releases](https://github.com/rsilvabr/jxl-photo/releases).
 | [v2.17.0](version_history.md#v2170) | 2026-10-24 | Film scans archived lossless and never recompressed lossy unless asked; they keep what their scanner software needs (whole XMP, private tags); thumbnail pages kept by default, except Capture One's |
 
 Every release since v1.0: [version_history.md](version_history.md#release-history).
+
+## v2.30.1-rc1
+
+2026-11-13. A test release (pre-release) of v2.30.1; the last stable release is [v2.30.0](#v2300). Test releases are now named `-rc1`, `-rc2`…: that name is what the files converted with one record in their history.
+
+- The wizard's manifest check and delete preview read every option the run gets: a resize, the output folder name and the expert flags. A manifest whose resized, renamed JPEGs land on another row's JPEG is now refused before anything runs.
+- A manifest row whose Source is a single file runs in mode 2 with an empty Destination (it used to fail).
+- The file count and the manifest check of a JPEG ↔ JXL run are as fast as before v2.30.0.
+- Closes edge cases in the delete preview (a single file in modes 6/7) and in the decoder's history entry.
+
+[Technical notes](version_history.md#v2301-rc1)
 
 ## v2.30.0
 

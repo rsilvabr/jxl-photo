@@ -78,7 +78,7 @@ Rules that apply to the file itself:
 | Column | Can it be empty? | Meaning |
 |--------|------------------|---------|
 | `Source` | **No** — an empty cell turns the row into a comment | Input folder (a file also works in the flat modes 0/1). |
-| `Destination` | Yes — empty falls back to `Source` | Only honored by modes **0** and **2**; every other mode computes its own output location, and a value here is ignored (the wrapper warns). Mode 2 wants a real destination: empty ⇒ Destination = Source, which flattens the tree next to the originals (the recompressor refuses that, exit 2). |
+| `Destination` | Yes — empty falls back to `Source` | Only honored by modes **0** and **2**; every other mode computes its own output location, and a value here is ignored (the wrapper warns). Mode 2 wants a real destination: empty ⇒ Destination = Source, which flattens the tree next to the originals (the recompressor refuses that, exit 2). A **file** Source with an empty Destination writes where its script's mode puts a single file — in mode 2, `converted_jxl\` next to it for TIFF → JXL and JXL → JXL, next to it for JXL → TIFF and the JPEG/PNG directions. |
 | `Mode` | Yes — empty = auto-detect (legacy behaviour) | 0–8, per row; different folders can use different modes (see the [mode table](README_jxl_tools.md#mode)). Excel's `7.0` is accepted; a fraction like `7.5` is refused, not truncated. |
 | `Direction` | Yes, per row — but if *no* row fills it, the file is legacy and only assumed to match, with a warning | `tiff2jxl`, `jxl2tiff`, `jpeg2jxl`, `jxl2jpeg`, `jxl2png` or `jxl2jxl`. Every filled cell must equal the workflow you start — a TIFF→JXL manifest can never be replayed by a JXL→TIFF session, and one file never mixes two directions. |
 

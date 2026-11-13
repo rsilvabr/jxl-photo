@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.30.0](#v2300)** | 2026-11-13 | Everything in v2.30.0_beta1 (faster metadata writing, flags written in full, the libjxl version in the history); the wizard asks the scripts where each output goes; modes 6/7 of the decoder and the transcoder with an output folder land next to the library's own export folder; `--help` with its output in a file (round 83, 8 fixes) |
+| **[v2.30.1-rc1](#v2301-rc1)** | 2026-11-13 | Pre-release (test releases are now named `-rcN`). The wizard's manifest check and delete preview read every flag the run gets (resize, output folder name, expert flags); a file row in mode 2 with an empty Destination converts; the count and the check of a JPEG ↔ JXL run as fast as before v2.30.0 (round 84, 6 fixes) |
+| [v2.30.0](#v2300) | 2026-11-13 | Archiving a TIFF takes about half the time (one ExifTool process per file); everything else in v2.30.0_beta1 (flags written in full, the libjxl version in the history); the wizard asks the scripts where each output goes; modes 6/7 of the decoder and the transcoder with an output folder land next to the library's own export folder; `--help` with its output in a file (round 83, 8 fixes) |
 | [v2.30.0_beta1](#v2300_beta1) | 2026-11-13 | Pre-release. A file's metadata written by one ExifTool process (archiving about twice as fast); flags must be written in full; the History names the libjxl version; a PNG named `.jpg` refused by the lossless JPEG transcode |
 | [v2.29.1](#v2291) | 2026-11-13 | The code the scripts share lives in one file, `jxl_photo_common.py` (a release is six files); yes/no answers read the same way on both wizard screens; the scripts' detail lines reach the log file; the delete gates' code reorganized and tested directly |
 | [v2.29.0_beta1](#v2290_beta1) | 2026-11-12 | Pre-release. The code the scripts share lives in one file, `jxl_photo_common.py`, which ships next to them: a release is six files that go together. No change in behaviour |
@@ -103,6 +104,80 @@ GitHub release notes before v1.8.2:
 Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refactoring.md).
 
 ---
+
+## v2.30.1-rc1
+
+**Released 2026-11-13, a test release (pre-release) of v2.30.1**; the last
+stable release is [v2.30.0](#v2300). From this release on a test release is
+named `X.Y.Z-rcN` (release candidate), not `X.Y.Z_betaN`: the name is what
+each file converted with it records in its history, and `v2.30.1` is kept for
+the final release. The fixes of an independent review of v2.30.0 (round 84,
+#663–#668). Nothing to do when upgrading.
+
+- **Fixed — the wizard's plan of a run is the run's own command line (#663,
+  #664).** The manifest collision check and the delete preview ask each script
+  which files a run takes and where each output goes. They used to ask with a
+  command line of their own (the input, the output, the mode, the
+  conversion, the format, the rename) that left out the resize and the
+  sharpening, the wizard's "Output folder name" (`--output-name`) and the
+  expert flags. They now ask with the run's own argv (`build_child_cmd`, the
+  builder of the run, parsed by the script), and the marker, folders and
+  exclusion of that parse are the script's settings during the walk. What it
+  fixes: a JXL → JPEG manifest with a resize and a rename re-encodes a JPEG
+  archive under the new name, so two rows could write one JPEG while the
+  check said nothing (the second row's photo was skipped as existing — a
+  derivative never deletes, so nothing was lost but that JPEG); an expert
+  `--export-jxl-folder`, `--export-jpeg-folder`, `--export-subfolder`,
+  `--exclude-folders` or `--output-name` now moves the plan as it moves the
+  run. A new flag that moves outputs needs nothing more than its registry
+  entry. The transcoder reads "is this a derivative?" from the flags
+  (`_derivative_requested`), not from the settings `main()` fills.
+- **Faster — the wizard's file count and manifest check of a JPEG ↔ JXL run
+  (#665).** v2.30.0 made them 1.7 to 7 times slower than v2.30.0_beta1. The
+  transcoder's finders now take one lstat per file and resolve each FOLDER's
+  real path once (resolving every file opened it twice on Windows), a JPEG
+  walk cuts the root off a path directly instead of `relative_to` per file,
+  the count places files only in modes 6/7 (the only ones that leave a file
+  out), and the check asks `_planned_pairs`: routed once per run, each output
+  placed once. The file lists are the same. On 80 000 files (SSD, best of two
+  runs), JXL → JPEG:
+
+  | | v2.30.0_beta1 | v2.30.0 | v2.30.1-rc1 |
+  |---|---|---|---|
+  | count, mode 2 / 6 | 1.4 / 4.2 s | 9.0 / 12.6 s | 2.4 / 5.5 s |
+  | manifest check, auto, mode 2 / 6 | 4.8 / 8.8 s | 14.6 / 26.0 s | 3.6 / 9.9 s |
+  | manifest check, forced, mode 2 / 6 | 4.8 / 8.9 s | 12.1 / 19.4 s | 3.3 / 6.2 s |
+
+  v2.30.0_beta1 counted faster by counting wrong (#655). The encoder, the
+  decoder and the recompressor were not slower and are not changed.
+- **Fixed — a manifest row whose Source is a file, mode 2, empty Destination
+  (#666).** The manifest loader puts the file itself in an empty Destination
+  (#657), and the wizard sent it to the script as the output folder in mode 2
+  too: every script failed the row ("1 errors", nothing written). The row now
+  writes where that script's mode 2 puts a single file — `converted_jxl\`
+  next to it for the TIFF encoder and the recompressor, next to it for the
+  decoder and the JPEG transcoder.
+- **Fixed — the delete preview of a single file in modes 6/7 (#667).** The
+  decoder and the transcoder refuse a file in those modes (exit 2); the
+  preview counted 1 for it (the decoder always, the transcoder for a file
+  inside an export folder). It counts 0, as the encoder's always did.
+- **Fixed — the decoder's libjxl version for the history (#668).** Its
+  version check asked `djxl --version` itself instead of through the per-run
+  cache the History entry reads, so the first entry asked again inside a
+  worker; a probe that timed out there would have left the run's History
+  without "with libjxl". One probe now, before the workers, like the
+  encoder.
+- **Changed — test releases are named `-rcN`.** `2.30.1-rc1`, `-rc2`, … then
+  `2.30.1`. The wizard's new-release notice reads the new name: a copy running
+  `2.30.1-rc2` is told when `2.30.1` is out (GitHub never names a test
+  release as the latest one). The older `_betaN` tags are still read.
+- Tests: `tests/test_plan_is_the_run.py` pins the wizard's plan to the
+  scripts' own dry runs of the same argv (19 rows, every script, hostile
+  folders) and the review's cases; the transcoder's count and check read no
+  marker, the History names cjxl or djxl per call site, the encoder and the
+  recompressor anchor modes 6/7 on the input, an auto run with `--decode` is
+  the bit-exact recovery. Every mutation the review found surviving is now
+  caught.
 
 ## v2.30.0
 
