@@ -29,6 +29,7 @@ import functools
 import hashlib
 import io
 import json
+import logging
 import math
 import os
 import platform
@@ -1778,6 +1779,63 @@ def _abort_if_disk_full(g, write_dir, needed):
                   f"({free // (1024 * 1024)} MB free, "
                   f"needs at least {required // (1024 * 1024)} MB)")
     return True
+
+
+# === The log ===
+
+
+def setup_logger(g):
+    """The script's logger (named g._LOGGER_NAME): a new log file in g.LOG_DIR
+    and the console. Sets g.logger and returns the log file's path; the last
+    line names the file (g._LOG_SAVED_LABEL, "Log saved to" by default).
+
+    The logger and the file are at DEBUG, the console at INFO (#651: at INFO
+    the logger dropped every debug line before the file could see it). A
+    second call in the same process (tests, a script driving another)
+    replaces the handlers instead of doubling every line. No delete summary
+    here: this runs before anything is deleted, and a line of zeros reads
+    like a result."""
+    g.LOG_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # PID suffix: two children of the same script started in the same second
+    # (two manifest entries) would otherwise open the SAME file in append;
+    # the counter covers a same-process repeat inside that second.
+    n = 0
+    while True:
+        log_file = g.LOG_DIR / f"{timestamp}_{os.getpid()}{('_' + str(n)) if n else ''}.log"
+        if not log_file.exists():
+            break
+        n += 1
+
+    log = logging.getLogger(g._LOGGER_NAME)
+    g.logger = log
+    log.setLevel(logging.DEBUG)
+
+    for handler in log.handlers[:]:
+        log.removeHandler(handler)
+
+    fh = logging.FileHandler(log_file, encoding="utf-8")
+    fh.setLevel(logging.DEBUG)
+    # stdout in UTF-8, or a Japanese folder name turns into mojibake on the
+    # Windows console.
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setLevel(logging.INFO)
+
+    fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", "%H:%M:%S")
+    fh.setFormatter(fmt)
+    ch.setFormatter(fmt)
+
+    log.addHandler(fh)
+    log.addHandler(ch)
+    log.info(f"{g.TOOLKIT_NAME} {g.TOOLKIT_VERSION} | {Path(g.__file__).name}")
+    g._log_settings_overlay()
+    log.info(f"{_script_get(g, '_LOG_SAVED_LABEL', 'Log saved to')}: {log_file}")
+    return log_file
 
 
 # === Settings overlay ===

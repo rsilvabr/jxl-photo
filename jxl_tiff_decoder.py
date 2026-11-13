@@ -939,7 +939,8 @@ SCRIPT_DIR = Path(__file__).parent
 # land in Logs\ next to the scripts.
 LOG_DIR = (Path(os.environ["JXLPHOTO_LOG_DIR"]) if os.environ.get("JXLPHOTO_LOG_DIR")
            else SCRIPT_DIR / "Logs") / Path(__file__).stem
-logger = logging.getLogger("jxl_decode")
+_LOGGER_NAME = "jxl_decode"        # setup_logger (jxl_photo_common) reads it
+logger = logging.getLogger(_LOGGER_NAME)
 counter_lock = threading.Lock()
 _counter = {"done": 0, "total": 0}
 # What the deletion actually did. Module-level because the delete gate lives in
@@ -952,52 +953,7 @@ _counter = {"done": 0, "total": 0}
 _delete_stats = {"deleted": 0, "deleted_archived": 0, "kept": 0}
 
 
-def setup_logger():
-    global logger
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    # PID suffix: two children of the same script started in the same second
-    # (two manifest entries) would otherwise open the SAME file in append;
-    # the counter covers a same-process repeat inside that second.
-    n = 0
-    while True:
-        log_file = LOG_DIR / f"{timestamp}_{os.getpid()}{('_' + str(n)) if n else ''}.log"
-        if not log_file.exists():
-            break
-        n += 1
-
-    logger = logging.getLogger("jxl_decode")
-    # DEBUG on the logger, DEBUG on the file, INFO on the console (#651): at
-    # INFO the logger filtered every debug line before the file saw it, and
-    # these handlers had no level of their own.
-    logger.setLevel(logging.DEBUG)
-
-    # Remove old handlers so a second call in the same process (tests,
-    # wrapper-driven runs) does not duplicate log lines.
-    for handler in logger.handlers[:]:
-        logger.removeHandler(handler)
-
-    fh = logging.FileHandler(log_file, encoding="utf-8")
-    fh.setLevel(logging.DEBUG)
-    # Ensure stdout writes UTF-8 to prevent Mojibake on Windows console
-    try:
-        if hasattr(sys.stdout, "reconfigure"):
-            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
-    ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(logging.INFO)
-
-    fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", "%H:%M:%S")
-    fh.setFormatter(fmt)
-    ch.setFormatter(fmt)
-
-    logger.addHandler(fh)
-    logger.addHandler(ch)
-    logger.info(f"{TOOLKIT_NAME} {TOOLKIT_VERSION} | {Path(__file__).name}")
-    _log_settings_overlay()
-    logger.info(f"Log saved to: {log_file}")
-    return log_file
+def setup_logger(*a, **k): return _common.setup_logger(_G, *a, **k)
 
 
 # Machine-readable run summary for the jxl_photo.py wrapper.

@@ -98,7 +98,8 @@ GUARD_DOC_URL = (f"{TOOLKIT_URL}/blob/main/docs/behavior_and_limitations.md"
 _HISTORY_MIME = _common._HISTORY_MIME
 
 # Module-level logger; setup_logger() replaces it with a configured instance when main() runs.
-logger = logging.getLogger("jxl_recompress")
+_LOGGER_NAME = "jxl_recompress"    # setup_logger (jxl_photo_common) reads it
+logger = logging.getLogger(_LOGGER_NAME)
 
 
 def _verify_jxl_integrity(*a, **k): return _common._verify_jxl_integrity(_G, *a, **k)
@@ -1199,52 +1200,7 @@ def _abort_on_duplicate_outputs(pairs):
                      "in sibling recipe folders both collapse onto the same .jxl name.")
         sys.exit(2)
 
-def setup_logger():
-    global logger
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    # PID suffix: two children of the same script started in the same second
-    # (two manifest entries) would otherwise open the SAME file in append;
-    # the counter covers a same-process repeat inside that second.
-    n = 0
-    while True:
-        log_file  = LOG_DIR / f"{timestamp}_{os.getpid()}{('_' + str(n)) if n else ''}.log"
-        if not log_file.exists():
-            break
-        n += 1
-
-    logger = logging.getLogger("jxl_recompress")
-    # DEBUG on the logger: its level filters a record before any handler sees
-    # it, so at INFO the file handler's DEBUG was never reached (#651). The
-    # console stays at INFO through its own handler level.
-    logger.setLevel(logging.DEBUG)
-
-    # Remove old handlers so a second call in the same process (tests,
-    # wrapper-driven runs) does not duplicate log lines.
-    for handler in logger.handlers[:]:
-        logger.removeHandler(handler)
-
-    fh = logging.FileHandler(log_file, encoding="utf-8")
-    fh.setLevel(logging.DEBUG)
-
-    try:
-        if hasattr(sys.stdout, "reconfigure"):
-            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
-    ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(logging.INFO)
-
-    fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", "%H:%M:%S")
-    fh.setFormatter(fmt)
-    ch.setFormatter(fmt)
-
-    logger.addHandler(fh)
-    logger.addHandler(ch)
-    logger.info(f"{TOOLKIT_NAME} {TOOLKIT_VERSION} | {Path(__file__).name}")
-    _log_settings_overlay()
-    logger.info(f"Log saved to: {log_file}")
-    return log_file
+def setup_logger(*a, **k): return _common.setup_logger(_G, *a, **k)
 
 
 # Machine-readable run summary for the jxl_photo.py wrapper.

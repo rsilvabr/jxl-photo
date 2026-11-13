@@ -1317,7 +1317,9 @@ LOG_DIR = (Path(os.environ["JXLPHOTO_LOG_DIR"]) if os.environ.get("JXLPHOTO_LOG_
            else SCRIPT_DIR / "Logs") / Path(__file__).stem
 # Module-level logger (same pattern as the other scripts): resolvers must be
 # safe to call before setup_logger() (tests, isolated imports).
-logger = logging.getLogger("jxl_jpeg_transcoder")
+_LOGGER_NAME = "jxl_jpeg_transcoder"   # setup_logger (jxl_photo_common) reads it
+_LOG_SAVED_LABEL = "Log"           # its last line: "Log: <file>" (the others: "Log saved to")
+logger = logging.getLogger(_LOGGER_NAME)
 counter_lock = threading.Lock()
 _md5_db_lock = threading.Lock()
 _counter = {"done": 0, "total": 0}
@@ -1411,53 +1413,7 @@ def emit_summary_json(enabled):
         pass  # a summary line must never take down a finished run
 
 
-def setup_logger():
-    global logger
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    # PID suffix: two children of the same script started in the same second
-    # (two manifest entries) would otherwise open the SAME file in append;
-    # the counter covers a same-process repeat inside that second.
-    n = 0
-    while True:
-        log_file = LOG_DIR / f"{timestamp}_{os.getpid()}{('_' + str(n)) if n else ''}.log"
-        if not log_file.exists():
-            break
-        n += 1
-
-    logger = logging.getLogger("jxl_jpeg_transcoder")
-    # DEBUG on the logger: its level filters a record before any handler sees
-    # it, so at INFO the file handler's DEBUG was never reached (#651). The
-    # console stays at INFO through its own handler level.
-    logger.setLevel(logging.DEBUG)
-
-    for handler in logger.handlers[:]:
-        logger.removeHandler(handler)
-
-    fh = logging.FileHandler(log_file, encoding="utf-8")
-    fh.setLevel(logging.DEBUG)
-
-    try:
-        if hasattr(sys.stdout, "reconfigure"):
-            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
-    ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(logging.INFO)
-
-    fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", "%H:%M:%S")
-    fh.setFormatter(fmt)
-    ch.setFormatter(fmt)
-    logger.addHandler(fh)
-    logger.addHandler(ch)
-    logger.info(f"{TOOLKIT_NAME} {TOOLKIT_VERSION} | {Path(__file__).name}")
-    _log_settings_overlay()
-    # (No delete summary here: setup_logger runs BEFORE anything is deleted, so
-    # calling it printed "Sources DELETED: 0 | kept by a gate: 0" at the top of
-    # every archive run — a line that reads like a result and is only ever
-    # zeros. The real one is logged by each cmd_* at the end.)
-    logger.info(f"Log: {log_file}")
-    return log_file
+def setup_logger(*a, **k): return _common.setup_logger(_G, *a, **k)
 
 
 _rejected_log_lock = threading.Lock()
