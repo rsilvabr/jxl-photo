@@ -458,31 +458,42 @@
   only BELOW the input root: pointing a run AT such a folder to compress it
   again is legitimate.
 - **The wrapper asks the children which files a run takes AND where each
-  output goes (refactor C1, v2.30.0).** Its file count
-  (`_count_origin_files`) and its collision walk
-  (`_manifest_output_collisions`, folder AND file rows) call each child's
-  `_planned_sources(args, read_markers=False)` and `_planned_output(src,
-  args)` inside `_with_child_marker` (the run's marker/folders/exclusion on
-  the imported child, restored afterwards), with `args` = the child's own
-  parse of the command line that row's run gets (`_child_plan_args`: the
-  input, the output positional by `_dest_is_source_file`, `--mode`, the
-  transcoder's `_TRANSCODER_CONVERSION_FLAGS` and format, the rename where
-  `_rename_reaches_child`). Every `main()`/`cmd_*` resolves through the same
+  output goes (refactor C1, v2.30.0), with the run's own command line
+  (v2.30.1).** Its file count (`_count_origin_files`) asks each child's
+  `_planned_sources(args, read_markers=False)` and its collision walk
+  (`_manifest_output_collisions`, folder AND file rows) asks
+  `_planned_pairs(args, read_markers=False)` — (source, output) per file —
+  where `args` is the child's own parse (`_child_plan_args`) of the argv
+  `build_child_cmd(..., quiet=True)` builds for that run (the direct run's
+  workflow, each manifest row's `_row_effective_options`): every flag the run
+  gets reaches the plan, the resize, `--output-name` and the expert flags
+  included (#663, #664 — the plan used to pick its own few flags and missed
+  those). `quiet` only silences the notes some rules print; the argv is the
+  run's. The walk runs inside `_with_child_marker` with the marker, subfolder,
+  folder and exclusion of that same parse (`_child_plan_globals`), restored
+  afterwards. Every `main()`/`cmd_*` resolves through the same
   `_planned_output` (encoder `_plan_one`, decoder per page group, the
   recompressor's rename via `_renamed_output` after its refusals, the
   transcoder's three commands), so the wrapper cannot disagree with a run.
   A new rule about which files or where goes INTO the child's function,
-  never into the wrapper. What stays in the wrapper is its own question:
+  never into the wrapper; a new flag that moves outputs needs nothing more
+  than its registry entry. What stays in the wrapper is its own question:
   two rows on one output, one row's output that is another's Source
   (`cross_sink`), the derivatives re-checked only where files collide, the
   split-TIFF page probe, the count's "files of the origin format". The
   decoder names a TIFF after its page group (markers); the scan asks about
-  each JXL, an approximation. The transcoder's `_planned_output(...,
-  lossless=None)` (only the wrapper passes None) decides an auto run's JXL by
-  its jbrd box, read only when the two routes would name the output
-  differently; `test_the_transcoders_answer_is_its_runs_plan` pins it to a
-  real dry run. Nothing here may open exiftool or a whole TIFF (#652): the
-  count reads no marker and no box. `python tools/verdicts.py <old rev>
+  each JXL, an approximation. The transcoder routes once per run
+  (`_planned_groups`) and places each file once (`_output_on_route`); an
+  auto run's JXL is placed by its jbrd box, read only when the two routes
+  would name the output differently, and never for a derivative, which
+  re-encodes every JXL (`_auto_jxl_output`, `_derivative_requested` reads the
+  flags, not the globals main() fills). Its count places files only in
+  modes 6/7, the only ones that leave a file out, and its finders resolve
+  one real path per FOLDER (`_iter_by_ext`; #665: a resolve() per file was
+  three quarters of a 40 000-file count). `tests/test_plan_is_the_run.py`
+  pins the plan to the scripts' own dry runs of the same argv (19 rows).
+  Nothing here may open exiftool or a whole TIFF (#652): the count and the
+  walk read no marker and no box. `python tools/verdicts.py <old rev>
   <new rev|WORKTREE>` compares the wrapper's counts and collisions of two
   versions on hostile trees (each version in its own process,
   `tools/verdicts_worker.py`); v2.30.0's accepted differences against
@@ -920,7 +931,12 @@ must-fix / should-fix items and a commit verdict.
 - `docs/RELEASE_v*.md` — gitignored; local drafts to paste into GitHub Releases
 
 ## Releases
-- Stable tags: `vX.Y.Z` (e.g. `v1.7.1`); betas: `vX.Y.Z_betaN`.
+- Stable tags: `vX.Y.Z` (e.g. `v1.7.1`); test releases (GitHub
+  pre-releases): `vX.Y.Z-rcN` since v2.30.1-rc1 — `TOOLKIT_VERSION` carries
+  the suffix, and it is what every file converted with that release records
+  in its history, so `vX.Y.Z` stays for the final and each edited test
+  release takes the next `-rcN`. The older `vX.Y.Z_betaN` tags stay as they
+  are; the wizard's update check (`_version_key`) reads both.
 - **Tone of release notes and the README's "What's new": calm and short.**
   Most fixes close rare edge cases (an unusual combination, an interrupted
   run, a scanner profile): say that — "closes edge cases", "hardening" — and

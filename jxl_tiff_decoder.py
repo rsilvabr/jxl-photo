@@ -388,18 +388,20 @@ def _check_external_tools(dry_run: bool = False) -> None:
     sys.exit(1)
 
 
+_tool_version = _common._tool_version
+
+
 def _warn_if_libjxl_too_old(exe: str = "djxl") -> None:
     """libjxl < 0.11 is not supported (see README). Say so once, up front:
-    the failures it produces otherwise are cryptic and affect every file."""
-    try:
-        r = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=10)
-        out = (r.stdout or "") + " " + (r.stderr or "")
-    except Exception:
+    the failures it produces otherwise are cryptic and affect every file.
+
+    Through _tool_version, like the encoder: its per-run cache is where each
+    output's History entry reads the libjxl version, so the workers never
+    probe djxl themselves (#668: a probe that timed out there left the whole
+    run's History without it)."""
+    ver = _tool_version(exe)
+    if ver is None:
         return
-    m = re.search(r"v?(\d+)\.(\d+)\.(\d+)", out)
-    if not m:
-        return
-    ver = tuple(int(x) for x in m.groups())
     if ver[:3] < (0, 11, 2):
         logger.warning(
             f"{exe} {'.'.join(map(str, ver))} is older than the supported minimum "
@@ -4890,14 +4892,30 @@ def _planned_output(naming_path: Path, args):
 
 def _planned_sources(args, read_markers=True) -> list:
     """The JXLs this script's finders give for these arguments (_find_sources):
-    what the wrapper counts and scans before a run, asking this script
-    instead of copying its rules (refactor C1). The run leaves out the
-    derivatives of modes 6/7 later, by their markers (#602); this list still
-    holds them, as the wrapper's count always did. Needs args.input,
+    what the wrapper counts before a run, asking this script instead of
+    copying its rules (refactor C1). The run leaves out the derivatives of
+    modes 6/7 later, by their markers (#602); this list still holds them, as
+    the wrapper's count always did. A FILE in modes 6/7 takes nothing: the
+    run refuses it (exit 2, _configure_run; #667). Needs args.input,
     args.output and args.mode; the marker and folder settings are this
     module's globals. read_markers: the recompressor's switch; this list
     reads no marker."""
+    if args.mode in (6, 7) and args.input.is_file():
+        return []
     return list(_find_sources(args)[1])
+
+
+def _planned_pairs(args, read_markers=True) -> list:
+    """(JXL, the TIFF named after it) for each JXL _planned_sources gives,
+    the ones modes 6/7 leave out dropped: what the wrapper's collision scan
+    asks (refactor C1), each JXL standing for its own page group, the
+    approximation the scan has always made (_planned_output)."""
+    pairs = []
+    for f in _planned_sources(args, read_markers):
+        out = _planned_output(f, args)
+        if out is not None:
+            pairs.append((f, out))
+    return pairs
 
 
 def main():

@@ -53,6 +53,9 @@ def asked(monkeypatch):
 @pytest.mark.parametrize("text,key", [
     ("v2.22.0", (2, 22, 0, 1)), ("2.22.0_beta1", (2, 22, 0, 0)),
     ("v2.22.0-exe1", (2, 22, 0, 1)), ("v2.22.0-exe3", (2, 22, 0, 1)),
+    # The test releases since v2.30.1: -rcN, also inside the exe's tag.
+    ("2.30.1-rc2", (2, 30, 1, 0)), ("v2.30.1-rc1-exe1", (2, 30, 1, 0)),
+    ("2.30.1-1", None), ("2.30.1-rc", None),
     ("nonsense", None), (None, None), ("v2.22", None)])
 def test_version_key(text, key):
     assert wp._version_key(text) == key
@@ -63,6 +66,10 @@ def test_version_key(text, key):
     ("2.22.0", "v2.22.0", False), ("2.22.0", "v2.21.0", False),
     ("2.22.0_beta1", "v2.22.0", True),          # the release a beta was for
     ("2.22.0_beta1", "v2.21.0", False),
+    # A copy running a test release hears of its release, and of nothing older.
+    ("2.30.1-rc2", "v2.30.1", True), ("2.30.1-rc1", "v2.30.1-exe1", True),
+    ("2.30.1-rc1", "v2.30.0", False), ("2.30.1-rc1", "v2.30.0-exe1", False),
+    ("2.30.1-rc1", "v2.31.0", True),
     ("2.22.0", "v2.22.0-exe2", False),          # a new package of the same release
     ("2.22.0", "garbage", False)])
 def test_what_counts_as_news(cfg, asked, monkeypatch, mine, latest, news):

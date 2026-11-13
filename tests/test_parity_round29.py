@@ -18,7 +18,6 @@
 
 import subprocess
 import sys
-import types
 from pathlib import Path
 
 import numpy as np
@@ -142,12 +141,10 @@ def test_every_script_checks_the_patch_level_of_the_minimum(mod, monkeypatch):
     monkeypatch.setattr(mod.logger, "warning", lambda m, *a, **k: warned.append(str(m)))
     for version, expect in (("0.11.1", True), ("0.11.2", False)):
         warned.clear()
-        if mod is enc:
-            monkeypatch.setattr(enc, "_tool_version",
-                                lambda exe, v=version: tuple(int(x) for x in v.split(".")))
-        else:
-            monkeypatch.setattr(dec.subprocess, "run", lambda *a, v=version, **k:
-                                types.SimpleNamespace(stdout=f"djxl v{v} [AVX2]", stderr=""))
+        # Both read the version through _tool_version (the decoder since
+        # #668: its per-run cache is what the History entry reads).
+        monkeypatch.setattr(mod, "_tool_version",
+                            lambda exe, v=version: tuple(int(x) for x in v.split(".")))
         mod._warn_if_libjxl_too_old("cjxl" if mod is enc else "djxl")
         assert bool(warned) is expect, (version, warned)
 

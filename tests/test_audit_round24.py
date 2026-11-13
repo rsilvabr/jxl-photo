@@ -56,6 +56,17 @@ def menu():
     return wp.InteractiveMenu.__new__(wp.InteractiveMenu)
 
 
+@pytest.fixture
+def wired_menu(tmp_path, monkeypatch):
+    """A menu with its config (in tmp_path): since v2.30.1 the collision scan
+    plans each row with the run's own argv (build_child_cmd), which falls back
+    to the wizard's export marker."""
+    monkeypatch.setattr(wp.ConfigManager, "_get_config_path",
+                        lambda self: tmp_path / ".jxl_tools_config.json")
+    cfg = wp.ConfigManager()
+    return wp.InteractiveMenu(cfg, wp.DependencyChecker(cfg))
+
+
 def _tiff(path: Path, value: int = 1000):
     path.parent.mkdir(parents=True, exist_ok=True)
     tifffile.imwrite(str(path), np.full((16, 16, 3), value, np.uint16),
@@ -66,12 +77,13 @@ def _tiff(path: Path, value: int = 1000):
 # #242 — mode-0 manifest collisions
 # ---------------------------------------------------------------------------
 
-def test_242_mode0_shared_destination_is_a_collision(tmp_path, menu):
+def test_242_mode0_shared_destination_is_a_collision(tmp_path, wired_menu):
     """Two mode-0 entries writing into one Destination must be refused.
 
     Pre-fix the resolver returned f.parent for mode 0, so the two files
     resolved to their OWN folders and the guard saw nothing.
     """
+    menu = wired_menu
     a, b, out = tmp_path / "A", tmp_path / "B", tmp_path / "OUT"
     _tiff(a / "foto.tif")
     _tiff(b / "foto.tif", 60000)
@@ -87,8 +99,9 @@ def test_242_mode0_shared_destination_is_a_collision(tmp_path, menu):
             Path(collisions[0][1]).parent.name} == {"A", "B"}
 
 
-def test_242_mode0_in_place_entries_still_do_not_collide(tmp_path, menu):
+def test_242_mode0_in_place_entries_still_do_not_collide(tmp_path, wired_menu):
     """Destination == Source is the common auto-generated shape: still quiet."""
+    menu = wired_menu
     a, b = tmp_path / "A", tmp_path / "B"
     _tiff(a / "foto.tif")
     _tiff(b / "foto.tif")
@@ -99,8 +112,9 @@ def test_242_mode0_in_place_entries_still_do_not_collide(tmp_path, menu):
         export_marker="_EXPORT", export_subfolder=None) == []
 
 
-def test_242_mode8_stays_in_place(tmp_path, menu):
+def test_242_mode8_stays_in_place(tmp_path, wired_menu):
     """Mode 8 is in-place recursive and must NOT follow the Destination cell."""
+    menu = wired_menu
     a = tmp_path / "A"
     _tiff(a / "sub" / "foto.tif")
     entries = [(str(a), str(tmp_path / "IGNORED"), 8)]

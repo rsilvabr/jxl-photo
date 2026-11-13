@@ -5120,6 +5120,18 @@ def _planned_sources(args, read_markers=True) -> list:
     return list(_find_sources(args, drop_derivatives=read_markers)[1])
 
 
+def _planned_pairs(args, read_markers=True) -> list:
+    """(JXL, its output, renamed) for each JXL _planned_sources gives, the
+    ones the mode leaves out dropped: what the wrapper's collision scan asks
+    (refactor C1)."""
+    pairs = []
+    for f in _planned_sources(args, read_markers):
+        out = _planned_output(f, args)
+        if out is not None:
+            pairs.append((f, out))
+    return pairs
+
+
 def main():
     global EXPLORER_THUMBNAIL
     global _gen_divergence_logged, _error_details

@@ -36,6 +36,7 @@ import struct
 import uuid
 import zlib
 from pathlib import Path
+from stat import S_ISLNK, S_ISREG
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import time
@@ -1568,22 +1569,50 @@ PNG_EXTS = frozenset({".png"})
 
 
 def _iter_by_ext(paths, exts, root=None, skip_tool_output=False):
+    """The files of `paths` with one of `exts`, sorted, each real file once
+    (a folder reached twice through a junction is not converted twice), and
+    how many sit in this tool's own output folders (skip_tool_output).
+
+    One lstat per candidate. The real path that dedups them is the folder's,
+    resolved once per folder, plus the file's name; only a symbolic link to a
+    file is resolved itself. Resolving every file opened each one twice
+    (GetFinalPathNameByHandle) and was three quarters of a 40 000-file walk
+    (#665): the wizard's file count and collision scan ask these finders."""
+    # The keys are normcased strings, as Path equality compares them (case
+    # folded on Windows), without a Path built and hashed per file.
     seen, files, skipped = set(), [], 0
+    real_folders = {}
     _scan = _scan_state(root)
     for f in paths:
         _scan_tick(_scan, len(files))
         if f.suffix.lower() not in exts:
             continue
         try:
-            if not f.is_file():
-                continue
+            st = os.lstat(f)
         except OSError:
+            continue
+        link = S_ISLNK(st.st_mode)
+        if link:
+            try:
+                if not f.is_file():
+                    continue
+            except OSError:
+                continue
+        elif not S_ISREG(st.st_mode):
             continue
         if skip_tool_output and root is not None and _is_tool_output_path(f, root):
             skipped += 1
             continue
         try:
-            key = f.resolve()
+            if link:
+                key = os.path.normcase(str(f.resolve()))
+            else:
+                name = str(f)
+                parent = os.path.dirname(name)
+                folder = real_folders.get(parent)
+                if folder is None:
+                    folder = real_folders[parent] = str(f.parent.resolve())
+                key = os.path.normcase(os.path.join(folder, os.path.basename(name)))
         except OSError:
             continue
         if key not in seen:
@@ -1613,12 +1642,21 @@ def _is_tool_output_path(p: Path, root: Path) -> bool:
     pointing the tool directly AT a folder named 'converted'/'recovered_jpeg'
     (e.g. to re-archive recovered JPEGs) still works — only files NESTED
     inside such folders below the root are skipped.
+
+    A path of the walk itself starts with the root's own parts: those are
+    cut off directly — relative_to compares every parent and was half of a
+    20 000-JPEG count (#665); any other path still goes through it.
     """
-    try:
-        rel = p.relative_to(root)
-    except ValueError:
-        rel = p
-    return any(part.lower() in _TOOL_DECODE_OUTPUT_FOLDERS for part in rel.parts[:-1])
+    root_parts = root.parts
+    parts = p.parts
+    if parts[:len(root_parts)] == root_parts:
+        rel_parts = parts[len(root_parts):]
+    else:
+        try:
+            rel_parts = p.relative_to(root).parts
+        except ValueError:
+            rel_parts = parts
+    return any(part.lower() in _TOOL_DECODE_OUTPUT_FOLDERS for part in rel_parts[:-1])
 
 
 def find_jpegs_recursive(input_path: Path):
@@ -3763,6 +3801,32 @@ def _convert_ext(args) -> str:
     return "png"
 
 
+def _derivative_requested(args) -> bool:
+    """_is_derivative() read from the command line: resize or sharpening
+    asked for. main() sets the globals _is_derivative() reads from these
+    flags (_configure_run); the wrapper asks _planned_output without running
+    main(), so the plan reads the flags themselves (#663)."""
+    return bool(getattr(args, "resize_long", None) is not None
+                or getattr(args, "resize_short", None) is not None
+                or getattr(args, "resize_percent", None) is not None
+                or (getattr(args, "sharpen", None) or "none") != "none")
+
+
+def _auto_jxl_output(src: Path, args, single_file: bool):
+    """Where an auto run writes a JXL: the convert route's place for a
+    derivative (resize/sharpening decode and re-encode every JXL, a jbrd
+    archive too: cmd_auto, #663), else the place both routes agree on, else
+    the route its jbrd box picks — the box is read only when the two routes
+    would write different paths (a rename, a PNG)."""
+    on_convert = _output_on_route(src, args, False, single_file)
+    if _derivative_requested(args):
+        return on_convert
+    on_transcode = _output_on_route(src, args, True, single_file)
+    if str(on_transcode) == str(on_convert):
+        return on_transcode
+    return on_transcode if has_jbrd_box(src) else on_convert
+
+
 def _planned_output(src: Path, args, lossless: Optional[bool] = None):
     """Where a run with these arguments writes src's output, or None when
     modes 6/7 leave src out (outside the export marker or the mode-7
@@ -3774,25 +3838,27 @@ def _planned_output(src: Path, args, lossless: Optional[bool] = None):
     convert route (a re-encode: --rename-from applies) — what each cmd_*
     already knows. None, for a caller that does not (the wrapper): decided
     like main() routes the run (_lossless_route). A JXL of an auto run is
-    the one source its jbrd box decides, and the box is read only when the
-    two routes would write different paths (a rename, a PNG). The
-    resolvers' warnings are then logged twice: only the wrapper, whose
-    logger copy is silent, passes None.
+    the one source its jbrd box decides (_auto_jxl_output). The resolvers'
+    warnings are then logged twice: only the wrapper, whose logger copy is
+    silent, passes None.
 
     Needs args.input, args.output, args.mode, args.force_transcode,
     args.force_convert, args.decode, args.format, args.bit_depth,
-    args.output_name, args.output_suffix, args.rename_from and
-    args.rename_to; the marker and folder settings are this module's
-    globals."""
+    args.output_name, args.output_suffix, args.rename_from, args.rename_to
+    and the resize/sharpen flags; the marker and folder settings are this
+    module's globals."""
+    single_file = args.input.is_file()
     if lossless is None:
         lossless = _lossless_route(src, args)
-    if lossless is None:
-        on_transcode = _planned_output(src, args, True)
-        on_convert = _planned_output(src, args, False)
-        if str(on_transcode) == str(on_convert):
-            return on_transcode
-        lossless = has_jbrd_box(src) and not _is_derivative()
-    single_file = args.input.is_file()
+        if lossless is None:
+            return _auto_jxl_output(src, args, single_file)
+    return _output_on_route(src, args, lossless, single_file)
+
+
+def _output_on_route(src: Path, args, lossless: bool, single_file: bool):
+    """_planned_output on a known route (lossless: the bit-exact one), with
+    single_file (the input is a file) known: a planning loop asks it once,
+    not once per source (#665)."""
     _input_root = args.input.parent if single_file else args.input
     # Modes 6/7 anchor the export marker at or below the INPUT (#601, as the
     # encoder and the recompressor do), never at the output folder: given an
@@ -3819,42 +3885,77 @@ def _planned_output(src: Path, args, lossless: Optional[bool] = None):
                                   single_file=single_file)
 
 
-def _planned_sources(args, read_markers=True) -> list:
-    """The files a run with these arguments takes: main()'s routing
-    (determine_command, _route), the finders its command uses
-    (_transcode_sources, _convert_sources, _auto_sources — without the walks
-    that only feed a log line) and the modes 6/7 filter (_planned_output).
-    What the wrapper counts and scans before a run, asking this script
-    instead of copying its rules (refactor C1). A JXL of an auto run is
-    filtered without reading its jbrd box: both routes leave out the same
-    files. read_markers=False keeps the derivatives a decode leaves out in
-    modes 6/7 (#602) without reading every JXL's markers; the thumbnail
-    pages a resized/colour-converted run skips (#555) are never left out
-    here. Needs the arguments _planned_output reads."""
+def _planned_groups(args):
+    """main()'s routing (determine_command, _route) and the finders its
+    command uses (_transcode_sources, _convert_sources, _auto_sources —
+    without the walks that only feed a log line): (route, [(files,
+    lossless)]), lossless being the route of the group's files (True: the
+    bit-exact one; None: the JXLs of an auto run, which their jbrd box
+    decides). A FILE in modes 6/7 takes nothing: the run refuses it (exit 2,
+    _configure_run; #667)."""
+    if args.mode in (6, 7) and args.input.is_file():
+        return None, []
     cmd, auto_decode, _why = determine_command(args.input, args.force_transcode,
                                                args.force_convert)
     route, flag = _route(cmd, auto_decode, args)
     if route == "transcode":
         files, _root = _transcode_sources(args, flag)
-        groups = [(files, True)]
-    elif route == "convert":
+        return route, [(files, True)]
+    if route == "convert":
         files, _root, _direction = _convert_sources(
             args, "from_jxl" if flag else "to_jxl", announce=False)
-        groups = [(files, False)]
-    elif route == "auto":
+        return route, [(files, False)]
+    if route == "auto":
         jpeg_files, png_files, jxl_files = _auto_sources(args, announce=False)
-        groups = [(jpeg_files, True), (png_files, False), (jxl_files, False)]
-    else:
-        return []
+        return route, [(jpeg_files, True), (png_files, False), (jxl_files, None)]
+    return route, []
+
+
+def _planned_sources(args, read_markers=True) -> list:
+    """The files a run with these arguments takes (_planned_groups), after
+    the modes 6/7 filter: what the wrapper's file count asks, instead of
+    copying this script's rules (refactor C1). Only modes 6/7 leave a file
+    out, so only there is each file's place resolved (#665) — a JXL of an
+    auto run on the convert route, without reading its jbrd box: both routes
+    leave out the same files. read_markers=False keeps the derivatives a
+    decode leaves out in modes 6/7 (#602) without reading every JXL's
+    markers; the thumbnail pages a resized/colour-converted run skips (#555)
+    are never left out here. Needs the arguments _planned_output reads."""
+    route, groups = _planned_groups(args)
+    if args.mode not in (6, 7):
+        return [f for files, _lossless in groups for f in files]
+    single_file = args.input.is_file()
     pairs = []
     for files, lossless in groups:
         for f in files:
-            out = _planned_output(f, args, lossless)
+            out = _output_on_route(f, args, bool(lossless), single_file)
             if out is not None:
                 pairs.append((f, out))
-    if read_markers and route != "transcode" and not args.input.is_file():
+    if read_markers and route != "transcode" and not single_file:
         pairs = _drop_derivative_pairs(pairs, args.mode)
     return [f for f, _o in pairs]
+
+
+def _planned_pairs(args, read_markers=True) -> list:
+    """(source, output) for each file a run with these arguments takes: the
+    files of _planned_groups, each output resolved once, on its file's route
+    (an auto run's JXL: _auto_jxl_output), the files modes 6/7 leave out
+    dropped. What the wrapper's collision scan asks (refactor C1): one walk
+    and one resolution per file, where asking _planned_sources and then
+    _planned_output walked the tree's outputs two or three times (#665).
+    read_markers as in _planned_sources."""
+    route, groups = _planned_groups(args)
+    single_file = args.input.is_file()
+    pairs = []
+    for files, lossless in groups:
+        for f in files:
+            out = (_auto_jxl_output(f, args, single_file) if lossless is None
+                   else _output_on_route(f, args, lossless, single_file))
+            if out is not None:
+                pairs.append((f, out))
+    if read_markers and route != "transcode" and not single_file:
+        pairs = _drop_derivative_pairs(pairs, args.mode)
+    return pairs
 
 
 def _transcode_sources(args, decode):

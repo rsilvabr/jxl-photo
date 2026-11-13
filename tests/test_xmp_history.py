@@ -342,6 +342,45 @@ def test_h10_transcoder_decode_converted_and_derived(tmp_path):
     assert h[1]["Action"] == "derived", h[1]
     assert h[1]["Parameters"] == (
         "jxl_jpeg_transcoder: from image/jxl to image/jpeg")
+    # The derivative names the djxl that decoded it, like any decode (the
+    # v2.30.0 review's M21: this entry's agent was never checked).
+    assert h[1]["SoftwareAgent"] == _agent("djxl"), h[1]
+
+
+@real
+@pytest.mark.parametrize("case", ["jpeg to jxl", "jxl to jpeg", "jxl to resized jpeg"])
+def test_h12_transcoder_names_the_codec_that_made_each_output(tmp_path, monkeypatch, case):
+    """Each History call of the transcoder names the codec that made the
+    file: cjxl for a JXL written, djxl for a decode. On a machine whose cjxl
+    and djxl are the same libjxl version the agent's text cannot tell them
+    apart (the v2.30.0 review's M21/M22 survived), so the calls are read
+    in-process, the conversion itself real."""
+    if case == "jpeg to jxl":
+        src = tmp_path / "photo.jpg"
+        _jpeg_with_xmp(src)
+        argv = [src, "--force-convert", "--distance", "1"]
+        want = [("converted", "cjxl")]
+    else:
+        src = _encode_master(tmp_path)
+        argv = [src, "--force-convert", "--format", "jpeg"]
+        want = [("converted", "djxl")]
+        if case == "jxl to resized jpeg":
+            argv += ["--resize-long", "32", "--mode", "1"]
+            want = [("derived", "djxl")]
+    seen = []
+    history_args = tr._history_args
+
+    def recorded(*a, **k):
+        seen.append((a[0], k.get("codec")))
+        return history_args(*a, **k)
+
+    monkeypatch.setattr(tr, "_history_args", recorded)
+    monkeypatch.setattr(sys, "argv", ["jxl_jpeg_transcoder.py"] + [str(a) for a in argv])
+    try:
+        tr.main()
+    except SystemExit as e:
+        assert not e.code, e.code
+    assert seen == want, seen
 
 
 _REC_IN_PLACE = ["--distance", "2", "--no-preflight", "--no-keep-smaller",

@@ -2956,7 +2956,8 @@ class _CmdCtx:
     """What build_child_cmd's rules look at, computed once per command."""
 
     def __init__(self, origin, dest, source, dest_path, mode, workers,
-                 workflow, advanced, manifest, config_marker):
+                 workflow, advanced, manifest, config_marker, quiet=False):
+        self.quiet = quiet          # the plan's argv: build it, say nothing
         self.origin, self.dest = origin, dest
         self.direction = _direction(origin, dest)
         self.module = DIRECTION_MODULE[self.direction]
@@ -3421,8 +3422,11 @@ def _dest_is_source_file(source, dest_path, mode) -> bool:
     """A file Source whose Destination cell is the file itself (how the
     manifest loader normalizes an empty cell): it must NOT be sent as the
     output positional, or the child reads it as an output DIRECTORY named
-    after the file. Only mode 0 can carry it."""
-    if not dest_path or mode != 0:
+    after the file. Modes 0 and 2 are the ones whose children honour an
+    output positional: in mode 2 every child failed such a row with "1
+    errors" and wrote nothing (#666); without it, each writes where its mode
+    2 puts a single file."""
+    if not dest_path or mode not in (0, 2):
         return False
     try:
         src_p = Path(source)
@@ -3434,35 +3438,40 @@ def _dest_is_source_file(source, dest_path, mode) -> bool:
     return False
 
 
-def _child_plan_args(child, origin: str, dest: str, source, dest_path, mode: int,
-                     conversion_type: Optional[str] = None, rename_from: str = '',
-                     rename_to: str = '', manifest: bool = True):
-    """The child's own parse of the command line one run gives it — the part
-    that decides which files it takes and where each output goes, by
-    build_child_cmd's rules: the input, the output positional
-    (_dest_is_source_file), --mode, the transcoder's conversion and format
-    flags, and the rename where it reaches the child (_rename_reaches_child).
-    Every other flag keeps the child's default. The marker, subfolder, export
-    folder and exclusions are the child's module globals, which
-    _with_child_marker sets. What the wrapper hands the child's
-    _planned_sources/_planned_output (refactor C1). None when the child's
-    parser refuses that command line: such a run writes nothing."""
-    tokens = [str(source)]
-    if dest_path and not _dest_is_source_file(source, dest_path, mode):
-        tokens.append(str(dest_path))
-    tokens += ['--mode', str(mode)]
-    direction = _direction(origin, dest)
-    if direction in _TRANSCODER_DIRECTIONS:
-        tokens += list(_TRANSCODER_CONVERSION_FLAGS.get(conversion_type or '', ()))
-        tokens += _transcoder_format_flags(dest)
-    if rename_from and _rename_reaches_child(
-            direction, _is_decode_lossy(origin, dest, conversion_type or ''), manifest):
-        tokens += ['--rename-from', rename_from, '--rename-to', rename_to or '']
+def _child_plan_args(child, cmd: List[str]):
+    """The child's own parse of the command line one run gives it: `cmd` is
+    that run's argv as build_child_cmd builds it (quiet), the interpreter
+    and the script left out. So the plan reads every flag the run gets —
+    the input, the output positional, --mode, the transcoder's conversion
+    and format flags, the rename, the resize and sharpening (#663),
+    --output-name, the marker and folder flags and the expert flags (#664)
+    — and cannot leave one out. What the wrapper hands the child's
+    _planned_sources/_planned_pairs (refactor C1), inside _with_child_marker
+    (_child_plan_globals). None when the child's parser refuses that
+    command line: such a run writes nothing."""
     try:
         with redirect_stderr(io.StringIO()):
-            return child.build_parser().parse_args(tokens)
+            return child.build_parser().parse_args([str(t) for t in cmd[2:]])
     except SystemExit:
         return None
+
+
+def _child_plan_globals(ns, direction: str) -> Tuple:
+    """(marker, subfolder, modes 6/7 output folder, exclusions) as the run's
+    own parse gives them (_child_plan_args): what the child's main() copies
+    into the module globals its finders and resolvers read, for
+    _with_child_marker. Read from the parse, so a marker or a folder set in
+    the expert flags moves the plan as it moves the run (#664). The output
+    folder is the flag of the run's direction: --export-jpeg-folder for a
+    JXL -> JPEG/PNG run, --export-jxl-folder elsewhere (a child without the
+    flag: None, its setting stays)."""
+    flag = ('export_jpeg_folder' if direction in ('jxl2jpeg', 'jxl2png')
+            else 'export_jxl_folder')
+    folder = getattr(ns, flag, None)
+    if isinstance(folder, str):
+        folder = folder.strip()        # as the children strip it
+    return (getattr(ns, 'export_marker', None), getattr(ns, 'export_subfolder', None),
+            folder or None, getattr(ns, 'exclude_folders', None) or None)
 
 
 def _is_origin_file(f: Path, exts) -> bool:
@@ -7185,37 +7194,30 @@ class InteractiveMenu:
                 it = root.rglob('*') if mode in _RECURSIVE_MANIFEST_MODES else root.glob('*')
                 return len([f for f in it if f.suffix.lower() in exts and f.is_file()])
 
-            _mc = workflow.get('mode_config', {}) or {}
-            marker = _mc.get('export_marker') or self.config.config.export_marker
-            # The subfolder matters as much as the marker: mode 7 filters on it,
-            # and leaving it at the script default made this count report every
-            # subfolder under the marker for a run that converts exactly one of
-            # them — not merely a bigger number, a DIFFERENT set of files, under
-            # the panel whose visible count is the thing that catches a wrong
-            # folder. The cmd builder passes it as --export-subfolder; mirror it.
-            subfolder = _mc.get('export_subfolder')
-            # The modes 6/7 output folder moves the destination (and, for the
-            # recompressor, the folder its recursive scans must skip): the
-            # child's own finders read it as a module global.
-            jxl_folder = _mc.get('export_jxl_folder')
-
+            # The run's own command line, as the child parses it: the mode,
+            # the transcoder's conversion flags (they decide its command),
+            # the marker, the mode-7 subfolder (a different FILE SET, under
+            # the panel whose visible count is what catches a wrong folder),
+            # the modes 6/7 output folder (the recompressor's scans skip it),
+            # the exclusion (#297's class) and the expert flags (#664) — all
+            # of it from build_child_cmd, the builder of the run itself.
+            try:
+                cmd = self.build_child_cmd(
+                    str(SCRIPT_DIR / f"{_child_module(origin, dest)}.py"), origin, dest,
+                    str(root),
+                    (workflow.get('mode_config') or {}).get('output_dir') if mode == 2 else None,
+                    mode, workflow.get('workers') or 1, workflow,
+                    workflow.get('advanced_options') or {}, manifest=False, quiet=True)
+            except Exception:
+                return -1      # a run the builder cannot describe yet: no count
+            args = _child_plan_args(child, cmd)
+            if args is None:
+                return -1      # the child refuses this command line
             _was_disabled = child.logger.disabled
             child.logger.disabled = True        # its finders log; this is a preview
             try:
-                # The exclusion too — the child's finders filter through
-                # their own EXCLUDE_FOLDERS global, which _with_child_marker
-                # now mirrors. Without it the delete panel would count a
-                # set the run would skip (bug #297's class again).
-                with _with_child_marker(child, marker, subfolder, jxl_folder,
-                                        exclude_folders=workflow.get('exclude_folders')):
-                    # The run's command line as the child parses it (the
-                    # transcoder's conversion and format flags decide its
-                    # command); no output positional, as always here.
-                    args = _child_plan_args(child, origin, dest, root, None, mode,
-                                            conversion_type=workflow.get('conversion_type'),
-                                            manifest=False)
-                    if args is None:
-                        return -1  # the child refuses this command line
+                with _with_child_marker(child, *_child_plan_globals(
+                        args, _direction(origin, dest))):
                     # read_markers=False: the review redraws this count on
                     # every turn, and the recompressor's modes 6/7 would read
                     # the derivative markers of every JXL with exiftool each
@@ -8446,6 +8448,7 @@ class InteractiveMenu:
                 cross_sink=cross_out_folders,
                 conversion_type=workflow.get('conversion_type'),
                 page_options=(workflow.get('advanced_options') or {}),
+                row_effs=_row_effs,
             )
         if collisions:
             self._print_error(
@@ -8881,7 +8884,8 @@ class InteractiveMenu:
                                     cross_sink: Optional[Dict[int, Set[str]]] = None,
                                     row_excludes: Optional[List[Optional[str]]] = None,
                                     conversion_type: str = None,
-                                    page_options: Optional[Dict] = None) -> List:
+                                    page_options: Optional[Dict] = None,
+                                    row_effs: Optional[List[Tuple[Dict, Dict]]] = None) -> List:
         """Find files from DIFFERENT manifest entries that would be written to
         the same output file.
 
@@ -8894,13 +8898,13 @@ class InteractiveMenu:
         skips (or overwrites) the other while reporting 0 errors.
 
         The CHILD SCRIPT answers, per row (imported lazily, only when
-        origin/dest are known): which files the row's run takes
-        (_planned_sources) and where each output goes (_planned_output), given
-        the command line that row's run gets (_child_plan_args) — the output
-        positional, the mode, the rename where it reaches the child, the
-        transcoder's conversion flags. Nothing of its rules is copied here
-        (refactor C1). Two blind spots of the old flat-Destination scan
-        motivated asking the child at all:
+        origin/dest are known): which files the row's run takes and where each
+        output goes (_planned_pairs), given the command line that row's run
+        gets — build_child_cmd's own argv for the row, parsed by the child
+        (_child_plan_args): every flag the run gets reaches the plan, the
+        resize, --output-name and the expert flags included (#663, #664).
+        Nothing of its rules is copied here (refactor C1). Two blind spots of
+        the old flat-Destination scan motivated asking the child at all:
 
           * Mode 2 is recursive-FLAT: every file under the source lands in the
             Destination, but the old scan only looked at direct children, so
@@ -8970,6 +8974,13 @@ class InteractiveMenu:
         base name are probed, so the scan reads a TIFF header only for
         those pairs.
 
+        `row_effs` (optional): one (workflow, advanced_options) per entry,
+        aligned with manifest_entries — what each row's run is built from
+        (_row_effective_options), so the plan's argv is the run's. Without
+        it (a caller of the older shape), each row's workflow is made from
+        the arguments above: the conversion type, the row's marker, subfolder,
+        folder, exclusion and rename.
+
         Returns a list of (file_a, file_b, dest_folder) tuples.
         """
 
@@ -9031,12 +9042,34 @@ class InteractiveMenu:
                 _excl_names = tuple(n.strip().lower() for n in _excl_eff.split(';')
                                     ) if _excl_eff else ()
                 _excl_names = tuple(n for n in _excl_names if n)
-                with (_with_child_marker(_child, _m, _s, _j, _excl_eff)
-                      if _child is not None else nullcontext()):
-                    # The row's own RenameFrom/RenameTo, when the manifest carries
-                    # the columns; the run-wide pair is the fallback.
-                    rf, rt = (row_renames[ei] if row_renames is not None
-                              else (rename_from, rename_to))
+                # The row's own RenameFrom/RenameTo, when the manifest carries
+                # the columns; the run-wide pair is the fallback.
+                rf, rt = (row_renames[ei] if row_renames is not None
+                          else (rename_from, rename_to))
+                # The row's run as the child parses it: build_child_cmd's argv
+                # for this row (quiet), the builder of the run itself — so
+                # the plan gets every flag the run gets (#663, #664). Its
+                # marker, folders and exclusion become the child's globals
+                # for the walk (_child_plan_globals).
+                ns = None
+                if _child is not None and mode is not None:
+                    if row_effs is not None:
+                        _wf_row, _adv_row = row_effs[ei]
+                    else:
+                        _wf_row = {'origin_format': origin, 'dest_format': dest,
+                                   'conversion_type': conversion_type,
+                                   'mode_config': {'export_marker': _m,
+                                                   'export_subfolder': _s,
+                                                   'export_jxl_folder': _j},
+                                   'exclude_folders': _excl_eff}
+                        _adv_row = {'rename_from': rf, 'rename_to': rt} if rf else {}
+                    ns = _child_plan_args(_child, self.build_child_cmd(
+                        str(SCRIPT_DIR / f"{_child.__name__}.py"), origin, dest,
+                        str(source), dest_path, mode, 1, _wf_row, _adv_row,
+                        manifest=True, quiet=True))
+                with (_with_child_marker(_child, *_child_plan_globals(
+                        ns, _direction(origin, dest)))
+                      if ns is not None else nullcontext()):
                     # Per-entry output-tree recording for the cross-entry guard
                     # (only when a sink was handed in).
                     _entry_outs = (cross_sink.setdefault(ei, set())
@@ -9080,17 +9113,14 @@ class InteractiveMenu:
                                    for f, o, el in outputs]
                     else:
                         # The child answers WHICH files this row's run takes
-                        # (_planned_sources: its own finders, exclusion and
-                        # skips) and WHERE each output goes (_planned_output:
-                        # the mode's folder, the rename, the jbrd recovery's
-                        # original name), given the command line the row's
-                        # run gets (_child_plan_args). Nothing of those rules
+                        # and WHERE each output goes (_planned_pairs: its own
+                        # finders, exclusion and skips; the mode's folder, the
+                        # rename, the jbrd recovery's original name, a
+                        # derivative's re-encode), given the command line the
+                        # row's run gets (ns, above). Nothing of those rules
                         # is copied here (refactor C1); the derivatives the
                         # child leaves out are checked below, only where files
                         # collide.
-                        ns = _child_plan_args(_child, origin, dest, src_root, dest_path,
-                                              mode, conversion_type=conversion_type,
-                                              rename_from=rf, rename_to=rt)
                         if ns is None:
                             continue            # the child refuses this command line
                         if not _file_row:
@@ -9098,7 +9128,11 @@ class InteractiveMenu:
                             # glob + per-file stat + resolver per source file) — say so.
                             self.ui.markup(f"[grey70]Collision check: scanning {_rich_safe(src_root)} ...[/grey70]", f"Collision check: scanning {src_root} ...")
                         try:
-                            files = sorted(_child._planned_sources(ns, read_markers=False))
+                            # One walk, one place per file (#665); None-placed
+                            # files (outside the export marker in modes 6/7)
+                            # are not in the list.
+                            pairs = sorted(_child._planned_pairs(ns, read_markers=False),
+                                           key=lambda p: p[0])
                         except (OSError, SystemExit):
                             continue
                         # Modes 6/7 with no explicit subfolder: the child leaves
@@ -9110,16 +9144,12 @@ class InteractiveMenu:
                                     else getattr(_child, 'EXPORT_JXL_SUBFOLDER', ''))
                         _derived_skip = (None if _file_row else bool(
                             _derived_capable and (mode == 6 or (mode == 7 and not _sub_now))))
-                        outputs = []
-                        for f in files:
-                            if not _file_row and not _is_origin_file(f, origin_exts):
-                                continue
-                            out = _child._planned_output(f, ns)
-                            # None for files the child skips (e.g. outside the
-                            # export marker in modes 6/7).
-                            if out is not None:
-                                outputs.append((f, out.parent, os.path.normcase(out.stem),
-                                                _derived_skip))
+                        # A folder row counts the files of the origin format;
+                        # the child's finders give files only, so the
+                        # extension says it without another stat per file.
+                        outputs = [(f, out.parent, os.path.normcase(out.stem), _derived_skip)
+                                   for f, out in pairs
+                                   if _file_row or f.suffix.lower() in origin_exts]
                     for f, out_folder, stem, el in outputs:
                         if _entry_outs is not None:
                             _entry_outs.add(os.path.normcase(
@@ -9330,7 +9360,7 @@ class InteractiveMenu:
         return found
 
     def _append_provenance_flags(self, cmd: List, advanced: Dict,
-                                 origin: str, dest: str) -> None:
+                                 origin: str, dest: str, quiet: bool = False) -> None:
         """Emit --provenance (and --no-adopt-scan) for the child about to run.
 
         One place instead of six: the six emission sites had already drifted —
@@ -9354,7 +9384,8 @@ class InteractiveMenu:
                    f"This {origin.upper()} -> {dest.upper()} run uses the strict 'path' "
                    f"check instead: outputs with no record are REFUSED, not adopted, and "
                    f"nothing is deleted for them.")
-            self.ui.markup(f"[yellow]{_rich_safe(msg)}[/yellow]", f"WARNING: {msg}")
+            if not quiet:
+                self.ui.markup(f"[yellow]{_rich_safe(msg)}[/yellow]", f"WARNING: {msg}")
             pv = 'path'
         cmd.extend(['--provenance', pv])
         # Only the encoder has this flag, and it is inert without adopt.
@@ -9392,9 +9423,11 @@ class InteractiveMenu:
 
     def build_child_cmd(self, script: str, origin: str, dest: str, source: str,
                         dest_path: Optional[str], mode: int, workers: int,
-                        workflow: Dict, advanced: Dict, *, manifest: bool) -> List:
+                        workflow: Dict, advanced: Dict, *, manifest: bool,
+                        quiet: bool = False) -> List:
         """The child's argv for one run — the direct run (execute_workflow)
-        and every manifest entry (_build_manifest_entry_cmd) alike.
+        and every manifest entry (_build_manifest_entry_cmd) alike, and the
+        plan of that run the wrapper asks the child about (_child_plan_args).
 
         Every flag comes from REGISTRY: the simple ones through _emit_opt, the
         ones with a rule through the _policy_* methods (and the two older
@@ -9404,9 +9437,10 @@ class InteractiveMenu:
         selects the manifest-only rules: --summary-json, the at-most-once
         exclude warning, the derivative row's suppressed delete and the
         transcoder's rename on its lossy decode (the direct wizard refuses
-        those combinations before it gets here)."""
+        those combinations before it gets here). `quiet`: the same argv
+        without the notes some rules print (the plan's; the run prints them)."""
         ctx = _CmdCtx(origin, dest, source, dest_path, mode, workers, workflow,
-                      advanced, manifest, self.config.config.export_marker)
+                      advanced, manifest, self.config.config.export_marker, quiet)
         cmd = [sys.executable, script, source]
         if dest_path and not _dest_is_source_file(source, dest_path, mode):
             cmd.append(dest_path)
@@ -9420,7 +9454,7 @@ class InteractiveMenu:
         self._policy_conversion(cmd, ctx)
         self._policy_rename(cmd, ctx)
         self._policy_delete(cmd, ctx)
-        self._append_provenance_flags(cmd, ctx.advanced, origin, dest)
+        self._append_provenance_flags(cmd, ctx.advanced, origin, dest, quiet=quiet)
         self._append_overwrite_guard_flag(cmd, ctx.advanced)
         self._policy_format(cmd, ctx)
         _append_expert_flags(cmd, workflow.get('expert_flags'), origin, dest)
@@ -9435,7 +9469,7 @@ class InteractiveMenu:
             return
         if ctx.direction in ("tiff2jxl", "jxl2tiff"):
             cmd.extend(['--exclude-folders', excl])
-        else:
+        elif not ctx.quiet:
             self._warn_exclude_folders_unsupported(ctx.origin, ctx.dest, excl,
                                                    at_most_once=ctx.manifest)
 
@@ -9474,7 +9508,7 @@ class InteractiveMenu:
             cmd.append('--delete-confirm-off')
         delete = bool(adv.get('delete_source'))
         if delete and ctx.manifest and ctx.direction in _TRANSCODER_DIRECTIONS:
-            if ctx.workflow.get('icc_profile') and not ctx.derivative:
+            if ctx.workflow.get('icc_profile') and not ctx.derivative and not ctx.quiet:
                 _note = ("Colour conversion (--icc-profile) writes a DERIVATIVE: the "
                          "originals are NOT deleted on this run.")
                 self.ui.markup(f"[yellow]{_rich_safe(_note)}[/yellow]", _note)
@@ -9482,8 +9516,9 @@ class InteractiveMenu:
             _never = _lossy_decode_never_deletes(ctx.workflow) if delete else None
             if _never:
                 # T-B: the row converts, its sources stay (the child would exit 2).
-                _note = f"No delete for this row: {_never}."
-                self.ui.markup(f"[yellow]{_rich_safe(_note)}[/yellow]", _note)
+                if not ctx.quiet:
+                    _note = f"No delete for this row: {_never}."
+                    self.ui.markup(f"[yellow]{_rich_safe(_note)}[/yellow]", _note)
                 delete = False
         if not delete:
             return
@@ -10481,10 +10516,14 @@ def _update_repo() -> str:
 
 
 def _version_key(text: Optional[str]):
-    """(major, minor, patch, final) of "v2.22.0", "2.22.0_beta1" or
-    "v2.22.0-exe1" (the exe's package revision is ignored: exe2 of the same
-    release is not news here), or None. A beta sorts before its release."""
-    m = re.match(r"^v?(\d+)\.(\d+)\.(\d+)(_beta\d+)?(?:-exe\d+)?$", (text or "").strip())
+    """(major, minor, patch, final) of "v2.22.0", "2.30.1-rc1" (a test
+    release of 2.30.1), "2.22.0_beta1" (the test releases' name until
+    v2.30.0) or "v2.22.0-exe1" (the exe's package revision is ignored: exe2
+    of the same release is not news here), or None. A test release sorts
+    before its release: a copy running 2.30.1-rc2 is told when 2.30.1 is out
+    (GitHub's "latest" never names a test release itself)."""
+    m = re.match(r"^v?(\d+)\.(\d+)\.(\d+)(_beta\d+|-rc\d+)?(?:-exe\d+)?$",
+                 (text or "").strip())
     if not m:
         return None
     return (int(m.group(1)), int(m.group(2)), int(m.group(3)), 0 if m.group(4) else 1)

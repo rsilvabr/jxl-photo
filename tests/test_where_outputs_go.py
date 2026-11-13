@@ -8,8 +8,13 @@ run takes (_planned_sources) and where each output goes (_planned_output).
 These are the cases where the copy disagreed with the script (#655–#659), and
 the script bug the comparison found (#660: the decoder and the transcoder
 anchored the export marker of modes 6/7 on the OUTPUT folder). Every test
-works in a folder with Japanese, [ ], a space and `100%off %d`, and each one
-failed on v2.30.0_beta1.
+works in a folder with Japanese, [ ], a space and `100%off %d`. Each one
+failed on v2.30.0_beta1 except the two controls
+(test_the_recompressors_rename_still_collides, the plain cases of
+test_the_transcoders_answer_is_its_runs_plan) and
+test_the_scan_sees_the_decoders_place, which held there already; the
+encoder's and the recompressor's anchor tests guard the #660 class in the
+two scripts that never had it (the v2.30.0 review's mutant M06).
 """
 import os
 import shutil
@@ -222,6 +227,44 @@ def test_decoder_anchors_the_marker_on_the_input_not_the_output(root, tmp_path):
     assert any(want in ln for ln in lines), lines
 
 
+_REAL_CODECS = all(shutil.which(t) for t in ("cjxl", "exiftool"))
+
+
+@pytest.mark.skipif(not _REAL_CODECS, reason="needs cjxl and exiftool")
+@pytest.mark.parametrize("script,subfolder,name", [
+    ("jxl_tiff_encoder.py", "TIFF16", "DSC 0001 (2).tif"),
+    ("jxl_recompressor.py", "16B_JXL", "DSC 0001 (2).jxl"),
+])
+def test_encoder_and_recompressor_anchor_the_marker_on_the_input(root, tmp_path, script,
+                                                                  subfolder, name):
+    """#660's class in the two scripts that never had it (the v2.30.0
+    review's M06): an explicit output folder in mode 6 below a
+    'Lightroom_Export' still puts each output next to the library's own
+    marker."""
+    import numpy as np
+    import tifffile
+    sys.path.insert(0, str(REPO))
+    import jxl_recompressor as rec
+    import jxl_tiff_encoder as enc
+    lib = root / "Lightroom_Export" / "lib [2025]"
+    src = lib / "2025_EXPORT" / subfolder / name
+    src.parent.mkdir(parents=True)
+    arr = (np.arange(24 * 32 * 3, dtype=np.uint32) % 65535).astype(np.uint16)
+    tif = src if src.suffix == ".tif" else tmp_path / "a.tif"
+    tifffile.imwrite(str(tif), arr.reshape(24, 32, 3), photometric="rgb")
+    if src.suffix == ".jxl":
+        png = tmp_path / "a.png"
+        from PIL import Image
+        Image.fromarray((arr.reshape(24, 32, 3) // 257).astype(np.uint8)).save(png)
+        subprocess.run(["cjxl", str(png), str(src), "-d", "1"], check=True,
+                       capture_output=True)
+    folder = (enc if script == "jxl_tiff_encoder.py" else rec).EXPORT_JXL_FOLDER
+    lines = _dry_run_lines(script, [lib, root / "out [x]", "--mode", "6", "--dry-run"],
+                           tmp_path / "logs")
+    want = str(lib / "2025_EXPORT" / folder / src.with_suffix(".jxl").name)
+    assert any(want in ln for ln in lines), (want, lines)
+
+
 @pytest.mark.parametrize("flags,src_name,out_folder", [
     (["--force-transcode"], "DSC 0001 (2).jpg", "JXL_jpeg"),
     (["--force-convert", "--from-jpeg"], "DSC 0001 (2).jpg", "JXL_jpeg"),
@@ -249,6 +292,12 @@ PLAIN_JXL = _SIG + b"\x00\x00\x00\x0ajxlc\xff\x0a"
     ["--mode", "1", "--rename-from", "IMG_A", "--rename-to", "IMG_Z"],
     ["--mode", "3", "--format", "png", "--rename-from", "IMG_A", "--rename-to", "IMG_Z"],
     ["--mode", "2", "OUT", "--format", "jpeg", "--rename-from", "IMG_A", "--rename-to", "IMG_Z"],
+    # #663: a resize re-encodes the jbrd archive too — renamed, like the rest.
+    ["--mode", "2", "OUT", "--resize-long", "16", "--rename-from", "IMG_A",
+     "--rename-to", "IMG_Z"],
+    ["--mode", "1", "--sharpen", "screen", "--rename-from", "IMG_A", "--rename-to", "IMG_Z"],
+    # An auto run with --decode is the lossless recovery: names kept (M28).
+    ["--mode", "1", "--decode", "--rename-from", "IMG_A", "--rename-to", "IMG_Z"],
 ])
 def test_the_transcoders_answer_is_its_runs_plan(root, tmp_path, extra):
     """The wrapper asks the transcoder's _planned_output without knowing a
@@ -271,6 +320,24 @@ def test_the_transcoders_answer_is_its_runs_plan(root, tmp_path, extra):
     ns = tr.build_parser().parse_args(argv)
     for f in sorted(src.iterdir()):
         assert str(tr._planned_output(f, ns)) == planned[f.name], (f.name, planned)
+
+
+def test_an_auto_run_with_decode_is_the_lossless_recovery(root):
+    """An auto run (a folder) with --decode is the bit-exact recovery
+    (cmd_transcode), never the lossy convert: every JXL keeps its own name, a
+    rename never applies (the v2.30.0 review's M28 — main() and the plan read
+    the same _route, so only an absolute answer can catch it)."""
+    sys.path.insert(0, str(REPO))
+    import jxl_jpeg_transcoder as tr
+    src = root / "in [a]"
+    _touch(src / "IMG_A one [jbrd].jxl", content=JBRD_JXL)
+    _touch(src / "IMG_A two plain.jxl", content=PLAIN_JXL)
+    ns = tr.build_parser().parse_args([str(src), "--mode", "1", "--decode", "--from-jxl",
+                                       "--rename-from", "IMG_A", "--rename-to", "IMG_Z"])
+    assert tr._route("auto", False, ns) == ("transcode", True)
+    for f in sorted(src.iterdir()):
+        out = tr._planned_output(f, ns)
+        assert out == f.parent / tr.RECOVERED_JPEG_FOLDER / f.with_suffix(".jpg").name, out
 
 
 def test_the_scan_sees_the_decoders_place(menu, root):

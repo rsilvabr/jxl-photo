@@ -6615,6 +6615,18 @@ def _planned_sources(args, read_markers=True) -> list:
     return list(_find_sources(args)[0])
 
 
+def _planned_pairs(args, read_markers=True) -> list:
+    """(TIFF, its main JXL) for each TIFF _planned_sources gives, the ones
+    the mode leaves out dropped: what the wrapper's collision scan asks
+    (refactor C1). The pages of a split TIFF are the scan's own probe."""
+    pairs = []
+    for t in _planned_sources(args, read_markers):
+        out = _planned_output(t, args)
+        if out is not None:
+            pairs.append((t, out))
+    return pairs
+
+
 def _guard_existing_outputs(args, all_items, _restamped, failed_files):
     """The guard over outputs that already exist (provenance, overwrite, the
     strict guard of a run that collapses folders), moved out of main()
