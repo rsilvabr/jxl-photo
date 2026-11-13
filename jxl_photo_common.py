@@ -1885,6 +1885,88 @@ def setup_logger(g):
     return log_file
 
 
+# === JXL finders of the decoder and the recompressor ===
+
+
+def _iter_jxls(g, paths, root=None):
+    """The .jxl files among `paths` (each real file once, sorted), with the scan
+    progress. A script that has EXCLUDE_FOLDERS (the decoder) leaves out the
+    files below those folders and says how many; one without it (the
+    recompressor) filters nothing."""
+    exclude = _script_get(g, "EXCLUDE_FOLDERS", None)
+    seen = set()
+    files = []
+    excluded = 0
+    _scan = g._scan_state(root)
+    for f in paths:
+        g._scan_tick(_scan, len(files))
+        if f.suffix.lower() not in g.JXL_EXTS:
+            continue
+        try:
+            if not f.is_file():
+                continue
+            key = f.resolve()
+        except OSError:
+            continue
+        if exclude is not None and _path_excluded_below_root(f, root, exclude):
+            excluded += 1
+            continue
+        if key not in seen:
+            seen.add(key)
+            files.append(f)
+    g._scan_done(_scan, len(files))
+    if excluded > 0:
+        g.logger.info(f"Excluded {excluded} file(s) under: {', '.join(exclude)}")
+    return sorted(files)
+
+
+def find_jxls_mode6(g, input_path):
+    """Mode 6: only JXLs inside folders containing EXPORT_MARKER (any subfolder).
+    The recursive walk is the script's own (the recompressor skips its own
+    output folders there)."""
+    all_jxls = g.find_jxls_recursive(input_path)
+    filtered = []
+    marker_lower = g.EXPORT_MARKER.lower()
+    skipped_other = 0
+    for j in all_jxls:
+        # Match only directory parts; the filename itself is not an anchor
+        parts_str = list(j.parts[:-1])
+        export_idx = _marker_anchor_index(parts_str, input_path, marker_lower)
+        if export_idx is not None:
+            below = [p.lower() for p in parts_str[export_idx + 1:]]
+            if g._skip_other_tool_output(below, honor_requested_subfolder=False):
+                skipped_other += 1
+                continue
+            filtered.append(j)
+    g._log_other_tool_skips(skipped_other)
+    return sorted(filtered)
+
+
+def find_jxls_mode7(g, input_path):
+    """Mode 7: only JXLs inside EXPORT_MARKER/EXPORT_JXL_SUBFOLDER."""
+    all_jxls = g.find_jxls_recursive(input_path)
+    filtered = []
+    marker_lower = g.EXPORT_MARKER.lower()
+    subfolder_lower = g.EXPORT_JXL_SUBFOLDER.lower()
+    skipped_other = 0
+    for j in all_jxls:
+        # Match only directory parts; the filename itself is not an anchor
+        parts_str = list(j.parts[:-1])
+        export_idx = _marker_anchor_index(parts_str, input_path, marker_lower)
+        if export_idx is None:
+            continue
+        if g._skip_other_tool_output([p.lower() for p in parts_str[export_idx + 1:]]):
+            skipped_other += 1
+            continue
+        if g.EXPORT_JXL_SUBFOLDER:
+            if export_idx + 1 < len(parts_str) and parts_str[export_idx + 1].lower() == subfolder_lower:
+                filtered.append(j)
+        else:
+            filtered.append(j)
+    g._log_other_tool_skips(skipped_other)
+    return sorted(filtered)
+
+
 # === Settings overlay ===
 
 

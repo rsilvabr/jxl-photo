@@ -2157,25 +2157,7 @@ def _is_own_output_path(parts_lower) -> bool:
                for p in parts_lower)
 
 
-def _iter_jxls(paths, root=None):
-    seen = set()
-    files = []
-    _scan = _scan_state(root)
-    for f in paths:
-        _scan_tick(_scan, len(files))
-        if f.suffix.lower() not in JXL_EXTS:
-            continue
-        try:
-            if not f.is_file():
-                continue
-            key = f.resolve()
-        except OSError:
-            continue
-        if key not in seen:
-            seen.add(key)
-            files.append(f)
-    _scan_done(_scan, len(files))
-    return sorted(files)
+def _iter_jxls(*a, **k): return _common._iter_jxls(_G, *a, **k)
 
 
 def find_files_mode0(input_path: Path):
@@ -2241,49 +2223,10 @@ def _skip_other_tool_output(*a, **k): return _common._skip_other_tool_output(_G,
 def _log_other_tool_skips(*a, **k): return _common._log_other_tool_skips(_G, *a, **k)
 
 
-def find_jxls_mode6(input_path: Path):
-    """Mode 6: only JXLs inside folders containing EXPORT_MARKER (any subfolder)."""
-    all_jxls = find_jxls_recursive(input_path)
-    filtered = []
-    marker_lower = EXPORT_MARKER.lower()
-    skipped_other = 0
-    for t in all_jxls:
-        # Match only directory parts; the filename itself is not an anchor
-        parts_str = list(t.parts[:-1])
-        export_idx = _marker_anchor_index(parts_str, input_path, marker_lower)
-        if export_idx is not None:
-            below = [p.lower() for p in parts_str[export_idx + 1:]]
-            if _skip_other_tool_output(below, honor_requested_subfolder=False):
-                skipped_other += 1
-                continue
-            filtered.append(t)
-    _log_other_tool_skips(skipped_other)
-    return sorted(filtered)
+def find_jxls_mode6(*a, **k): return _common.find_jxls_mode6(_G, *a, **k)
 
 
-def find_jxls_mode7(input_path: Path):
-    """Mode 7: only JXLs inside EXPORT_MARKER/EXPORT_JXL_SUBFOLDER."""
-    all_jxls = find_jxls_recursive(input_path)
-    filtered = []
-    marker_lower = EXPORT_MARKER.lower()
-    subfolder_lower = EXPORT_JXL_SUBFOLDER.lower()
-    skipped_other = 0
-    for t in all_jxls:
-        # Match only directory parts; the filename itself is not an anchor
-        parts_str = list(t.parts[:-1])
-        export_idx = _marker_anchor_index(parts_str, input_path, marker_lower)
-        if export_idx is None:
-            continue
-        if _skip_other_tool_output([p.lower() for p in parts_str[export_idx + 1:]]):
-            skipped_other += 1
-            continue
-        if EXPORT_JXL_SUBFOLDER:
-            if export_idx + 1 < len(parts_str) and parts_str[export_idx + 1].lower() == subfolder_lower:
-                filtered.append(t)
-        else:
-            filtered.append(t)
-    _log_other_tool_skips(skipped_other)
-    return sorted(filtered)
+def find_jxls_mode7(*a, **k): return _common.find_jxls_mode7(_G, *a, **k)
 
 
 # ---------------------------------------------------------------------------
