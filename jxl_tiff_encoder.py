@@ -1453,7 +1453,7 @@ def setup_logger(*a, **k): return _common.setup_logger(_G, *a, **k)
 #
 # Gated behind --summary-json so a direct human run never sees the JSON. Keep
 # the key names stable: jxl_photo.py parses them.
-SUMMARY_PREFIX = "##JXLSUM## "
+SUMMARY_PREFIX = _common.SUMMARY_PREFIX
 
 # A pathological run (unreadable drive) could fail every file; the line still
 # has to fit in a pipe buffer, so the list is capped and the wrapper is told.
@@ -7322,10 +7322,10 @@ def main():
             "Multipage pages ignored": _multipage_ignored["pages"],
             "D50 patched": (applied - applied_already_correct) if D50_PATCH_MODE != "off" else 0,
             "Not attempted (run aborted)": aborted,
-            "Sources deleted": _delete_stats["deleted"],
-            "Sources deleted (already archived)": _delete_stats["deleted_archived"],
-            "Sources KEPT by a delete gate": _delete_stats["kept"],
-            "Refused (output belongs to another source)": len(provenance_blocked),
+            _common.SUMMARY_DELETED: _delete_stats["deleted"],
+            _common.SUMMARY_DELETED_ARCHIVED: _delete_stats["deleted_archived"],
+            _common.SUMMARY_KEPT: _delete_stats["kept"],
+            _common.SUMMARY_REFUSED: len(provenance_blocked),
             "Records restamped (moved folder)": len(_restamped),
         },
         failures=failed_files,

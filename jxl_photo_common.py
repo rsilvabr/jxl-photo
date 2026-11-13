@@ -3360,6 +3360,18 @@ def _jxlinfo_text(g, jxl_path):
 
 # === Run state and logs ===
 
+# The run summary the jxl_photo.py wrapper reads (--summary-json): ONE line,
+# this prefix + JSON, printed by each script's emit_summary_json. The wrapper
+# totals a manifest's entries from it and pops these `extras` keys BY NAME for
+# its "SOURCES DELETED" block, so each spelling lives here, once: a label
+# changed on one side only dropped the deletions from that block silently
+# (the recompressor's "deleted sources" once did).
+SUMMARY_PREFIX = "##JXLSUM## "
+SUMMARY_DELETED = "Sources deleted"
+SUMMARY_DELETED_ARCHIVED = "Sources deleted (already archived)"
+SUMMARY_KEPT = "Sources KEPT by a delete gate"
+SUMMARY_REFUSED = "Refused (output belongs to another source)"
+
 # MIME types named in the xmpMM:History entry (_history_args).
 _HISTORY_MIME = {".tif": "image/tiff", ".tiff": "image/tiff",
                  ".jxl": "image/jxl", ".jpg": "image/jpeg",

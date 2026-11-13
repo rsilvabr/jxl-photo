@@ -821,8 +821,8 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 
 # Child scripts emit one machine-readable summary line per run when given
 # --summary-json. The wrapper consumes it to build the end-of-manifest block
-# and never prints it. Must match SUMMARY_PREFIX in the child scripts.
-CHILD_SUMMARY_PREFIX = "##JXLSUM## "
+# and never prints it. One spelling for both sides, in jxl_photo_common.py.
+CHILD_SUMMARY_PREFIX = _common.SUMMARY_PREFIX
 
 # argparse exits 2 on a bad command line, and the child scripts exit 2 on a
 # safety abort — the same code for "the wrapper built a command this script
@@ -8506,10 +8506,10 @@ class InteractiveMenu:
         # the only irreversible thing in the block, and burying them among
         # "Thumbnails excluded" made a run that removed 50 000 masters look
         # exactly like one that removed none.
-        _del = extras_total.pop("Sources deleted", 0)
-        _del_arch = extras_total.pop("Sources deleted (already archived)", 0)
-        _kept = extras_total.pop("Sources KEPT by a delete gate", 0)
-        _refused = extras_total.pop("Refused (output belongs to another source)", 0)
+        _del = extras_total.pop(_common.SUMMARY_DELETED, 0)
+        _del_arch = extras_total.pop(_common.SUMMARY_DELETED_ARCHIVED, 0)
+        _kept = extras_total.pop(_common.SUMMARY_KEPT, 0)
+        _refused = extras_total.pop(_common.SUMMARY_REFUSED, 0)
         # W8 (2026-10-08 audit): the totals come from the ##JXLSUM## lines, and
         # a child killed (idle timeout), crashed or interrupted emits none — so
         # whatever its delete gate had already removed was missing from

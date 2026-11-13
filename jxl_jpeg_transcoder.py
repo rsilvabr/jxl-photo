@@ -1300,7 +1300,7 @@ _FORCE_REDERIVE = set()
 # Unlike the encoder/decoder, this script's counters live inside the cmd_*
 # functions, which only return (errors, cancelled). Rather than change three
 # return signatures, each cmd_* records its totals here and main() emits once.
-SUMMARY_PREFIX = "##JXLSUM## "
+SUMMARY_PREFIX = _common.SUMMARY_PREFIX
 SUMMARY_MAX_FAILURES = 200
 
 _run_summary = {"ok": 0, "overwritten": 0, "skipped": 0, "errors": 0,
@@ -3658,9 +3658,9 @@ def _delete_extras() -> dict:
     if not DELETE_SOURCE:
         return {}
     return {
-        "Sources deleted": _delete_stats["deleted"],
-        "Sources deleted (already archived)": _delete_stats["deleted_archived"],
-        "Sources KEPT by a delete gate": _delete_stats["kept"],
+        _common.SUMMARY_DELETED: _delete_stats["deleted"],
+        _common.SUMMARY_DELETED_ARCHIVED: _delete_stats["deleted_archived"],
+        _common.SUMMARY_KEPT: _delete_stats["kept"],
     }
 
 

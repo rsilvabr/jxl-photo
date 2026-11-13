@@ -936,7 +936,7 @@ def setup_logger(*a, **k): return _common.setup_logger(_G, *a, **k)
 #
 # Gated behind --summary-json so a direct human run never sees the JSON. Keep
 # the key names stable: jxl_photo.py parses them.
-SUMMARY_PREFIX = "##JXLSUM## "
+SUMMARY_PREFIX = _common.SUMMARY_PREFIX
 SUMMARY_MAX_FAILURES = 200
 
 
@@ -5544,9 +5544,9 @@ def main():
         log_file=log_file, failures=failed_files,
         extras={"Not attempted (run aborted)": aborted,
                 "Refused (existing TIFF is an original master)": len(refused),
-                "Sources deleted": _delete_stats["deleted"],
-                "Sources deleted (already archived)": _delete_stats["deleted_archived"],
-                "Sources KEPT by a delete gate": _delete_stats["kept"]},
+                _common.SUMMARY_DELETED: _delete_stats["deleted"],
+                _common.SUMMARY_DELETED_ARCHIVED: _delete_stats["deleted_archived"],
+                _common.SUMMARY_KEPT: _delete_stats["kept"]},
     )
 
     _report_staging_leftovers(TEMP2_DIR)

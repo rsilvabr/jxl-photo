@@ -60,5 +60,13 @@ def test_every_status_count_ends_with_an_else():
 
 
 def test_the_recompressor_counts_an_unknown_status_as_an_error():
-    src = (REPO / "jxl_recompressor.py").read_text(encoding="utf-8")
-    assert 'f"internal: status {s!r} is not counted"' in src
+    import sys
+    sys.path.insert(0, str(REPO))
+    import jxl_recompressor as rec
+
+    counts = rec._count_results({
+        "a.jxl": ("ok", "a"), "b.jxl": ("copied", "b"), "c.jxl": ("weird", "c"),
+        "d.jxl": ("error", "d"), "e.jxl": ("aborted", "e"),
+    })
+    assert counts["uncounted"] == [("c.jxl", "internal: status 'weird' is not counted")]
+    assert (counts["ok"], counts["copied"], counts["error"], counts["aborted"]) == (1, 1, 1, 1)

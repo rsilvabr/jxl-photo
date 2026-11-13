@@ -1146,7 +1146,7 @@ def setup_logger(*a, **k): return _common.setup_logger(_G, *a, **k)
 #
 # Gated behind --summary-json so a direct human run never sees the JSON. Keep
 # the key names stable: jxl_photo.py parses them.
-SUMMARY_PREFIX = "##JXLSUM## "
+SUMMARY_PREFIX = _common.SUMMARY_PREFIX
 
 # A pathological run (unreadable drive) could fail every file; the line still
 # has to fit in a pipe buffer, so the list is capped and the wrapper is told.
@@ -1923,6 +1923,26 @@ def _action_writes(action) -> bool:
     """The item has an output at its destination after the run: written now,
     or an up-to-date one set aside before classification (skip_uptodate)."""
     return action in _WRITING_ACTIONS
+
+
+# The result statuses the end-of-run summary counts ("aborted" is reported
+# apart: those files were never attempted).
+_COUNTED_STATUSES = ("ok", "copied", "overwrite", "skipped", "aborted", "error")
+
+
+def _count_results(results) -> dict:
+    """{status: n} for every counted status, plus "uncounted": the (source,
+    reason) of each result whose status none of them knows. A new status
+    forgotten here is an error, never silence (refactor plan 261113, A4)."""
+    counts = {s: 0 for s in _COUNTED_STATUSES}
+    uncounted = []
+    for src_str, (s, _f) in results.items():
+        if s in counts:
+            counts[s] += 1
+        else:
+            uncounted.append((src_str, f"internal: status {s!r} is not counted"))
+    counts["uncounted"] = uncounted
+    return counts
 
 
 def _plan_item_would_skip(it) -> bool:
@@ -5784,27 +5804,23 @@ def main():
     _delete_gate(items + provenance_refused, results, promoted)
 
     # --- Summary -------------------------------------------------------------
-    ok = sum(1 for s, _f in results.values() if s == "ok")
-    copied = sum(1 for s, _f in results.values() if s == "copied")
-    overwritten = sum(1 for s, _f in results.values() if s == "overwrite")
-    skipped = (sum(1 for s, _f in results.values() if s == "skipped") + n_policy_skip
-               + n_thumb_skip + n_uptodate_skip)
+    counts = _count_results(results)
+    ok = counts["ok"]
+    copied = counts["copied"]
+    overwritten = counts["overwrite"]
+    skipped = counts["skipped"] + n_policy_skip + n_thumb_skip + n_uptodate_skip
     # "aborted" is not an error: those files were never attempted because the
     # run gave up early (disk full, interrupt). They are reported separately
     # and only real failures count towards the exit code.
-    n_aborted = sum(1 for s, _f in results.values() if s == "aborted")
-    errors = sum(1 for s, _f in results.values() if s == "error")
-    errors += len(failures)
+    n_aborted = counts["aborted"]
+    errors = counts["error"] + len(failures)
     for src_str, (s, _f) in results.items():
         if s in ("error", "aborted"):
             failures.append((src_str, _error_details.pop(src_str, s)))
-    # A status none of the sums above counts (a new one, forgotten here) is an
+    # A status none of the counts knows (a new one, forgotten there) is an
     # error, never silence (refactor plan 261113, A4).
-    counted = ("ok", "copied", "overwrite", "skipped", "aborted", "error")
-    for src_str, (s, _f) in results.items():
-        if s not in counted:
-            errors += 1
-            failures.append((src_str, f"internal: status {s!r} is not counted"))
+    errors += len(counts["uncounted"])
+    failures.extend(counts["uncounted"])
 
     done_line = (f"\nDone: {ok} recompressed | {copied} copied | {overwritten} overwrites "
                  f"| {skipped} skipped | {errors} errors")
@@ -5837,13 +5853,13 @@ def main():
                     f"{_delete_stats['deleted_archived']} already-archived deleted, "
                     f"{_delete_stats['kept']} kept")
 
-    # The wrapper's manifest recap pops these exact labels for its deletion
-    # panel; "deleted sources"/"kept sources" were invisible there.
+    # The wrapper's manifest recap pops the deletion labels by name: one
+    # spelling, in jxl_photo_common.py ("deleted sources" was invisible there).
     extras = {"recompressed": ok, "copied (policy/not smaller)": copied,
-              "Sources deleted": _delete_stats["deleted"],
-              "Sources deleted (already archived)": _delete_stats["deleted_archived"],
-              "Sources KEPT by a delete gate": _delete_stats["kept"],
-              "Refused (output belongs to another source)": len(provenance_refused)}
+              _common.SUMMARY_DELETED: _delete_stats["deleted"],
+              _common.SUMMARY_DELETED_ARCHIVED: _delete_stats["deleted_archived"],
+              _common.SUMMARY_KEPT: _delete_stats["kept"],
+              _common.SUMMARY_REFUSED: len(provenance_refused)}
     emit_summary_json(args.summary_json, ok=ok + copied, overwritten=overwritten,
                       skipped=skipped, errors=errors, log_file=log_file,
                       extras=extras, failures=failures)
