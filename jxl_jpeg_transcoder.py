@@ -712,6 +712,7 @@ def _get_exiftool_cmd(*a, **k): return _common._get_exiftool_cmd(_G, *a, **k)
 _tool_version = _common._tool_version
 
 _tool_at_least = _common._tool_at_least
+_keep_alpha_flags = _common._keep_alpha_flags
 
 def _cjxl_buffering_flag():
     """--buffering flag for cjxl >= 0.12; empty list otherwise (flag doesn't exist there).
@@ -736,6 +737,19 @@ _PLAIN_BOXES_FLAG = ["--compress_boxes=0"]
 def _metadata_boxes_flag():
     """cjxl's --compress_boxes as COMPRESS_METADATA_BOXES asks."""
     return ["--compress_boxes=1"] if COMPRESS_METADATA_BOXES else _PLAIN_BOXES_FLAG
+
+
+def _jpeg_archive_flags():
+    """cjxl flags that keep a lossless JPEG archive (jbrd) rebuildable bit for
+    bit by EVERY djxl, not only by the one that wrote it (#669).
+
+    cjxl 0.13 marks the archive of a 4:4:4 or gray JPEG for LF smoothing by
+    default; djxl 0.12 and 0.11 apply that smoothing when they rebuild the JPEG
+    too (libjxl #4931, fixed in 0.13) and gave back another file for 15 of the
+    76 JPEG fixtures. With the mark off, djxl 0.11.2, 0.12.0 and 0.13.0 all
+    rebuild the 76 bit for bit, at the same size. The flag exists from 0.13 on;
+    this script runs the bare "cjxl" everywhere, so that is the one probed."""
+    return ["--jpeg_reconstruction_lfs=0"] if _tool_at_least("cjxl", 0, 13) else []
 
 # #639: cjxl without the EXIF box it would copy from the JPEG (the retry of
 # encode_to_jxl when that copy is malformed and exiftool cannot rewrite it).
@@ -1970,7 +1984,7 @@ def encode_one_transcode(src_path: Path, write_path: Path, final_path: Path,
         # the reconstructed JPEG is the same either way.
         r = _run_captured(
             ["cjxl", str(src_path), str(write_path), "--lossless_jpeg=1",
-             "--effort", str(effort)] + _metadata_boxes_flag(),
+             "--effort", str(effort)] + _metadata_boxes_flag() + _jpeg_archive_flags(),
             CODEC_TIMEOUT
         )
         if r.returncode != 0:
@@ -4357,8 +4371,13 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
         # behave as a lossless transcode (noted in the log).
         if distance > 0:
             cmd.append("--lossless_jpeg=0")
+            # cjxl 0.13 drops an all-opaque alpha from a lossy encode (#670).
+            cmd += _keep_alpha_flags("cjxl")
         elif is_jpeg_input:
             logger.debug("d=0 on the convert path behaves as lossless transcode (jbrd kept)")
+            # A jbrd archive like the lossless transcode's: rebuildable by
+            # every djxl (#669).
+            cmd += _jpeg_archive_flags()
 
         # Add container flag for metadata support (needed for EXIF in IrfanView).
         # Lossy only (d>0) for JPEG inputs: on lossless it changes how the ICC

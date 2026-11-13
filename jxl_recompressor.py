@@ -371,6 +371,7 @@ def _get_cjxl_cmd(*a, **k): return _common._get_cjxl_cmd(_G, *a, **k)
 _tool_version = _common._tool_version
 
 _tool_at_least = _common._tool_at_least
+_keep_alpha_flags = _common._keep_alpha_flags
 
 
 # ─────────────────────────────────────────────
@@ -2678,9 +2679,13 @@ def _keep_invisible_flag() -> list:
     """--keep_invisible=1 for every LOSSY encode (E4 of the 2026-10-08 audit).
     A 2nd/4th channel reaches cjxl as alpha, and lossy cjxl otherwise rewrites
     the colour wherever it is 0 — for an RGB+IR scan kept as 4 channels, real
-    image under the dust. A no-op for files without such a channel, and the
-    channel count of a JXL is not known here without a decode."""
-    return ["--keep_invisible=1"] if CJXL_DISTANCE > 0 else []
+    image under the dust. With cjxl 0.13+ also --strip_alpha=0: lossy cjxl
+    0.13 drops an all-opaque alpha by default (#670, _keep_alpha_flags). A
+    no-op for files without such a channel, and the channel count of a JXL is
+    not known here without a decode."""
+    if CJXL_DISTANCE <= 0:
+        return []
+    return ["--keep_invisible=1"] + _keep_alpha_flags(_get_cjxl_cmd() or "cjxl")
 
 
 def _recompress_encode(jxl_path: Path, write_path: Path) -> tuple:

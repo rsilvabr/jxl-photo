@@ -35,7 +35,16 @@
   recovery with a real reconstruction before unlinking a JPEG; the lossless
   encode accepts only a JXL WITH a jbrd box — without one it is an error for
   the file (#654: cjxl reads by content, and a PNG named `.jpg` came out as a
-  lossy JXL logged as OK), so that path never writes XMP; ships a
+  lossy JXL logged as OK), so that path never writes XMP; with cjxl 0.13+
+  both paths that write a jbrd archive (the lossless transcode, the convert
+  path at d=0 on a JPEG) pass `--jpeg_reconstruction_lfs=0`
+  (`_jpeg_archive_flags`, #669): cjxl 0.13 otherwise marks 4:4:4 and gray
+  JPEGs for LF smoothing, and djxl 0.12/0.11 then rebuild ANOTHER JPEG — an
+  archive must be rebuilt bit for bit by every djxl, never drop it (every
+  lossy PIXEL encode of the toolkit likewise passes `--strip_alpha=0` with
+  cjxl 0.13+, `_keep_alpha_flags` in the common module, #670: cjxl 0.13
+  drops an all-opaque alpha otherwise — the encoder's `invisible_flag`, the
+  recompressor's `_keep_invisible_flag`, the transcoder's convert); ships a
   `--repair-jbrd` audit/repair mode for archives written by affected
   v2.0.0–v2.0.3 versions. `checksums.md5` lines are filed per output as it
   lands (staging: when its folder leaves staging; otherwise right AFTER the

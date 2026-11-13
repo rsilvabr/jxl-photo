@@ -320,6 +320,7 @@ def _get_cjxl_cmd(*a, **k): return _common._get_cjxl_cmd(_G, *a, **k)
 _tool_version = _common._tool_version
 
 _tool_at_least = _common._tool_at_least
+_keep_alpha_flags = _common._keep_alpha_flags
 
 def _cjxl_buffering_flag():
     """--buffering flag for cjxl >= 0.12; empty list otherwise (flag doesn't exist there).
@@ -4482,9 +4483,12 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             # and lossy cjxl defaults to --keep_invisible=0 — it rewrites the
             # colour wherever that channel is 0. For an RGB+IR scan stored as
             # 4 channels that is real image under the dust (measured: error
-            # 1601 vs 19 elsewhere, ~80x what was asked). Keep it.
+            # 1601 vs 19 elsewhere, ~80x what was asked). Keep it. And with
+            # cjxl 0.13+, keep the channel itself: lossy cjxl 0.13 drops an
+            # all-opaque alpha by default, and the TIFF came back one channel
+            # short (#670, _keep_alpha_flags).
             _channels = img.shape[2] if getattr(img, "ndim", 0) == 3 else 1
-            invisible_flag = (["--keep_invisible=1"]
+            invisible_flag = (["--keep_invisible=1"] + _keep_alpha_flags(_get_cjxl_cmd() or "cjxl")
                               if lossy and _channels in (2, 4) else [])
 
             if USE_RAM_FOR_PNG:

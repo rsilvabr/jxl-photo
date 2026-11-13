@@ -2804,6 +2804,19 @@ def _tool_at_least(exe: str, major: int, minor: int) -> bool:
     return v is not None and v[:2] >= (major, minor)
 
 
+def _keep_alpha_flags(exe: str) -> list:
+    """--strip_alpha=0 for the cjxl that `exe` names when it is libjxl 0.13 or
+    newer (the flag does not exist before), else nothing.
+
+    cjxl 0.13 drops, by default, an alpha channel with nothing in it (every
+    sample opaque) from a LOSSY encode (libjxl #4981): the lossy master of a
+    16-bit RGBA TIFF (a Luminar export) came back as an RGB TIFF, one channel
+    short (#670). The toolkit keeps every channel its source has, as cjxl 0.12
+    did; a 4th channel of an RGB+IR scan also reaches cjxl as alpha. Lossless
+    encodes keep alpha by default; passing the flag there changes nothing."""
+    return ["--strip_alpha=0"] if _tool_at_least(exe, 0, 13) else []
+
+
 # === Subprocess and exiftool ===
 
 

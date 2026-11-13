@@ -133,7 +133,9 @@ def _run_encode(monkeypatch, tmp_path, distance):
     monkeypatch.setattr(tr, "CJXL_BUFFERING", None)
     tr.encode_to_jxl(src, write, write, effort=7, distance=distance,
                      reconvert_val=True, smart=False)
-    return calls[0]
+    # The encode itself, not the once-per-run `cjxl --version` probe the
+    # version-gated flags ask for (#669, #670).
+    return [c for c in calls if "--version" not in c][0]
 
 
 def test_container_only_for_lossy(monkeypatch, tmp_path):
@@ -165,7 +167,9 @@ def test_container_not_for_lossless_jpeg_input(monkeypatch, tmp_path):
     monkeypatch.setattr(tr, "CJXL_BUFFERING", None)
     tr.encode_to_jxl(src, write, write, effort=7, distance=0.0,
                      reconvert_val=True, smart=False)
-    assert "--container=1" not in calls[0]
+    encode = [c for c in calls if "--version" not in c][0]
+    assert encode[:2] == ["cjxl", str(src)], encode
+    assert "--container=1" not in encode
 
 
 # ---------------------------------------------------------------------------

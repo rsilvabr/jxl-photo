@@ -74,7 +74,8 @@ def test_the_readme_does_not_invent_flags(script: str, doc: str) -> None:
                 "--color_space", "--lossless_jpeg", "--bits_per_sample",
                 "--num_threads", "--overwrite_original", "--reconstruct_jpeg",
                 "--container", "--modular", "--jpeg_quality", "--pixels_to_jpeg",
-                "--icc_out", "--orig_icc_out"}
+                "--icc_out", "--orig_icc_out", "--jpeg_reconstruction_lfs",
+                "--strip_alpha", "--keep_invisible"}
     # Named in prose ABOUT their own removal — a changelog cannot stop
     # mentioning a flag just because it no longer exists.
     historical = {"--resize"}
