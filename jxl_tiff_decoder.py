@@ -1970,7 +1970,7 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
             # Which toolkit version wrote this TIFF (write-only; see
             # _history_args). Rides on the command that already writes the
             # provenance markers — no extra command per output.
-            add_lines += _history_args("converted", jxl_path, tiff_path)
+            add_lines += _history_args("converted", jxl_path, tiff_path, codec="djxl")
             # #634: the XMP block was copied before, so the mirror of a reset
             # Orientation (XMP tiff:Orientation) is removed here, in the
             # command that runs last.

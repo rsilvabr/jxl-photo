@@ -3344,7 +3344,8 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
         _record = _next_record(desc, software, history)
         _extra = _extra + _history_args(
             "derived" if DERIVATIVE else "converted", jxl_path, final_path,
-            record=_NO_RECORD_SEGMENT if _encode_tag_mode() == "off" else _record)
+            record=_NO_RECORD_SEGMENT if _encode_tag_mode() == "off" else _record,
+            codec=_get_cjxl_cmd() or "cjxl")
         # The XMP goes across as one BLOCK first, in a call of its own: a
         # field copy (-xmp:all) carries only what exiftool can WRITE and
         # dropped a namespace it can merely read (SilverFast's IR/iSRD

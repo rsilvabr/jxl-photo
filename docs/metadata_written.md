@@ -36,7 +36,7 @@ cannot give away.
 | `XMP-exif:UserComment` | a copy of the encode record — Windows shows it as **Comments** | encoder, recompressor (`ENCODE_TAG_MODE = "comment"`) |
 | `EXIF:Software` | a copy of the encode record after the program name | encoder, recompressor (`ENCODE_TAG_MODE = "software"`) |
 | `XMP-dc:Relation` | `jxlphoto-*` tokens — see [the next table](#markers-in-xmp-dcrelation). Your own Relation values are kept | all four scripts |
-| `XMP-xmpMM:History` | one entry per output: `Action` (`converted`, or `derived` for a derivative), `When`, `SoftwareAgent` = `jxl-photo <version> (<github link>)`, `Parameters` = `<script>: from <type> to <type>`, and since v2.24.0 the **encode record** at its end (encoder, recompressor). Earlier entries (Capture One, previous runs) are kept | all four scripts |
+| `XMP-xmpMM:History` | one entry per output: `Action` (`converted`, or `derived` for a derivative), `When`, `SoftwareAgent` = `jxl-photo <version> (<github link>) with libjxl <version>` (the libjxl part since v2.30.0), `Parameters` = `<script>: from <type> to <type>`, and since v2.24.0 the **encode record** at its end (encoder, recompressor). Earlier entries (Capture One, previous runs) are kept | all four scripts |
 | `ExifImageWidth/Height`, `XMP-exif:PixelX/YDimension` | corrected to the new size | derivatives that were resized |
 | A thumbnail box (ISO BMFF `uuid` box, not a metadata field) | `jxlphoto-thumbnail:v1:<image data bytes>:<hash>` and a 768 px sRGB JPEG of the image, for [jxl-thumb](https://github.com/rsilvabr/jxl-thumb); the hash names the image data it was made from, so it is shown only while current ([details](README_jxl_tiff_encoder.md#explorer-thumbnails-explorer_thumbnail---explorer-thumbnail)). Reveals nothing the image does not | encoder and recompressor (`EXPLORER_THUMBNAIL = "auto"`: every output when jxl-thumb is installed, lossless outputs otherwise); the recompressor's `--refresh-explorer-thumbnails` on existing files. Never in a `jbrd` container; never copied to another file |
 
@@ -182,14 +182,21 @@ SoftwareAgent : jxl-photo 2.24.0 (https://github.com/rsilvabr/jxl-photo)
 Parameters    : jxl_tiff_encoder: from image/tiff to image/jxl | gen=1 | cjxl d=0.05 e=7
 
 Action        : converted
-When          : 2026:11:06 13:02:40+09:00
-SoftwareAgent : jxl-photo 2.24.0 (https://github.com/rsilvabr/jxl-photo)
+When          : 2026:11:14 13:02:40+09:00
+SoftwareAgent : jxl-photo 2.30.0 (https://github.com/rsilvabr/jxl-photo) with libjxl 0.12.0
 Parameters    : jxl_recompressor: from image/jxl to image/jxl | gen=2 | cjxl d=0.05 e=7 | cjxl d=0.5 e=7
 ```
 
 `Action` is `derived` for a derivative (`--output-icc`, `--resize-*`,
 `--sharpen`); the script that actually ran writes the entry, so files written by
-different releases each name their real version. Since v2.24.0 the entries the
+different releases each name their real version. Since v2.30.0 the
+`SoftwareAgent` also names the **libjxl version of the codec that made the
+file** — cjxl for a JXL, djxl for a TIFF, JPEG or PNG decoded from one — as
+`cjxl --version` / `djxl --version` report it (asked once per run, never per
+file); it is left out when that version cannot be read. The same encode
+record does not always mean the same file in two libjxl versions (0.12 encodes
+every distance below 0.05 as 0.05; 0.11 did not), so this says which one it
+was. Nothing reads it back. Since v2.24.0 the entries the
 encoder and the recompressor write end with the encode record
 ([above](#the-encode-record)), which the recompressor's policies and the `gen=`
 calculation read; nothing else in the History is read back. Entries written
@@ -268,9 +275,10 @@ History entry there too.
   ratings, labels. GPS and the capture time say far more about where and
   when than any hash. To keep them out of shared files,
   remove them in the export recipe there; the toolkit does not filter them.
-- **`xmpMM:History` names the tool, its version, the repository link and the
-  time of each conversion.** It never names a file, a folder, a user name or a
-  computer name.
+- **`xmpMM:History` names the tool, its version, the repository link, the
+  libjxl version of the codec (since v2.30.0) and the time of each
+  conversion.** It never names a file, a folder, a user name or a computer
+  name.
 
 A master and its mobile derivative as v2.24.0 writes them with the default
 `--encode-tag` (camera fields left out; `comment` would add the same record as

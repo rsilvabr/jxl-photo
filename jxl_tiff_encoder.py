@@ -2680,7 +2680,8 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
                                            tiff_path.name)
         args_lines += _history_args(
             "converted", tiff_path, write_path,
-            record=_NO_RECORD_SEGMENT if _encode_tag_mode() == "off" else record)
+            record=_NO_RECORD_SEGMENT if _encode_tag_mode() == "off" else record,
+            codec=_get_cjxl_cmd() or "cjxl")
         # Target file
         args_lines.append(str(write_path))
         # Write args file (UTF-8 charset first so non-ASCII paths work)
@@ -2765,7 +2766,8 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
         args_lines.append(f"-XMP-dc:Relation+={ORIGIN_PREFIX}{_argfile_safe(_origin)}")
 
     # Which toolkit version wrote this master, and its encode record.
-    args_lines += _history_args("converted", tiff_path, write_path, record=history_record)
+    args_lines += _history_args("converted", tiff_path, write_path, record=history_record,
+                                codec=_get_cjxl_cmd() or "cjxl")
 
     # WHICH source made this output. Written for every output, not just for
     # multi-page splits: it is what lets a later run tell "the same photo,

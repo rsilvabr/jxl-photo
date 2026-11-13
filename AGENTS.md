@@ -291,7 +291,12 @@
   (`_visible_record_args`: history = none, the default; comment =
   XMP exif:UserComment; title = dc:Description; software; `xmp` = history).
   Nothing else in the History is read back. The version is `TOOLKIT_VERSION`, identical in
-  all five scripts. The recompressor's cjxl runs with `-x strip=xmp`: its
+  all five scripts. Since v2.30.0 the `SoftwareAgent` ends with
+  ` with libjxl <v>`: every caller passes `codec=` (its own cjxl/djxl command
+  name — cjxl for a JXL written, djxl for a decode) and `_history_args` reads
+  the version from `_tool_version`'s per-run cache (no process per file;
+  omitted when unknown). Write-only like the rest; a new History call site
+  passes `codec=` too. The recompressor's cjxl runs with `-x strip=xmp`: its
   carried XMP plus the restamp's `-tagsfromfile -xmp:all` makes exiftool
   ADD the copied list to the carried one for every `+=` in that call,
   doubling the History and `dc:Relation` (#531). Do not remove it.

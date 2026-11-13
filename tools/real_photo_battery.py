@@ -269,14 +269,41 @@ def _our_parameters(got, parameters):
     return got == parameters
 
 
+_LIBJXL = {}
+
+
+def _libjxl(exe):
+    """The libjxl version `exe --version` reports ("0.12.0"), or None."""
+    if exe not in _LIBJXL:
+        try:
+            r = subprocess.run([exe, "--version"], capture_output=True, text=True,
+                               timeout=30)
+            m = re.search(r"v?(\d+)\.(\d+)\.(\d+)", (r.stdout or "") + " " + (r.stderr or ""))
+            _LIBJXL[exe] = ".".join(m.groups()) if m else None
+        except (OSError, subprocess.SubprocessError):
+            _LIBJXL[exe] = None
+    return _LIBJXL[exe]
+
+
+def _our_agent(agent, parameters):
+    """This toolkit's SoftwareAgent; since v2.30.0 it ends with the libjxl
+    version of the codec that made the file (cjxl for a JXL, djxl for a
+    decode)."""
+    agent = str(agent or "")
+    if not agent.startswith("jxl-photo "):
+        return False
+    v = _libjxl("cjxl" if parameters.endswith("to image/jxl") else "djxl")
+    return agent.endswith(f" with libjxl {v}") if v else " with libjxl " not in agent
+
+
 def _last_history_entry(path, action, parameters, label):
     """check() that the LAST xmpMM:History entry of `path` is this toolkit's."""
     h = history(path)
     ok = (bool(h) and h[-1].get("Action") == action
-          and str(h[-1].get("SoftwareAgent", "")).startswith("jxl-photo ")
+          and _our_agent(h[-1].get("SoftwareAgent"), parameters)
           and _our_parameters(h[-1].get("Parameters"), parameters))
-    check(label, ok, (f"{len(h)} entries, last: {h[-1].get('Parameters')!r}" if h
-                      else "no History"))
+    check(label, ok, (f"{len(h)} entries, last: {h[-1].get('SoftwareAgent')!r} "
+                      f"{h[-1].get('Parameters')!r}" if h else "no History"))
 
 
 def _count_history(path):
@@ -813,8 +840,8 @@ def derivative_rederive_checks(A1, pool_jxl):
         h = history(outs[0])
         check("recompressor: the last History entry of the derivative says derived",
               bool(h) and h[-1].get("Action") == "derived"
-              and str(h[-1].get("SoftwareAgent", "")).startswith("jxl-photo "),
-              f"{len(h)} entries")
+              and _our_agent(h[-1].get("SoftwareAgent"), "to image/jxl"),
+              f"{len(h)} entries, last agent: {h[-1].get('SoftwareAgent') if h else None!r}")
     master_origins = origins_of(r / "p.jxl")
     origins = origins_of(outs[0]) if outs else []
     check("recompressor: the derivative keeps the master's origin",

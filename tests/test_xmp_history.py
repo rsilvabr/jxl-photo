@@ -8,7 +8,9 @@ exiftool structures and read back by it — a mocked exiftool would prove
 nothing about the escaping or the serialization.
 """
 
+import functools
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -44,12 +46,29 @@ def _history(path):
     return [] if h is None else (h if isinstance(h, list) else [h])
 
 
+@functools.lru_cache(maxsize=None)
+def _libjxl(exe):
+    """The libjxl version `exe --version` reports ("0.12.0"), or None."""
+    r = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=30)
+    m = re.search(r"v?(\d+)\.(\d+)\.(\d+)", (r.stdout or "") + " " + (r.stderr or ""))
+    return ".".join(m.groups()) if m else None
+
+
+def _agent(codec):
+    """This toolkit's SoftwareAgent for a file `codec` made: since v2.30.0 it
+    ends with that codec's libjxl version (cjxl wrote a JXL, djxl decoded one)."""
+    base = f"jxl-photo {VERSION} (https://github.com/rsilvabr/jxl-photo)"
+    v = _libjxl(codec)
+    return f"{base} with libjxl {v}" if v else base
+
+
 def _ours(entry, action, params):
     """`params` is the entry's own part; since v2.24.0 an encoder or
     recompressor entry ends with the encode record (" | gen=N | cjxl d=…"),
     a decoder or transcoder entry never does."""
     assert entry["Action"] == action
-    assert entry["SoftwareAgent"] == f"jxl-photo {VERSION} (https://github.com/rsilvabr/jxl-photo)"
+    codec = "cjxl" if params.endswith("to image/jxl") else "djxl"
+    assert entry["SoftwareAgent"] == _agent(codec), (entry, codec)
     got = entry["Parameters"]
     if params.startswith(("jxl_tiff_encoder", "jxl_recompressor")):
         assert got.startswith(params + " | ") and "cjxl d=" in got, got
@@ -139,6 +158,36 @@ def test_u3_a_structure_value_is_escaped(mod, stem, monkeypatch):
     monkeypatch.setattr(mod, "TOOLKIT_URL", "a,b{c}|d")
     line = mod._history_args("converted", "a.tif", "b.jxl")[0]
     assert "(a|,b|{c|}||d)" in line, line
+
+
+@pytest.mark.parametrize("mod,stem", BACKENDS, ids=[b[1] for b in BACKENDS])
+def test_u5_the_codec_s_libjxl_version_ends_the_agent(mod, stem, monkeypatch):
+    """v2.30.0: `codec=` names the cjxl/djxl that made the file; its libjxl
+    version (from the cached probe, asked with the caller's command name)
+    ends the SoftwareAgent. The Parameters, which the toolkit reads back,
+    are unchanged."""
+    asked = []
+    monkeypatch.setattr(mod._common, "_tool_version",
+                        lambda exe: asked.append(exe) or (0, 12, 0))
+    line = mod._history_args("converted", "a.jxl", "b.tif", codec="djxl")[0]
+    assert asked == ["djxl"], asked
+    assert (f"SoftwareAgent=jxl-photo {mod.TOOLKIT_VERSION} "
+            f"(https://github.com/rsilvabr/jxl-photo) with libjxl 0.12.0,") in line, line
+    assert line.endswith(f"Parameters={stem}: from image/jxl to image/tiff}}"), line
+
+
+@pytest.mark.parametrize("mod,stem", BACKENDS, ids=[b[1] for b in BACKENDS])
+def test_u6_an_unreadable_version_or_no_codec_leaves_it_out(mod, stem, monkeypatch):
+    monkeypatch.setattr(mod._common, "_tool_version", lambda exe: None)
+    line = mod._history_args("converted", "a.tif", "b.jxl", codec="cjxl")[0]
+    assert "libjxl" not in line, line
+    assert (f"SoftwareAgent=jxl-photo {mod.TOOLKIT_VERSION} "
+            f"(https://github.com/rsilvabr/jxl-photo),") in line, line
+    called = []
+    monkeypatch.setattr(mod._common, "_tool_version",
+                        lambda exe: called.append(exe) or (0, 12, 0))
+    line = mod._history_args("converted", "a.tif", "b.jxl")[0]
+    assert "libjxl" not in line and called == [], (line, called)
 
 
 @pytest.mark.parametrize("mod,stem", BACKENDS, ids=[b[1] for b in BACKENDS])
@@ -235,8 +284,7 @@ def test_h6_recompressor_derivative_appends_derived(tmp_path):
     assert len(h) == 2, h
     _ours(h[0], "converted", "jxl_tiff_encoder: from image/tiff to image/jxl")
     assert h[1]["Action"] == "derived", h[1]
-    assert h[1]["SoftwareAgent"] == (
-        f"jxl-photo {VERSION} (https://github.com/rsilvabr/jxl-photo)")
+    assert h[1]["SoftwareAgent"] == _agent("cjxl"), h[1]
 
 
 @real

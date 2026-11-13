@@ -1326,8 +1326,9 @@ README); no delete gate does.
 
 Every output this script (and the other three) writes also gains ONE entry in
 `xmpMM:History` — `Action` (`converted`, or `derived` for a derivative), `When`,
-`SoftwareAgent` = `jxl-photo <version> (<repo link>)` and `Parameters` = the
-script and the conversion. Earlier entries the file already had (Capture One, a
+`SoftwareAgent` = `jxl-photo <version> (<repo link>) with libjxl <version>`
+(the libjxl version of the cjxl or djxl that made the file, since v2.30.0) and
+`Parameters` = the script and the conversion. Earlier entries the file already had (Capture One, a
 previous run of the toolkit) are kept; nothing in the toolkit ever reads it back
 — no gate, no policy. `--strip` writes none. The exact format, the per-script
 differences and how to read it yourself:

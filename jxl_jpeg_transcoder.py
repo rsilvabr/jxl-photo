@@ -1069,7 +1069,7 @@ def _write_converted_metadata(src_path: Path, write_path: Path) -> None:
         ["-overwrite_original"] + _inherited_marker_removal_lines(write_path)
         + _provenance_marker_args(src_path)
         + _origin_marker_lines(src_path)
-        + _history_args("converted", src_path, write_path)
+        + _history_args("converted", src_path, write_path, codec="cjxl")
         + [str(write_path)], timeout=EXIFTOOL_TIMEOUT)
     if r_prov.returncode != 0:
         raise RuntimeError(
@@ -5607,7 +5607,7 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                 ["-overwrite_original"]
                 + _derivative_metadata_args(jxl_path, _dlabel, size)
                 + _orient
-                + _history_args("derived", jxl_path, actual_out)
+                + _history_args("derived", jxl_path, actual_out, codec="djxl")
                 + [str(actual_out)], timeout=EXIFTOOL_TIMEOUT)
             if r2.returncode != 0:
                 raise RuntimeError(f"derivative metadata write: {(r2.stderr or '')[:200]}")
@@ -5617,7 +5617,7 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                 ["-overwrite_original"] + _inherited_marker_removal_lines(actual_out)
                 + _provenance_marker_args(jxl_path)
                 + _orient
-                + _history_args("converted", jxl_path, actual_out)
+                + _history_args("converted", jxl_path, actual_out, codec="djxl")
                 + [str(actual_out)], timeout=EXIFTOOL_TIMEOUT)
             if r_prov.returncode != 0:
                 raise RuntimeError(

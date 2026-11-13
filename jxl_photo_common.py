@@ -2555,13 +2555,25 @@ def _provenance_marker_args(g, src_paths):
 # === xmpMM:History and the visible record ===
 
 
-def _history_args(g, action: str, src_path, dst_path, record: str = "") -> list:
+def _history_args(g, action: str, src_path, dst_path, record: str = "",
+                  codec: str = "") -> list:
     """The one exiftool line appending this run's entry to xmpMM:History:
     which toolkit version wrote the file, when, and from what. Write-only:
     nothing in the toolkit reads it back. Callers never use it for a jbrd
-    container or a verbatim copy."""
+    container or a verbatim copy.
+
+    `codec` names the cjxl or djxl that made the file (the caller's own
+    command name). Since v2.30.0 its libjxl version ends the SoftwareAgent —
+    "jxl-photo 2.30.0 (URL) with libjxl 0.12.0" — because the same encode
+    record means different files in two libjxl versions (0.12 clamps every
+    distance below 0.05 to 0.05; 0.11 did not). The version comes from
+    _tool_version's cache: one `--version` per codec and run, never one per
+    file. Left out when the version cannot be read."""
     when = datetime.now().astimezone().isoformat(timespec="seconds")
     agent = f"{g.TOOLKIT_NAME} {g.TOOLKIT_VERSION} ({g.TOOLKIT_URL})"
+    libjxl = _tool_version(codec) if codec else None
+    if libjxl:
+        agent += f" with libjxl {'.'.join(map(str, libjxl))}"
     params = Path(g.__file__).stem
     src_mime, dst_mime = g._history_mime(src_path), g._history_mime(dst_path)
     if src_mime and dst_mime:

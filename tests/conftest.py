@@ -138,11 +138,23 @@ def _snapshot(mod) -> dict:
             for name in _run_global_names(mod) if hasattr(mod, name)}
 
 
+def _clear_tool_version_cache():
+    """`_tool_version` lives in jxl_photo_common (each script binds it by
+    name) and caches per process: every script's History entry and version
+    gates read it, so no test inherits another test's answer, whichever
+    scripts it imported. A test's double in its place (a plain function) has
+    no cache to clear."""
+    for name in ("jxl_photo_common", "jxl_jpeg_transcoder"):
+        fn = getattr(sys.modules.get(name), "_tool_version", None)
+        clear = getattr(fn, "cache_clear", None)
+        if clear is not None:
+            clear()
+
+
 @pytest.fixture(autouse=True)
 def _isolate_run_globals():
+    _clear_tool_version_cache()
     transcoder = sys.modules.get("jxl_jpeg_transcoder")
-    if transcoder is not None and hasattr(transcoder, "_tool_version"):
-        transcoder._tool_version.cache_clear()
     if transcoder is not None and hasattr(transcoder, "_planned_outputs"):
         transcoder._planned_outputs.clear()
     # "Can exiftool run several commands in one process?" is asked once per
@@ -184,9 +196,7 @@ def _isolate_run_globals():
                 for gname, value in prev.items():
                     setattr(decoder, gname, value)
             prev.clear()
-        transcoder = sys.modules.get("jxl_jpeg_transcoder")
-        if transcoder is not None and hasattr(transcoder, "_tool_version"):
-            transcoder._tool_version.cache_clear()
+        _clear_tool_version_cache()
 
 
 @pytest.fixture(autouse=True)
