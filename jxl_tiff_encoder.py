@@ -4647,6 +4647,10 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             return ((str(tiff_path), page_idx), status, str(final_path), tiff_path)
 
         except Exception as e:
+            # A read prefetched for this file and never asked for (a reader
+            # raised in between) must not wait in this thread for the next
+            # file: drop it here too (review V6).
+            _clear_exiftool_prefetch()
             # Remove any partial/corrupt output produced by THIS run so the
             # next smart-sync run does not mistake it for a fresh, up-to-date
             # JXL and skip it forever. The delete only happens when THIS run

@@ -165,6 +165,38 @@ def test_copy_metadata_runs_every_command_when_a_cleanup_fails(tmp_path, monkeyp
         "the last write never ran"
 
 
+@needs_tools
+def test_a_reader_that_raises_leaves_no_prefetched_read_behind(tmp_path, monkeypatch):
+    """Review V6: the prefetch is dropped when a reader raises between it and
+    the normal clean-up (convert_one's error path clears it too), so nothing
+    prefetched for one file waits in the thread for the next."""
+    folder = tmp_path / HOSTILE
+    _tif(folder / "DSC_0001 (2).tif")
+    seen = {}
+    real_clear = enc._clear_exiftool_prefetch
+
+    def boom(tiff_path, tmp_dir):
+        seen["kept_before"] = len(getattr(enc._EXIFTOOL_PREFETCH, "results", None) or {})
+        raise RuntimeError("exiftool could not read Software (test)")
+
+    def clear():
+        real_clear()
+        seen["left_after"] = len(enc._EXIFTOOL_PREFETCH.results)
+    monkeypatch.setattr(enc, "_read_record_fields", boom)
+    monkeypatch.setattr(enc, "_clear_exiftool_prefetch", clear)
+    monkeypatch.setattr(enc, "_EXIFTOOL_BATCH", {})
+    monkeypatch.setattr(sys, "argv", [
+        "jxl_tiff_encoder.py", str(folder), str(folder / "jxl"), "--mode", "2",
+        "--distance", "0", "--effort", "3", "--no-preflight", "--workers", "1"])
+    monkeypatch.setenv("JXLPHOTO_LOG_DIR", str(tmp_path / "logs"))
+    try:
+        enc.main()
+    except SystemExit:
+        pass
+    assert seen.get("kept_before", 0) >= 1, seen      # the reads were prefetched
+    assert seen.get("left_after") == 0, seen
+
+
 def test_a_test_double_sees_every_command_on_its_own(monkeypatch):
     """A replaced _run_exiftool_argfile keeps its old view: one call per
     command, stopping at the first that fails (as the old code did)."""

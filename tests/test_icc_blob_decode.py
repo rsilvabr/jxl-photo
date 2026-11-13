@@ -339,9 +339,15 @@ def test_non_blob_derivatives_are_byte_identical_to_before(tmp_path, monkeypatch
     """Controls: Elle g2.2 (native) and ROMM 'skip' masters derive to exactly
     the same bytes as the pre-fix code — the new djxl flags and the blob
     branch must not touch the correct paths."""
-    old_src = subprocess.run(["git", "show", "HEAD:jxl_recompressor.py"],
-                             capture_output=True, text=True, cwd=REPO,
-                             check=True).stdout
+    # The pre-fix code comes from git: a copy without the history (a `git
+    # archive`, a release zip) cannot run this comparison, so it skips
+    # rather than fails (review V7).
+    try:
+        old_src = subprocess.run(["git", "show", "HEAD:jxl_recompressor.py"],
+                                 capture_output=True, text=True, cwd=REPO,
+                                 check=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        pytest.skip("needs the repository's git history (git show HEAD:)")
     old_path = tmp_path / "jxl_recompressor_head.py"
     old_path.write_text(old_src, encoding="utf-8")
     # The HEAD script loads the jxl_photo_common.py next to it: the one of
