@@ -32,7 +32,10 @@
 - `jxl_jpeg_transcoder.py` — JPEG↔JXL lossless + JXL→JPEG/PNG lossy.
   Never writes XMP provenance markers into a jbrd container (they break
   `djxl --reconstruct_jpeg`); the encode delete gate proves bit-exact
-  recovery with a real reconstruction before unlinking a JPEG; ships a
+  recovery with a real reconstruction before unlinking a JPEG; the lossless
+  encode accepts only a JXL WITH a jbrd box — without one it is an error for
+  the file (#654: cjxl reads by content, and a PNG named `.jpg` came out as a
+  lossy JXL logged as OK), so that path never writes XMP; ships a
   `--repair-jbrd` audit/repair mode for archives written by affected
   v2.0.0–v2.0.3 versions. `checksums.md5` lines are filed per output as it
   lands (staging: when its folder leaves staging; otherwise right AFTER the
