@@ -2921,6 +2921,67 @@ def _read_origin_inputs(g, path):
     return tokens, bool(g._ORIGIN_RECORD_RE.search(text))
 
 
+# === The planning-time batch reads ===
+
+
+def _exiftool_batch(g, paths, head, label, on_data, on_no_output=None, on_error=None,
+                    on_done=None, strict=False, batch=400, progress=True):
+    """The engine of the planning-time batch readers (refactor F7): `paths` in
+    chunks of `batch`, ONE exiftool call per chunk (an argfile: the `head`
+    lines, then the paths), EXIFTOOL_BATCH_TIMEOUT in all and stopped after
+    EXIFTOOL_BATCH_STALL without new output (#537), progress under `label`
+    (_batch_read_state / _batch_read_tick, #566). Nothing runs for no paths.
+
+    Each reader keeps its own rules in callbacks, run where its code ran:
+    on_data(chunk, r, entries) with the parsed JSON, inside the same try, so
+    a surprise in it is handled like a failed batch; on_no_output(chunk, r)
+    when exiftool printed nothing (or, with `strict`, also exited non-zero:
+    a reader that reads a partial batch as unread); on_error(chunk, e) on any
+    exception (a stall, a timeout, JSON cut short); on_done(chunk) after each
+    chunk, whatever happened. progress=False: the reader reports its own
+    progress (in on_done), and the engine's lines stay out."""
+    if not paths:
+        return
+    _prog = g._batch_read_state(label, len(paths)) if progress else None
+    for i in range(0, len(paths), batch):
+        chunk = paths[i:i + batch]
+        if progress:
+            g._batch_read_tick(_prog, i)
+        argfile = None
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
+                                             dir=g.TEMP_DIR, encoding="utf-8",
+                                             newline=chr(10)) as af:
+                af.write(chr(10).join(list(head) + [str(p) for p in chunk]))
+                af.write(chr(10))
+                argfile = af.name
+            r = g._run_captured([g._get_exiftool_cmd(), "-@", argfile],
+                                g.EXIFTOOL_BATCH_TIMEOUT, text=True,
+                                stall=g.EXIFTOOL_BATCH_STALL)
+            if not r.stdout or (strict and r.returncode != 0):
+                if on_no_output is not None:
+                    on_no_output(chunk, r)
+                continue
+            on_data(chunk, r, json.loads(r.stdout))
+        except Exception as e:
+            if on_error is not None:
+                on_error(chunk, e)
+        finally:
+            if on_done is not None:
+                on_done(chunk)
+            if argfile:
+                try:
+                    os.unlink(argfile)
+                except OSError:
+                    pass
+
+
+# The head of the batches that read dc:Relation (and the charset lines the
+# readers always put after it).
+_RELATION_BATCH_HEAD = ("-j", "-s", "-s", "-XMP-dc:Relation",
+                        "-charset", "FileName=UTF8", "-charset", "UTF8")
+
+
 def _read_source_markers_batch(g, outputs: list) -> dict:
     """{output path: {'src': id|None, 'srcsum': id|None}} in as few exiftool
     calls as possible — one per file would be minutes on a large library.
@@ -2935,77 +2996,59 @@ def _read_source_markers_batch(g, outputs: list) -> dict:
     markers = {str(o): {"src": None, "srcsum": None} for o in outputs}
     # normcase -> the exact key the caller will look up by.
     index = {os.path.normcase(str(o)): str(o) for o in outputs}
-    if not outputs:
-        return markers
-    batch_lines = ["-j", "-s", "-s", "-XMP-dc:Relation",
-                   "-charset", "FileName=UTF8", "-charset", "UTF8"]
-    BATCH = 400
-    _prog = g._batch_read_state("Provenance markers", len(outputs))
-    for i in range(0, len(outputs), BATCH):
-        chunk = outputs[i:i + BATCH]
-        g._batch_read_tick(_prog, i)
-        answered = set()
-        argfile = None
-        try:
-            with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
-                                             dir=g.TEMP_DIR, encoding="utf-8",
-                                             newline=chr(10)) as af:
-                af.write(chr(10).join(batch_lines + [str(o) for o in chunk]))
-                af.write(chr(10))
-                argfile = af.name
-            r = g._run_captured([g._get_exiftool_cmd(), "-@", argfile],
-                              g.EXIFTOOL_BATCH_TIMEOUT, text=True,
-                              stall=g.EXIFTOOL_BATCH_STALL)
-            if not r.stdout:
-                g.logger.warning(f"Provenance: could not read markers for a batch of "
-                               f"{len(chunk)} file(s) (rc={r.returncode})")
+    answered = set()
+
+    def on_data(chunk, r, data):
+        # exiftool exits non-zero when it fails on ANY file of the batch but
+        # still prints valid JSON for the rest — use what came back.
+        for entry in data:
+            src = entry.get("SourceFile")
+            if src is not None and not entry.get("Error"):
+                # Answered, with or without a Relation: a file with no
+                # Relation at all is a real "no marker", not an unread one.
+                answered.add(os.path.normcase(str(Path(src))))
+            rel = entry.get("Relation")
+            if src is None or rel is None:
                 continue
-            # exiftool exits non-zero when it fails on ANY file of the batch but
-            # still prints valid JSON for the rest — use what came back.
-            data = json.loads(r.stdout)
-            for entry in data:
-                src = entry.get("SourceFile")
-                if src is not None and not entry.get("Error"):
-                    # Answered, with or without a Relation: a file with no
-                    # Relation at all is a real "no marker", not an unread one.
-                    answered.add(os.path.normcase(str(Path(src))))
-                rel = entry.get("Relation")
-                if src is None or rel is None:
-                    continue
-                values = rel if isinstance(rel, list) else [str(rel)]
-                info = {"src": None, "srcsum": None}
-                for token in values:
-                    token = str(token).strip()
-                    if token.startswith(g.SRC_PREFIX):
-                        info["src"] = token[len(g.SRC_PREFIX):]
-                    elif token.startswith(g.SRCSUM_PREFIX):
-                        info["srcsum"] = token[len(g.SRCSUM_PREFIX):]
-                # normcase, like every other path comparison in the provenance
-                # layer: exiftool can hand back a differently-cased drive letter
-                # or flipped separators, and a lookup miss left the file with
-                # both markers None. That reads downstream as "no marker at
-                # all", so a file whose provenance is perfectly recorded was
-                # refused with "written by an older version" — a reason that
-                # sends the user looking for the wrong problem.
-                key = os.path.normcase(str(Path(src)))
-                if key in index:
-                    markers[index[key]] = info
-                else:
-                    g.logger.warning(f"Provenance: marker read came back for a path "
-                                   f"this run did not ask about, so it cannot be "
-                                   f"matched | {src}")
-        except Exception as e:
-            g.logger.warning(f"Provenance: marker batch failed ({e}); "
-                           f"{len(chunk)} file(s) cannot be verified")
-        finally:
-            for o in chunk:
-                if os.path.normcase(str(o)) not in answered:
-                    markers[str(o)]["unread"] = True
-            if argfile:
-                try:
-                    os.unlink(argfile)
-                except OSError:
-                    pass
+            values = rel if isinstance(rel, list) else [str(rel)]
+            info = {"src": None, "srcsum": None}
+            for token in values:
+                token = str(token).strip()
+                if token.startswith(g.SRC_PREFIX):
+                    info["src"] = token[len(g.SRC_PREFIX):]
+                elif token.startswith(g.SRCSUM_PREFIX):
+                    info["srcsum"] = token[len(g.SRCSUM_PREFIX):]
+            # normcase, like every other path comparison in the provenance
+            # layer: exiftool can hand back a differently-cased drive letter
+            # or flipped separators, and a lookup miss left the file with
+            # both markers None. That reads downstream as "no marker at
+            # all", so a file whose provenance is perfectly recorded was
+            # refused with "written by an older version" — a reason that
+            # sends the user looking for the wrong problem.
+            key = os.path.normcase(str(Path(src)))
+            if key in index:
+                markers[index[key]] = info
+            else:
+                g.logger.warning(f"Provenance: marker read came back for a path "
+                                 f"this run did not ask about, so it cannot be "
+                                 f"matched | {src}")
+
+    def on_no_output(chunk, r):
+        g.logger.warning(f"Provenance: could not read markers for a batch of "
+                         f"{len(chunk)} file(s) (rc={r.returncode})")
+
+    def on_error(chunk, e):
+        g.logger.warning(f"Provenance: marker batch failed ({e}); "
+                         f"{len(chunk)} file(s) cannot be verified")
+
+    def on_done(chunk):
+        for o in chunk:
+            if os.path.normcase(str(o)) not in answered:
+                markers[str(o)]["unread"] = True
+        answered.clear()
+
+    _exiftool_batch(g, outputs, _RELATION_BATCH_HEAD, "Provenance markers", on_data,
+                    on_no_output=on_no_output, on_error=on_error, on_done=on_done)
     return markers
 
 
@@ -3014,63 +3057,42 @@ def _read_derived_markers_batch(g, paths: list) -> dict:
     the file has no such token (NOT a derivative), False when it could not be
     read at all (unknown -> the caller must fail closed).
 
-    Same batched argfile scheme as _read_source_markers_batch: one exiftool
-    call per 400 files instead of one per file.
+    Same batch engine as _read_source_markers_batch (_exiftool_batch): one
+    exiftool call per 400 files instead of one per file.
     """
     markers = {str(o): False for o in paths}
     # normcase -> the exact key the caller will look up by.
     index = {os.path.normcase(str(o)): str(o) for o in paths}
-    if not paths:
-        return markers
-    batch_lines = ["-j", "-s", "-s", "-XMP-dc:Relation",
-                   "-charset", "FileName=UTF8", "-charset", "UTF8"]
-    BATCH = 400
-    _prog = g._batch_read_state("Derivative markers", len(paths))
-    for i in range(0, len(paths), BATCH):
-        chunk = paths[i:i + BATCH]
-        g._batch_read_tick(_prog, i)
-        argfile = None
-        try:
-            with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
-                                             dir=g.TEMP_DIR, encoding="utf-8",
-                                             newline=chr(10)) as af:
-                af.write(chr(10).join(batch_lines + [str(o) for o in chunk]))
-                af.write(chr(10))
-                argfile = af.name
-            r = g._run_captured([g._get_exiftool_cmd(), "-@", argfile],
-                              g.EXIFTOOL_BATCH_TIMEOUT, text=True,
-                              stall=g.EXIFTOOL_BATCH_STALL)
-            if not r.stdout:
-                g.logger.warning(f"Derivative check: could not read markers for a batch "
-                               f"of {len(chunk)} file(s) (rc={r.returncode})")
+
+    def on_data(chunk, r, data):
+        for entry in data:
+            src = entry.get("SourceFile")
+            if src is None:
                 continue
-            data = json.loads(r.stdout)
-            for entry in data:
-                src = entry.get("SourceFile")
-                if src is None:
-                    continue
-                key = os.path.normcase(str(Path(src)))
-                if key not in index:
-                    continue
-                rel = entry.get("Relation")
-                label = None
-                if rel is not None:
-                    values = rel if isinstance(rel, list) else [str(rel)]
-                    for token in values:
-                        token = str(token).strip()
-                        if token.startswith(g.DERIVED_XMP_PREFIX):
-                            label = token[len(g.DERIVED_XMP_PREFIX):]
-                            break
-                markers[index[key]] = label
-        except Exception as e:
-            g.logger.warning(f"Derivative check: marker batch failed ({e}); "
-                           f"{len(chunk)} file(s) cannot be verified")
-        finally:
-            if argfile:
-                try:
-                    os.unlink(argfile)
-                except OSError:
-                    pass
+            key = os.path.normcase(str(Path(src)))
+            if key not in index:
+                continue
+            rel = entry.get("Relation")
+            label = None
+            if rel is not None:
+                values = rel if isinstance(rel, list) else [str(rel)]
+                for token in values:
+                    token = str(token).strip()
+                    if token.startswith(g.DERIVED_XMP_PREFIX):
+                        label = token[len(g.DERIVED_XMP_PREFIX):]
+                        break
+            markers[index[key]] = label
+
+    def on_no_output(chunk, r):
+        g.logger.warning(f"Derivative check: could not read markers for a batch "
+                         f"of {len(chunk)} file(s) (rc={r.returncode})")
+
+    def on_error(chunk, e):
+        g.logger.warning(f"Derivative check: marker batch failed ({e}); "
+                         f"{len(chunk)} file(s) cannot be verified")
+
+    _exiftool_batch(g, paths, _RELATION_BATCH_HEAD, "Derivative markers", on_data,
+                    on_no_output=on_no_output, on_error=on_error)
     return markers
 
 

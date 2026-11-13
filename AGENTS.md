@@ -355,10 +355,17 @@
   on (warning when off) and the strict guards name the cause; the delete
   gates already fail closed on it. A new consumer of that reader must not
   read an unread file as a legacy markerless archive.
-- **Planning-time batch reads report progress (#566):** every `*_batch`
-  reader calls `_batch_read_tick` between batches (parity-pinned with
-  `_batch_read_state`). A new batch reader does the same, or a slow disk
-  makes the wrapper stop the child as hung (`child_idle_timeout_minutes`).
+- **Planning-time batch reads run on ONE engine (refactor F7):**
+  `_exiftool_batch` (common) does the chunks of 400, the argfile,
+  `EXIFTOOL_BATCH_TIMEOUT`/`EXIFTOOL_BATCH_STALL` (#537) and the progress
+  ticks (#566: without them a slow disk makes the wrapper stop the child as
+  hung). Each reader keeps its rules in callbacks run where its code ran
+  (`on_data` inside the same try, `on_no_output`, `on_error`, `on_done`;
+  `strict=True` when a non-zero exit with output still counts as unread;
+  `progress=False` for a reader with its own progress lines). A new batch
+  reader uses it: `tests/test_batch_stall.py` fails on one that loops on
+  its own. `AI_tools/python-refactor_proofs/f7/batch_equivalence.py` runs
+  every reader old against new on the same fake exiftool answers.
 - **Per-file exiftool calls use `EXIFTOOL_TIMEOUT`** (each script defines it
   as its codec timeout), never a literal: a 60/120 s limit turned twelve good
   45 MP files into errors under a 17-worker load on 2026-10-06. Only the

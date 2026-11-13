@@ -49,10 +49,21 @@ EXTRA_BATCH_FUNCS = {"_read_mpg_markers"}
 # The recompressor's fifth: _read_mpg_pages_batch (#574).
 # Since the common-module work, _read_source_markers_batch (all four) and
 # _read_derived_markers_batch (transcoder, recompressor) live ONCE in
-# jxl_photo_common.py: 2 sites there, read through g.
-EXPECTED_SITES = {"jxl_tiff_encoder": 2, "jxl_tiff_decoder": 2,
-                  "jxl_jpeg_transcoder": 1, "jxl_recompressor": 3,
-                  "jxl_photo_common": 2}
+# jxl_photo_common.py. Since refactor F7 every reader runs on ONE engine,
+# _exiftool_batch (common): it is the only batch call site, and every
+# reader must go through it (test_w5b).
+EXPECTED_SITES = {"jxl_tiff_encoder": 0, "jxl_tiff_decoder": 0,
+                  "jxl_jpeg_transcoder": 0, "jxl_recompressor": 0,
+                  "jxl_photo_common": 1}
+# The batch readers, per module: all on the engine.
+BATCH_READERS = {
+    "jxl_photo_common": {"_read_source_markers_batch", "_read_derived_markers_batch"},
+    "jxl_tiff_encoder": {"_read_page_markers_batch", "_read_group_markers_batch"},
+    "jxl_tiff_decoder": {"_xmp_icc_jxls_batch", "_read_multipage_markers_batch"},
+    "jxl_jpeg_transcoder": {"_read_thumb_markers_batch"},
+    "jxl_recompressor": {"_read_encode_params_batch", "_read_mpg_markers",
+                         "_read_mpg_pages_batch"},
+}
 
 _REAL = all(shutil.which(t) for t in ("cjxl", "exiftool"))
 real = pytest.mark.skipif(not _REAL, reason="needs cjxl and exiftool on PATH")
@@ -152,7 +163,8 @@ def _batch_exiftool_calls(script):
 
         def visit_Call(self, node):
             fn = self.stack[-1] if self.stack else ""
-            is_batch = fn.endswith("_batch") or fn in EXTRA_BATCH_FUNCS
+            is_batch = (fn.endswith("_batch") or fn in EXTRA_BATCH_FUNCS
+                        or fn == "_exiftool_batch")
             called = (getattr(node.func, "id", None)
                       or getattr(node.func, "attr", None))     # g._run_captured
             if (called == "_run_captured" and is_batch
@@ -183,6 +195,25 @@ def test_w5_every_batch_site_uses_the_settings(script):
         stall = next((kw.value for kw in node.keywords if kw.arg == "stall"), None)
         assert _reads_setting(stall, "EXIFTOOL_BATCH_STALL"), \
             (script, fn, "no stall=EXIFTOOL_BATCH_STALL")
+
+
+@pytest.mark.parametrize("script", SCRIPTS + ["jxl_photo_common"])
+def test_w5b_every_batch_reader_runs_on_the_engine(script):
+    """Each planning-time batch reader calls _exiftool_batch (refactor F7), so
+    the timeout, the stall and the progress of #537/#566 are the engine's:
+    a reader with a loop of its own would bypass them again."""
+    path = Path(importlib.import_module(script).__file__)
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    readers = {fn.name: fn for fn in tree.body if isinstance(fn, ast.FunctionDef)
+               and (fn.name.endswith("_batch") or fn.name in EXTRA_BATCH_FUNCS)
+               and fn.name != "_exiftool_batch"
+               and not (len(fn.body) == 1 and isinstance(fn.body[0], ast.Return))}
+    assert set(readers) == BATCH_READERS[script], sorted(readers)
+    for name, fn in readers.items():
+        uses = [n for n in ast.walk(fn) if isinstance(n, ast.Call)
+                and (getattr(n.func, "id", None) or getattr(n.func, "attr", None))
+                == "_exiftool_batch"]
+        assert uses, f"{script}.{name} does not read through _exiftool_batch"
 
 
 # ---------------------------------------------------------------------------

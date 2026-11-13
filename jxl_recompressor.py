@@ -1432,6 +1432,12 @@ def _xmp_block_args(*a, **k): return _common._xmp_block_args(_G, *a, **k)
 def _run_exiftool_argfile(*a, **k): return _common._run_exiftool_argfile(_G, *a, **k)
 
 
+def _exiftool_batch(*a, **k): return _common._exiftool_batch(_G, *a, **k)
+
+
+_RELATION_BATCH_HEAD = _common._RELATION_BATCH_HEAD
+
+
 # ---------------------------------------------------------------------------
 # Encoding-parameter record: read the "cjxl d=X e=Y" tag the encoder stamps,
 # classify the requested recompression against it, and restamp after encoding.
@@ -1479,125 +1485,110 @@ def _read_encode_params_batch(paths: list) -> dict:
                      "scan": None, "thumb": False}
             for p in paths}
     index = {os.path.normcase(str(p)): str(p) for p in paths}
-    if not paths:
-        return info
-    batch_lines = ["-j", "-s", "-s", "-s", "-XMP-dc:Description", "-Software",
-                   "-XMP-xmpMM:HistoryParameters", "-XMP-exif:UserComment",
-                   "-XMP-dc:Relation", "-ExposureTime", "-FNumber", "-FocalLength",
-                   "-ImageWidth", "-ImageHeight",
-                   "-charset", "FileName=UTF8", "-charset", "UTF8"]
-    BATCH = _ENCODE_RECORD_BATCH
     # Quiet while it is fast (a warm cache); then a line per batch, at the
     # directory scan's growing gap, so a 3 327-file plan is not a wall of lines.
     _t0 = time.monotonic()
-    _next = _t0 + _SCAN_QUIET_SECONDS
-    _gap = _SCAN_REPORT_EVERY
-    for i in range(0, len(paths), BATCH):
-        chunk = paths[i:i + BATCH]
-        argfile = None
-        try:
-            with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
-                                             dir=TEMP_DIR, encoding="utf-8",
-                                             newline=chr(10)) as af:
-                af.write(chr(10).join(batch_lines + [str(o) for o in chunk]))
-                af.write(chr(10))
-                argfile = af.name
-            r = _run_captured([_get_exiftool_cmd(), "-@", argfile],
-                              EXIFTOOL_BATCH_TIMEOUT, text=True,
-                              stall=EXIFTOOL_BATCH_STALL)
-            if not r.stdout:
-                logger.warning(f"Encode-tag read failed for a batch of "
-                               f"{len(chunk)} file(s) (rc={r.returncode}) — "
-                               f"treating them as unknown origin")
+    pace = {"next": _t0 + _SCAN_QUIET_SECONDS, "gap": _SCAN_REPORT_EVERY, "done": 0}
+
+    def on_no_output(chunk, r):
+        logger.warning(f"Encode-tag read failed for a batch of "
+                       f"{len(chunk)} file(s) (rc={r.returncode}) — "
+                       f"treating them as unknown origin")
+
+    def on_data(chunk, r, data):
+        for entry in data:
+            src = entry.get("SourceFile")
+            if src is None:
                 continue
-            data = json.loads(r.stdout)
-            for entry in data:
-                src = entry.get("SourceFile")
-                if src is None:
-                    continue
-                key = os.path.normcase(str(Path(src)))
-                if key not in index:
-                    continue
-                desc = str(entry.get("Description") or "")
-                software = str(entry.get("Software") or "")
-                # The record can be SPLIT across the two fields (an older
-                # version moved it, or left a shadow copy). Read the UNION:
-                # the current parameters are the last entry of the merged
-                # chain, and the generation count reconciles over BOTH —
-                # counting one side alone undercounts in exactly the
-                # damaging direction.
-                # Since v2.24.0 the record lives in the History entry
-                # (_history_record); older files keep it in the two fields.
-                history = _history_record(entry.get("HistoryParameters"))
-                comment = str(entry.get("UserComment") or "")
-                merged_entries, merged_stored = _merge_lineage_blocks(
-                    desc, software, history)
-                params = None
-                if merged_entries:
-                    d, e = merged_entries[-1]
-                    try:
-                        params = (float(d), int(e))
-                    except (TypeError, ValueError):
-                        params = None
-                counted = 0
-                for d, _e in merged_entries:
-                    try:
-                        if float(d) > 0:
-                            counted += 1
-                    except ValueError:
-                        continue
-                gen = max(merged_stored, counted) if (merged_entries
-                                                      or merged_stored) else 0
+            key = os.path.normcase(str(Path(src)))
+            if key not in index:
+                continue
+            desc = str(entry.get("Description") or "")
+            software = str(entry.get("Software") or "")
+            # The record can be SPLIT across the two fields (an older
+            # version moved it, or left a shadow copy). Read the UNION:
+            # the current parameters are the last entry of the merged
+            # chain, and the generation count reconciles over BOTH —
+            # counting one side alone undercounts in exactly the
+            # damaging direction.
+            # Since v2.24.0 the record lives in the History entry
+            # (_history_record); older files keep it in the two fields.
+            history = _history_record(entry.get("HistoryParameters"))
+            comment = str(entry.get("UserComment") or "")
+            merged_entries, merged_stored = _merge_lineage_blocks(
+                desc, software, history)
+            params = None
+            if merged_entries:
+                d, e = merged_entries[-1]
                 try:
-                    width = int(entry.get("ImageWidth") or 0)
-                    height = int(entry.get("ImageHeight") or 0)
+                    params = (float(d), int(e))
                 except (TypeError, ValueError):
-                    width = height = 0
-                pixels = width * height
-                # jxlphoto-origin (ORIGIN_PREFIX): what the first master came
-                # from, for the --on-regeneration guard (_hidden_generations).
-                rel = entry.get("Relation")
-                rel_values = [] if rel is None else (
-                    rel if isinstance(rel, list) else [rel])
-                origin = None
-                for t in rel_values:
-                    t = str(t).strip()
-                    if t.startswith(ORIGIN_PREFIX) and len(t) > len(ORIGIN_PREFIX):
-                        origin = t[len(ORIGIN_PREFIX):]
-                        break
-                info[index[key]] = {"desc": desc, "software": software,
-                                    "history": history, "comment": comment,
-                                    "params": params, "gen": gen,
-                                    "pixels": pixels, "width": width,
-                                    "height": height, "origin": origin,
-                                    "scan": _scan_kind_of(
-                                        rel_values, software,
-                                        camera=any(entry.get(k) is not None for k in
-                                                   ("ExposureTime", "FNumber",
-                                                    "FocalLength"))),
-                                    "thumb": (any(str(t).strip() == THUMB_FLAG
-                                                  for t in rel_values)
-                                              or _is_camera_thumbnail_page(
-                                                  rel_values, width, height))}
-        except Exception as e:
-            logger.warning(f"Encode-tag batch failed ({e}); {len(chunk)} file(s) "
-                           f"treated as unknown origin")
-        finally:
-            if argfile:
+                    params = None
+            counted = 0
+            for d, _e in merged_entries:
                 try:
-                    os.unlink(argfile)
-                except OSError:
-                    pass
-            _done = min(i + BATCH, len(paths))
-            _now = time.monotonic()
-            if _done < len(paths) and _now >= _next:
-                # Remaining time at the rate so far (the jbrd walk and the
-                # output checks after it are seconds: see "Planned in").
-                _eta = (_now - _t0) / _done * (len(paths) - _done)
-                logger.info(f"  Encode records: {_done}/{len(paths)} read "
-                            f"({_fmt_secs(_now - _t0)}, ~{_fmt_eta(_eta)} left)")
-                _gap = min(_gap * _SCAN_REPORT_FACTOR, _SCAN_REPORT_MAX)
-                _next = _now + _gap
+                    if float(d) > 0:
+                        counted += 1
+                except ValueError:
+                    continue
+            gen = max(merged_stored, counted) if (merged_entries
+                                                  or merged_stored) else 0
+            try:
+                width = int(entry.get("ImageWidth") or 0)
+                height = int(entry.get("ImageHeight") or 0)
+            except (TypeError, ValueError):
+                width = height = 0
+            pixels = width * height
+            # jxlphoto-origin (ORIGIN_PREFIX): what the first master came
+            # from, for the --on-regeneration guard (_hidden_generations).
+            rel = entry.get("Relation")
+            rel_values = [] if rel is None else (
+                rel if isinstance(rel, list) else [rel])
+            origin = None
+            for t in rel_values:
+                t = str(t).strip()
+                if t.startswith(ORIGIN_PREFIX) and len(t) > len(ORIGIN_PREFIX):
+                    origin = t[len(ORIGIN_PREFIX):]
+                    break
+            info[index[key]] = {"desc": desc, "software": software,
+                                "history": history, "comment": comment,
+                                "params": params, "gen": gen,
+                                "pixels": pixels, "width": width,
+                                "height": height, "origin": origin,
+                                "scan": _scan_kind_of(
+                                    rel_values, software,
+                                    camera=any(entry.get(k) is not None for k in
+                                               ("ExposureTime", "FNumber",
+                                                "FocalLength"))),
+                                "thumb": (any(str(t).strip() == THUMB_FLAG
+                                              for t in rel_values)
+                                          or _is_camera_thumbnail_page(
+                                              rel_values, width, height))}
+
+    def on_error(chunk, e):
+        logger.warning(f"Encode-tag batch failed ({e}); {len(chunk)} file(s) "
+                       f"treated as unknown origin")
+
+    def on_done(chunk):
+        pace["done"] += len(chunk)
+        _done = pace["done"]
+        _now = time.monotonic()
+        if _done < len(paths) and _now >= pace["next"]:
+            # Remaining time at the rate so far (the jbrd walk and the
+            # output checks after it are seconds: see "Planned in").
+            _eta = (_now - _t0) / _done * (len(paths) - _done)
+            logger.info(f"  Encode records: {_done}/{len(paths)} read "
+                        f"({_fmt_secs(_now - _t0)}, ~{_fmt_eta(_eta)} left)")
+            pace["gap"] = min(pace["gap"] * _SCAN_REPORT_FACTOR, _SCAN_REPORT_MAX)
+            pace["next"] = _now + pace["gap"]
+
+    _exiftool_batch(paths, ("-j", "-s", "-s", "-s", "-XMP-dc:Description", "-Software",
+                            "-XMP-xmpMM:HistoryParameters", "-XMP-exif:UserComment",
+                            "-XMP-dc:Relation", "-ExposureTime", "-FNumber", "-FocalLength",
+                            "-ImageWidth", "-ImageHeight",
+                            "-charset", "FileName=UTF8", "-charset", "UTF8"),
+                    "Encode records", on_data, on_no_output=on_no_output, on_error=on_error,
+                    on_done=on_done, batch=_ENCODE_RECORD_BATCH, progress=False)
     return info
 
 
@@ -3806,53 +3797,29 @@ def _read_mpg_markers(paths: list):
     """
     mpg = {str(p): None for p in paths}
     index = {os.path.normcase(str(p)): str(p) for p in paths}
-    if not paths:
-        return mpg, True
-    batch_lines = ["-j", "-s", "-s", "-XMP-dc:Relation",
-                   "-charset", "FileName=UTF8", "-charset", "UTF8"]
-    BATCH = 400
     complete = True
-    _prog = _batch_read_state("Multipage markers", len(paths))
-    for i in range(0, len(paths), BATCH):
-        chunk = paths[i:i + BATCH]
-        _batch_read_tick(_prog, i)
-        argfile = None
-        try:
-            with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
-                                             dir=TEMP_DIR, encoding="utf-8",
-                                             newline=chr(10)) as af:
-                af.write(chr(10).join(batch_lines + [str(o) for o in chunk]))
-                af.write(chr(10))
-                argfile = af.name
-            r = _run_captured([_get_exiftool_cmd(), "-@", argfile],
-                              EXIFTOOL_BATCH_TIMEOUT, text=True,
-                              stall=EXIFTOOL_BATCH_STALL)
-            if r.returncode != 0 or not r.stdout:
-                complete = False
+
+    def on_data(chunk, r, data):
+        for entry in data:
+            src = entry.get("SourceFile")
+            rel = entry.get("Relation")
+            if src is None or rel is None:
                 continue
-            data = json.loads(r.stdout)
-            for entry in data:
-                src = entry.get("SourceFile")
-                rel = entry.get("Relation")
-                if src is None or rel is None:
-                    continue
-                values = rel if isinstance(rel, list) else [str(rel)]
-                for token in values:
-                    token = str(token).strip()
-                    if token.startswith(MULTIPAGE_XMP_MARKER):
-                        key = os.path.normcase(str(Path(src)))
-                        if key in index:
-                            mpg[index[key]] = token[len(MULTIPAGE_XMP_MARKER):]
-                        break
-        except Exception:
-            complete = False
-            continue
-        finally:
-            if argfile:
-                try:
-                    os.unlink(argfile)
-                except OSError:
-                    pass
+            values = rel if isinstance(rel, list) else [str(rel)]
+            for token in values:
+                token = str(token).strip()
+                if token.startswith(MULTIPAGE_XMP_MARKER):
+                    key = os.path.normcase(str(Path(src)))
+                    if key in index:
+                        mpg[index[key]] = token[len(MULTIPAGE_XMP_MARKER):]
+                    break
+
+    def unread(chunk, _why):
+        nonlocal complete
+        complete = False
+
+    _exiftool_batch(paths, _RELATION_BATCH_HEAD, "Multipage markers", on_data,
+                    on_no_output=unread, on_error=unread, strict=True)
     return mpg, complete
 
 
@@ -3865,55 +3832,32 @@ def _read_mpg_pages_batch(paths: list):
     not be read: the gate then keeps those groups (fail closed)."""
     totals = {str(p): None for p in paths}
     index = {os.path.normcase(str(p)): str(p) for p in paths}
-    if not paths:
-        return totals, True
-    batch_lines = ["-j", "-s", "-s", "-XMP-dc:Relation",
-                   "-charset", "FileName=UTF8", "-charset", "UTF8"]
-    BATCH = 400
     complete = True
-    _prog = _batch_read_state("Multipage page counts", len(paths))
-    for i in range(0, len(paths), BATCH):
-        chunk = paths[i:i + BATCH]
-        _batch_read_tick(_prog, i)
-        argfile = None
-        try:
-            with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
-                                             dir=TEMP_DIR, encoding="utf-8",
-                                             newline=chr(10)) as af:
-                af.write(chr(10).join(batch_lines + [str(o) for o in chunk]))
-                af.write(chr(10))
-                argfile = af.name
-            r = _run_captured([_get_exiftool_cmd(), "-@", argfile],
-                              EXIFTOOL_BATCH_TIMEOUT, text=True,
-                              stall=EXIFTOOL_BATCH_STALL)
-            if r.returncode != 0 or not r.stdout:
-                complete = False
+
+    def on_data(chunk, r, data):
+        for entry in data:
+            src = entry.get("SourceFile")
+            rel = entry.get("Relation")
+            if src is None or rel is None:
                 continue
-            for entry in json.loads(r.stdout):
-                src = entry.get("SourceFile")
-                rel = entry.get("Relation")
-                if src is None or rel is None:
-                    continue
-                key = os.path.normcase(str(Path(src)))
-                if key not in index:
-                    continue
-                for token in (rel if isinstance(rel, list) else [str(rel)]):
-                    token = str(token).strip()
-                    if token.startswith(MULTIPAGE_PAGES_PREFIX):
-                        try:
-                            totals[index[key]] = int(token[len(MULTIPAGE_PAGES_PREFIX):])
-                        except ValueError:
-                            totals[index[key]] = -1     # unreadable: fail closed
-                        break
-        except Exception:
-            complete = False
-            continue
-        finally:
-            if argfile:
-                try:
-                    os.unlink(argfile)
-                except OSError:
-                    pass
+            key = os.path.normcase(str(Path(src)))
+            if key not in index:
+                continue
+            for token in (rel if isinstance(rel, list) else [str(rel)]):
+                token = str(token).strip()
+                if token.startswith(MULTIPAGE_PAGES_PREFIX):
+                    try:
+                        totals[index[key]] = int(token[len(MULTIPAGE_PAGES_PREFIX):])
+                    except ValueError:
+                        totals[index[key]] = -1     # unreadable: fail closed
+                    break
+
+    def unread(chunk, _why):
+        nonlocal complete
+        complete = False
+
+    _exiftool_batch(paths, _RELATION_BATCH_HEAD, "Multipage page counts", on_data,
+                    on_no_output=unread, on_error=unread, strict=True)
     return totals, complete
 
 

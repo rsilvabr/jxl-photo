@@ -352,6 +352,12 @@ def _xmp_block_args(*a, **k): return _common._xmp_block_args(_G, *a, **k)
 def _run_exiftool_argfile(*a, **k): return _common._run_exiftool_argfile(_G, *a, **k)
 
 
+def _exiftool_batch(*a, **k): return _common._exiftool_batch(_G, *a, **k)
+
+
+_RELATION_BATCH_HEAD = _common._RELATION_BATCH_HEAD
+
+
 def _exiftool_commands(*a, **k): return _common._exiftool_commands(_G, *a, **k)
 
 
@@ -1051,39 +1057,20 @@ def _xmp_icc_jxls_batch(jxls: list) -> set:
     the decode); a batch that cannot be read counts its files in (the
     preview must not promise a deletion it cannot rule out)."""
     found = set()
-    _prog = _batch_read_state("Profile markers", len(jxls))
-    for i in range(0, len(jxls), 400):
-        chunk = jxls[i:i + 400]
-        _batch_read_tick(_prog, i)
-        argfile = None
-        try:
-            with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
-                                             dir=TEMP_DIR, encoding="utf-8",
-                                             newline="\n") as af:
-                argfile = af.name
-                af.write("-j\n-b\n-XMP-xmp:CreatorTool\n-XMP-dc:Relation\n"
-                         "-charset\nFileName=UTF8\n-charset\nUTF8\n")
-                for j in chunk:
-                    af.write(str(j) + "\n")
-            r = _run_captured([_get_exiftool_cmd(), "-@", argfile],
-                              EXIFTOOL_BATCH_TIMEOUT, text=True,
-                              stall=EXIFTOOL_BATCH_STALL)
-            data = json.loads(r.stdout) if r.stdout else None
-            if data is None:
-                raise RuntimeError(f"exiftool rc={r.returncode}")
-            for entry in data:
-                _rel = entry.get("Relation")
-                _toks = [] if _rel is None else (_rel if isinstance(_rel, list) else [_rel])
-                if _carried_icc(str(entry.get("CreatorTool") or ""), _toks):
-                    found.add(os.path.normcase(str(Path(entry.get("SourceFile", "")))))
-        except Exception:
-            found.update(os.path.normcase(str(j)) for j in chunk)
-        finally:
-            if argfile:
-                try:
-                    os.unlink(argfile)
-                except OSError:
-                    pass
+
+    def on_data(chunk, r, data):
+        for entry in data:
+            _rel = entry.get("Relation")
+            _toks = [] if _rel is None else (_rel if isinstance(_rel, list) else [_rel])
+            if _carried_icc(str(entry.get("CreatorTool") or ""), _toks):
+                found.add(os.path.normcase(str(Path(entry.get("SourceFile", "")))))
+
+    def unread(chunk, _why):
+        found.update(os.path.normcase(str(j)) for j in chunk)
+
+    _exiftool_batch(jxls, ("-j", "-b", "-XMP-xmp:CreatorTool", "-XMP-dc:Relation",
+                           "-charset", "FileName=UTF8", "-charset", "UTF8"),
+                    "Profile markers", on_data, on_no_output=unread, on_error=unread)
     return found
 
 def extract_icc_native(jxl_path, tmp_dir):
@@ -3806,165 +3793,136 @@ def _read_multipage_markers_batch(jxls: list) -> dict:
 
     Spawning one exiftool per file is far too slow for large libraries
     (~100ms/file -> tens of minutes for tens of thousands of files), so we pass
-    files in large batches and parse the per-file output. exiftool prints one
-    "======== <path>" header per file with -G/-s style output; we use a JSON
-    output which is unambiguous and easy to parse.
+    files in large batches (_exiftool_batch: an argfile, so no Windows
+    command-line limit and no [ ] wildcards) and parse exiftool's JSON, which
+    is unambiguous.
     """
-    import json as _json
     markers: dict = {str(j): {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'pages': None, 'thumb': False, 'srcsum': None, 'extrasamples': None, 'tifftags': None, 'derived': False} for j in jxls}
     # normcase -> the exact key the caller will look up by.
     index = {os.path.normcase(str(j)): str(j) for j in jxls}
-    if not jxls:
-        return markers
 
-    BATCH = 400
-    exe = _get_exiftool_cmd()
-    _prog = _batch_read_state("Multipage markers", len(jxls))
-    for i in range(0, len(jxls), BATCH):
-        chunk = jxls[i:i + BATCH]
-        _batch_read_tick(_prog, i)
-        try:
-            # Pass the file list via an exiftool argfile (-@): avoids the ~32k
-            # Windows command-line limit with large batches, and prevents paths
-            # containing [ ] from being treated as wildcards. UTF-8 charset for
-            # non-ASCII paths.
-            argfile = None
-            try:
-                with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
-                                                 dir=TEMP_DIR, encoding="utf-8", newline="\n") as af:
-                    argfile = af.name
-                    af.write("-j\n-s\n-s\n-XMP-dc:Relation\n-charset\nFileName=UTF8\n-charset\nUTF8\n")
-                    for j in chunk:
-                        af.write(str(j) + "\n")
-                r = _run_captured(
-                    [exe, "-@", argfile], EXIFTOOL_BATCH_TIMEOUT, text=True,
-                    stall=EXIFTOOL_BATCH_STALL
-                )
-            finally:
-                if argfile:
-                    try:
-                        os.unlink(argfile)
-                    except OSError:
-                        pass
-            if not r.stdout:
-                # Fail closed for the delete gate: standalone defaults are the
-                # safe fallback for DECODING, but a marked multi-page group
-                # whose markers are unread splits into one-page groups whose
-                # TIFFs pass every integrity check — so record the failure and
-                # let the gate retain the sources of any affected group.
-                logger.warning(f"Multipage marker read failed for a batch of {len(chunk)} "
-                               f"file(s) (rc={r.returncode}); treating them as standalone — "
-                               f"the delete gate will KEEP their sources this run")
-                _mpg_marker_failures.update(os.path.normcase(str(j)) for j in chunk)
-                continue
-            # exiftool exits non-zero when it fails on ANY file of the batch,
-            # but still prints valid JSON for the rest. Discarding that JSON
-            # would strip the markers from up to 399 healthy files because of
-            # one unreadable one — multi-page groups would split into single
-            # pages and grayscale/depth/subfiletype flags would be lost.
-            # Parse what it did return; files absent from the JSON keep the
-            # standalone defaults already seeded in `markers`.
-            data = _json.loads(r.stdout)
-            if r.returncode != 0:
-                # exiftool exited non-zero: it failed on AT LEAST ONE file of
-                # the batch, and a format-level failure may not even carry an
-                # "Error" key in the JSON (the message goes to stderr with an
-                # empty SourceFile-only entry). The healthy entries still
-                # parse below — the markers they return keep the real groups
-                # intact for DECODING — but no file of a partially-failed
-                # batch can prove it is standalone rather than unread, so the
-                # whole chunk is recorded and the delete gate retains its
-                # sources this run (fail closed, like mpg_complete=False in
-                # the recompressor).
-                logger.warning(f"Marker read: exiftool rc={r.returncode} on a batch of {len(chunk)} file(s); "
-                               f"using the {len(data)} entry/entries it returned, the rest are "
-                               f"standalone — the delete gate will KEEP this batch's sources")
-                _mpg_marker_failures.update(os.path.normcase(str(j)) for j in chunk)
-            for entry in data:
-                src = entry.get("SourceFile")
-                rel = entry.get("Relation")
-                if src is None or rel is None:
-                    continue
-                # Relation may be a string or a list depending on cardinality.
-                # A SCALAR is one value, not a comma-separated list: splitting it
-                # would tear a legitimate user value ("Smith, John") into two —
-                # and _read_source_markers_batch, which reads the same tag, has
-                # always used the whole string. The two must agree.
-                values = rel if isinstance(rel, list) else [str(rel)]
-                info = {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'pages': None, 'thumb': False, 'srcsum': None, 'extrasamples': None, 'tifftags': None, 'derived': False}
-                for token in values:
-                    token = str(token).strip()
-                    if token.startswith(DERIVED_XMP_PREFIX):
-                        info['derived'] = True
-                    if token.startswith(TIFFTAG_PREFIX):
-                        _tt = _parse_tifftag(token)
-                        if _tt:
-                            info['tifftags'] = (info['tifftags'] or []) + [_tt]
-                    elif token.startswith(EXTRASAMPLES_PREFIX):
-                        try:
-                            info['extrasamples'] = tuple(
-                                int(v) for v in token[len(EXTRASAMPLES_PREFIX):].split(","))
-                        except ValueError:
-                            pass        # unreadable -> the old default
-                    elif token.startswith(SRCSUM_PREFIX):
-                        # Which SOURCE BYTES made this output. Used only to tell
-                        # the members of one split from leftovers of an earlier
-                        # one — see _split_group_by_srcsum.
-                        info['srcsum'] = token[len(SRCSUM_PREFIX):]
-                    elif token.startswith(MULTIPAGE_MARKER_PREFIX):
-                        info['group'] = token[len(MULTIPAGE_MARKER_PREFIX):]
-                    elif token == ICC_INHERITED_FLAG:
-                        info['inherited'] = True
-                    elif token.startswith(SUBFILETYPE_PREFIX):
-                        try:
-                            info['subfiletype'] = int(token[len(SUBFILETYPE_PREFIX):])
-                        except ValueError:
-                            pass
-                    elif token == GRAYSCALE_FLAG:
-                        info['grayscale'] = True
-                    elif token.startswith(DEPTH_FLAG):
-                        try:
-                            info['depth'] = int(token[len(DEPTH_FLAG):])
-                        except ValueError:
-                            pass
-                    elif token.startswith(PAGES_PREFIX):
-                        try:
-                            info['pages'] = int(token[len(PAGES_PREFIX):])
-                        except ValueError:
-                            pass
-                    elif token.startswith(PAGE_PREFIX):
-                        try:
-                            info['page'] = int(token[len(PAGE_PREFIX):])
-                        except ValueError:
-                            pass
-                    elif token == THUMB_FLAG:
-                        info['thumb'] = True
-                # normcase, like _read_source_markers_batch: exiftool can hand
-                # back a differently-cased drive letter or flipped separators,
-                # and an exact-case miss wrote the info under a key no caller
-                # ever looks up — the file kept the standalone defaults, so a
-                # marked multi-page group decoded as loose single pages (and
-                # mode 8 deleted the sources page by page).
-                key = os.path.normcase(str(Path(src)))
-                if key in index:
-                    markers[index[key]] = info
-                else:
-                    # A path this run did not ask about: there is no caller
-                    # key to file it under, so log it instead of stashing it
-                    # in the dict where it would be silently ignored.
-                    logger.warning(f"Marker read: path mismatch, treated as standalone | {src}")
-        except Exception as e:
-            # On any batch failure (a timeout raises TimeoutExpired into this
-            # handler too), leave those files as standalone — the safe default
-            # for DECODING. NOT for DELETING: the group markers are unread, so
-            # no group containing these files can be proven complete and the
-            # delete gate retains their sources this run (fail closed, like
-            # the recompressor's mpg_complete=False from round 38).
-            logger.warning(f"Multipage marker batch error ({e}); {len(chunk)} file(s) "
-                           f"treated as standalone — the delete gate will KEEP their "
-                           f"sources this run")
+    def on_no_output(chunk, r):
+        # Fail closed for the delete gate: standalone defaults are the
+        # safe fallback for DECODING, but a marked multi-page group
+        # whose markers are unread splits into one-page groups whose
+        # TIFFs pass every integrity check — so record the failure and
+        # let the gate retain the sources of any affected group.
+        logger.warning(f"Multipage marker read failed for a batch of {len(chunk)} "
+                       f"file(s) (rc={r.returncode}); treating them as standalone — "
+                       f"the delete gate will KEEP their sources this run")
+        _mpg_marker_failures.update(os.path.normcase(str(j)) for j in chunk)
+
+    def on_data(chunk, r, data):
+        # exiftool exits non-zero when it fails on ANY file of the batch,
+        # but still prints valid JSON for the rest. Discarding that JSON
+        # would strip the markers from up to 399 healthy files because of
+        # one unreadable one — multi-page groups would split into single
+        # pages and grayscale/depth/subfiletype flags would be lost.
+        # Parse what it did return; files absent from the JSON keep the
+        # standalone defaults already seeded in `markers`.
+        if r.returncode != 0:
+            # exiftool exited non-zero: it failed on AT LEAST ONE file of
+            # the batch, and a format-level failure may not even carry an
+            # "Error" key in the JSON (the message goes to stderr with an
+            # empty SourceFile-only entry). The healthy entries still
+            # parse below — the markers they return keep the real groups
+            # intact for DECODING — but no file of a partially-failed
+            # batch can prove it is standalone rather than unread, so the
+            # whole chunk is recorded and the delete gate retains its
+            # sources this run (fail closed, like mpg_complete=False in
+            # the recompressor).
+            logger.warning(f"Marker read: exiftool rc={r.returncode} on a batch of {len(chunk)} file(s); "
+                           f"using the {len(data)} entry/entries it returned, the rest are "
+                           f"standalone — the delete gate will KEEP this batch's sources")
             _mpg_marker_failures.update(os.path.normcase(str(j)) for j in chunk)
-            continue
+        for entry in data:
+            src = entry.get("SourceFile")
+            rel = entry.get("Relation")
+            if src is None or rel is None:
+                continue
+            # Relation may be a string or a list depending on cardinality.
+            # A SCALAR is one value, not a comma-separated list: splitting it
+            # would tear a legitimate user value ("Smith, John") into two —
+            # and _read_source_markers_batch, which reads the same tag, has
+            # always used the whole string. The two must agree.
+            values = rel if isinstance(rel, list) else [str(rel)]
+            info = {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'pages': None, 'thumb': False, 'srcsum': None, 'extrasamples': None, 'tifftags': None, 'derived': False}
+            for token in values:
+                token = str(token).strip()
+                if token.startswith(DERIVED_XMP_PREFIX):
+                    info['derived'] = True
+                if token.startswith(TIFFTAG_PREFIX):
+                    _tt = _parse_tifftag(token)
+                    if _tt:
+                        info['tifftags'] = (info['tifftags'] or []) + [_tt]
+                elif token.startswith(EXTRASAMPLES_PREFIX):
+                    try:
+                        info['extrasamples'] = tuple(
+                            int(v) for v in token[len(EXTRASAMPLES_PREFIX):].split(","))
+                    except ValueError:
+                        pass        # unreadable -> the old default
+                elif token.startswith(SRCSUM_PREFIX):
+                    # Which SOURCE BYTES made this output. Used only to tell
+                    # the members of one split from leftovers of an earlier
+                    # one — see _split_group_by_srcsum.
+                    info['srcsum'] = token[len(SRCSUM_PREFIX):]
+                elif token.startswith(MULTIPAGE_MARKER_PREFIX):
+                    info['group'] = token[len(MULTIPAGE_MARKER_PREFIX):]
+                elif token == ICC_INHERITED_FLAG:
+                    info['inherited'] = True
+                elif token.startswith(SUBFILETYPE_PREFIX):
+                    try:
+                        info['subfiletype'] = int(token[len(SUBFILETYPE_PREFIX):])
+                    except ValueError:
+                        pass
+                elif token == GRAYSCALE_FLAG:
+                    info['grayscale'] = True
+                elif token.startswith(DEPTH_FLAG):
+                    try:
+                        info['depth'] = int(token[len(DEPTH_FLAG):])
+                    except ValueError:
+                        pass
+                elif token.startswith(PAGES_PREFIX):
+                    try:
+                        info['pages'] = int(token[len(PAGES_PREFIX):])
+                    except ValueError:
+                        pass
+                elif token.startswith(PAGE_PREFIX):
+                    try:
+                        info['page'] = int(token[len(PAGE_PREFIX):])
+                    except ValueError:
+                        pass
+                elif token == THUMB_FLAG:
+                    info['thumb'] = True
+            # normcase, like _read_source_markers_batch: exiftool can hand
+            # back a differently-cased drive letter or flipped separators,
+            # and an exact-case miss wrote the info under a key no caller
+            # ever looks up — the file kept the standalone defaults, so a
+            # marked multi-page group decoded as loose single pages (and
+            # mode 8 deleted the sources page by page).
+            key = os.path.normcase(str(Path(src)))
+            if key in index:
+                markers[index[key]] = info
+            else:
+                # A path this run did not ask about: there is no caller
+                # key to file it under, so log it instead of stashing it
+                # in the dict where it would be silently ignored.
+                logger.warning(f"Marker read: path mismatch, treated as standalone | {src}")
+
+    def on_error(chunk, e):
+        # On any batch failure (a timeout raises TimeoutExpired into this
+        # handler too), leave those files as standalone — the safe default
+        # for DECODING. NOT for DELETING: the group markers are unread, so
+        # no group containing these files can be proven complete and the
+        # delete gate retains their sources this run (fail closed, like
+        # the recompressor's mpg_complete=False from round 38).
+        logger.warning(f"Multipage marker batch error ({e}); {len(chunk)} file(s) "
+                       f"treated as standalone — the delete gate will KEEP their "
+                       f"sources this run")
+        _mpg_marker_failures.update(os.path.normcase(str(j)) for j in chunk)
+
+    _exiftool_batch(jxls, _RELATION_BATCH_HEAD, "Multipage markers", on_data,
+                    on_no_output=on_no_output, on_error=on_error)
     return markers
 
 

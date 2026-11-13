@@ -818,6 +818,12 @@ def _exiftool_source(*a, **k): return _common._exiftool_source(_G, *a, **k)
 def _run_exiftool_argfile(*a, **k): return _common._run_exiftool_argfile(_G, *a, **k)
 
 
+def _exiftool_batch(*a, **k): return _common._exiftool_batch(_G, *a, **k)
+
+
+_RELATION_BATCH_HEAD = _common._RELATION_BATCH_HEAD
+
+
 SRC_PREFIX = "jxlphoto-src:"
 SRCSUM_PREFIX = "jxlphoto-srcsum:"
 # Must match the encoder's SRC_XMP_PREFIX / SRCSUM_XMP_PREFIX: they record
@@ -5032,46 +5038,25 @@ def _read_thumb_markers_batch(paths: list) -> set:
     possible. A batch that cannot be read marks nothing: its files are
     converted as before."""
     found = set()
-    if not paths:
-        return found
-    batch_lines = ["-j", "-s", "-s", "-XMP-dc:Relation", "-ImageWidth", "-ImageHeight",
-                   "-charset", "FileName=UTF8", "-charset", "UTF8"]
-    BATCH = 400
-    _prog = _batch_read_state("Thumbnail markers", len(paths))
-    for i in range(0, len(paths), BATCH):
-        chunk = paths[i:i + BATCH]
-        _batch_read_tick(_prog, i)
-        argfile = None
-        try:
-            with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
-                                             dir=TEMP_DIR, encoding="utf-8",
-                                             newline=chr(10)) as af:
-                af.write(chr(10).join(batch_lines + [str(p) for p in chunk]))
-                af.write(chr(10))
-                argfile = af.name
-            r = _run_captured([_get_exiftool_cmd(), "-@", argfile],
-                              EXIFTOOL_BATCH_TIMEOUT, text=True,
-                              stall=EXIFTOOL_BATCH_STALL)
-            if not r.stdout:
+
+    def on_data(chunk, r, data):
+        for entry in data:
+            src = entry.get("SourceFile")
+            rel = entry.get("Relation")
+            if src is None or rel is None:
                 continue
-            for entry in json.loads(r.stdout):
-                src = entry.get("SourceFile")
-                rel = entry.get("Relation")
-                if src is None or rel is None:
-                    continue
-                values = rel if isinstance(rel, list) else [str(rel)]
-                if (any(str(t).strip() == THUMB_FLAG for t in values)
-                        or _is_camera_thumbnail_page(values, entry.get("ImageWidth"),
-                                                     entry.get("ImageHeight"))):
-                    found.add(os.path.normcase(str(Path(src))))
-        except Exception as e:
-            logger.debug(f"Thumbnail-page check: marker batch failed ({e})")
-        finally:
-            if argfile:
-                try:
-                    os.unlink(argfile)
-                except OSError:
-                    pass
+            values = rel if isinstance(rel, list) else [str(rel)]
+            if (any(str(t).strip() == THUMB_FLAG for t in values)
+                    or _is_camera_thumbnail_page(values, entry.get("ImageWidth"),
+                                                 entry.get("ImageHeight"))):
+                found.add(os.path.normcase(str(Path(src))))
+
+    def on_error(chunk, e):
+        logger.debug(f"Thumbnail-page check: marker batch failed ({e})")
+
+    _exiftool_batch(paths, ("-j", "-s", "-s", "-XMP-dc:Relation", "-ImageWidth",
+                            "-ImageHeight", "-charset", "FileName=UTF8", "-charset", "UTF8"),
+                    "Thumbnail markers", on_data, on_error=on_error)
     return found
 
 

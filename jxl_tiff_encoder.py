@@ -1702,6 +1702,12 @@ def _exiftool_source(*a, **k): return _common._exiftool_source(_G, *a, **k)
 def _run_exiftool_argfile(*a, **k): return _common._run_exiftool_argfile(_G, *a, **k)
 
 
+def _exiftool_batch(*a, **k): return _common._exiftool_batch(_G, *a, **k)
+
+
+_RELATION_BATCH_HEAD = _common._RELATION_BATCH_HEAD
+
+
 def _run_exiftool_writes(*a, **k): return _common._run_exiftool_writes(_G, *a, **k)
 
 
@@ -4728,58 +4734,35 @@ def _read_page_markers_batch(paths: list) -> dict:
     markers = {str(p): {"src": None, "group": None, "thumb": False, "pages": None}
                for p in paths}
     index = {os.path.normcase(str(p)): str(p) for p in paths}
-    if not paths:
-        return markers
-    batch_lines = ["-j", "-s", "-s", "-XMP-dc:Relation",
-                   "-charset", "FileName=UTF8", "-charset", "UTF8"]
-    BATCH = 400
-    _prog = _batch_read_state("Page markers", len(paths))
-    for i in range(0, len(paths), BATCH):
-        chunk = paths[i:i + BATCH]
-        _batch_read_tick(_prog, i)
-        argfile = None
-        try:
-            with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
-                                             dir=TEMP_DIR, encoding="utf-8",
-                                             newline=chr(10)) as af:
-                af.write(chr(10).join(batch_lines + [str(p) for p in chunk]))
-                af.write(chr(10))
-                argfile = af.name
-            r = _run_captured([_get_exiftool_cmd(), "-@", argfile],
-                              EXIFTOOL_BATCH_TIMEOUT, text=True,
-                              stall=EXIFTOOL_BATCH_STALL)
-            if not r.stdout:
+
+    def on_data(chunk, r, data):
+        for entry in data:
+            src = entry.get("SourceFile")
+            rel = entry.get("Relation")
+            if src is None or rel is None:
                 continue
-            for entry in json.loads(r.stdout):
-                src = entry.get("SourceFile")
-                rel = entry.get("Relation")
-                if src is None or rel is None:
-                    continue
-                info = {"src": None, "group": None, "thumb": False, "pages": None}
-                for token in (rel if isinstance(rel, list) else [str(rel)]):
-                    token = str(token).strip()
-                    if token.startswith(SRC_PREFIX):
-                        info["src"] = token[len(SRC_PREFIX):]
-                    elif token.startswith(MULTIPAGE_XMP_MARKER):
-                        info["group"] = token[len(MULTIPAGE_XMP_MARKER):]
-                    elif token.startswith(PAGES_XMP_PREFIX):
-                        try:
-                            info["pages"] = int(token[len(PAGES_XMP_PREFIX):])
-                        except ValueError:
-                            info["pages"] = -1
-                    elif token == THUMB_XMP_FLAG:
-                        info["thumb"] = True
-                key = os.path.normcase(str(Path(src)))
-                if key in index:
-                    markers[index[key]] = info
-        except Exception as e:
-            logger.debug(f"Stale split pages: marker batch failed ({e})")
-        finally:
-            if argfile:
-                try:
-                    os.unlink(argfile)
-                except OSError:
-                    pass
+            info = {"src": None, "group": None, "thumb": False, "pages": None}
+            for token in (rel if isinstance(rel, list) else [str(rel)]):
+                token = str(token).strip()
+                if token.startswith(SRC_PREFIX):
+                    info["src"] = token[len(SRC_PREFIX):]
+                elif token.startswith(MULTIPAGE_XMP_MARKER):
+                    info["group"] = token[len(MULTIPAGE_XMP_MARKER):]
+                elif token.startswith(PAGES_XMP_PREFIX):
+                    try:
+                        info["pages"] = int(token[len(PAGES_XMP_PREFIX):])
+                    except ValueError:
+                        info["pages"] = -1
+                elif token == THUMB_XMP_FLAG:
+                    info["thumb"] = True
+            key = os.path.normcase(str(Path(src)))
+            if key in index:
+                markers[index[key]] = info
+
+    def on_error(chunk, e):
+        logger.debug(f"Stale split pages: marker batch failed ({e})")
+
+    _exiftool_batch(paths, _RELATION_BATCH_HEAD, "Page markers", on_data, on_error=on_error)
     return markers
 
 
@@ -5172,52 +5155,29 @@ def _read_group_markers_batch(outputs: list) -> dict:
     """
     markers = {str(o): None for o in outputs}
     index = {os.path.normcase(str(o)): str(o) for o in outputs}
-    if not outputs:
-        return markers
-    batch_lines = ["-j", "-s", "-s", "-XMP-dc:Relation",
-                   "-charset", "FileName=UTF8", "-charset", "UTF8"]
-    BATCH = 400
-    _prog = _batch_read_state("Group markers", len(outputs))
-    for i in range(0, len(outputs), BATCH):
-        chunk = outputs[i:i + BATCH]
-        _batch_read_tick(_prog, i)
-        argfile = None
-        try:
-            with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
-                                             dir=TEMP_DIR, encoding="utf-8",
-                                             newline=chr(10)) as af:
-                af.write(chr(10).join(batch_lines + [str(o) for o in chunk]))
-                af.write(chr(10))
-                argfile = af.name
-            r = _run_captured([_get_exiftool_cmd(), "-@", argfile],
-                              EXIFTOOL_BATCH_TIMEOUT, text=True,
-                              stall=EXIFTOOL_BATCH_STALL)
-            if not r.stdout:
+
+    def on_data(chunk, r, data):
+        for entry in data:
+            src = entry.get("SourceFile")
+            rel = entry.get("Relation")
+            if src is None or rel is None:
                 continue
-            for entry in json.loads(r.stdout):
-                src = entry.get("SourceFile")
-                rel = entry.get("Relation")
-                if src is None or rel is None:
-                    continue
-                values = rel if isinstance(rel, list) else [str(rel)]
-                gid = None
-                for token in values:
-                    token = str(token).strip()
-                    if token.startswith(MULTIPAGE_XMP_MARKER):
-                        gid = token[len(MULTIPAGE_XMP_MARKER):]
-                key = os.path.normcase(str(Path(src)))
-                if key in index:
-                    markers[index[key]] = gid
-        except Exception as e:
-            # Never fail an archive run over an optimization: unreadable
-            # markers simply mean the new formula is used.
-            logger.debug(f"Legacy group-id check: marker batch failed ({e})")
-        finally:
-            if argfile:
-                try:
-                    os.unlink(argfile)
-                except OSError:
-                    pass
+            values = rel if isinstance(rel, list) else [str(rel)]
+            gid = None
+            for token in values:
+                token = str(token).strip()
+                if token.startswith(MULTIPAGE_XMP_MARKER):
+                    gid = token[len(MULTIPAGE_XMP_MARKER):]
+            key = os.path.normcase(str(Path(src)))
+            if key in index:
+                markers[index[key]] = gid
+
+    def on_error(chunk, e):
+        # Never fail an archive run over an optimization: unreadable
+        # markers simply mean the new formula is used.
+        logger.debug(f"Legacy group-id check: marker batch failed ({e})")
+
+    _exiftool_batch(outputs, _RELATION_BATCH_HEAD, "Group markers", on_data, on_error=on_error)
     return markers
 
 
