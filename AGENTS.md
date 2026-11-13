@@ -456,24 +456,45 @@
   the configured `EXPORT_JXL_FOLDER` (a custom `--export-jxl-folder` must not
   be re-processed as a source on the next run) — but
   only BELOW the input root: pointing a run AT such a folder to compress it
-  again is legitimate. The wrapper does not copy this rule any more: its file
-  count (`_count_origin_files`) and its collision walk
-  (`_manifest_output_collisions`, folder rows) ASK the encoder, the decoder
-  and the recompressor which files a run takes — `_planned_sources(args,
-  read_markers=)`, their own `_find_sources` — inside `_with_child_marker`,
-  which applies the run's marker/folders/exclusion on the imported child and
-  restores them afterwards (refactor F8). Still mirrored in the wrapper (a
-  change there needs the matching child rule): WHERE an output goes in modes
-  0/1/2/8 with the rename and the jbrd-keeps-its-name rule, a file Source row,
-  and the transcoder's whole walk (it has no `_planned_sources` yet).
-  `python tools/verdicts.py <old rev> <new rev|WORKTREE>` compares the
-  wrapper's counts and collisions of two versions on hostile trees (each
-  version in its own process, `tools/verdicts_worker.py`).
+  again is legitimate.
+- **The wrapper asks the children which files a run takes AND where each
+  output goes (refactor C1, v2.30.0).** Its file count
+  (`_count_origin_files`) and its collision walk
+  (`_manifest_output_collisions`, folder AND file rows) call each child's
+  `_planned_sources(args, read_markers=False)` and `_planned_output(src,
+  args)` inside `_with_child_marker` (the run's marker/folders/exclusion on
+  the imported child, restored afterwards), with `args` = the child's own
+  parse of the command line that row's run gets (`_child_plan_args`: the
+  input, the output positional by `_dest_is_source_file`, `--mode`, the
+  transcoder's `_TRANSCODER_CONVERSION_FLAGS` and format, the rename where
+  `_rename_reaches_child`). Every `main()`/`cmd_*` resolves through the same
+  `_planned_output` (encoder `_plan_one`, decoder per page group, the
+  recompressor's rename via `_renamed_output` after its refusals, the
+  transcoder's three commands), so the wrapper cannot disagree with a run.
+  A new rule about which files or where goes INTO the child's function,
+  never into the wrapper. What stays in the wrapper is its own question:
+  two rows on one output, one row's output that is another's Source
+  (`cross_sink`), the derivatives re-checked only where files collide, the
+  split-TIFF page probe, the count's "files of the origin format". The
+  decoder names a TIFF after its page group (markers); the scan asks about
+  each JXL, an approximation. The transcoder's `_planned_output(...,
+  lossless=None)` (only the wrapper passes None) decides an auto run's JXL by
+  its jbrd box, read only when the two routes would name the output
+  differently; `test_the_transcoders_answer_is_its_runs_plan` pins it to a
+  real dry run. Nothing here may open exiftool or a whole TIFF (#652): the
+  count reads no marker and no box. `python tools/verdicts.py <old rev>
+  <new rev|WORKTREE>` compares the wrapper's counts and collisions of two
+  versions on hostile trees (each version in its own process,
+  `tools/verdicts_worker.py`); v2.30.0's accepted differences against
+  v2.30.0_beta1 are #655–#659.
 - **The modes 6/7 anchor** is `_marker_anchor_index` (#601, parity-pinned in
-  the four backends, used by the wrapper's collision walk): the first marker
-  match at or below the input root, else the closest one above; a path not
-  under the root keeps the first match. Never search the absolute path from
-  its start again (`Lightroom_Export` above the library matches `_EXPORT`).
+  the four backends): the first marker match at or below the INPUT root,
+  else the closest one above; a path not under the root keeps the first
+  match. Never search the absolute path from its start again
+  (`Lightroom_Export` above the library matches `_EXPORT`), and never anchor
+  on the output folder: until #660 the decoder and the transcoder passed it
+  when an output positional was given (an explicit manifest Destination), and
+  their outputs landed in `Lightroom_Export/<folder>/<the library's path>`.
 - Below the export marker, modes 6/7 of the decoder and the recompressor skip
   the OTHER tools' JXL output folders (#565: `_skip_other_tool_output`, names
   from the siblings' settings via `ast` plus the shipped defaults, per-script
@@ -482,8 +503,8 @@
   `CONVERTED_JXL_FOLDER`, `JXL_FOLDER_NAME` — `converted_jxl` is the
   transcoder's name too, M1 of the 261103 review), never mode 7's requested
   subfolder; the transcoder's decode is not folder-filtered (it is how a JPEG
-  archive comes back). The wrapper's `_skip_check` mirrors it
-  (`_other_tool_skip`). On top of that, the decoder, the recompressor and the
+  archive comes back). The wrapper asks the child (`_planned_sources`), never
+  a copy. On top of that, the decoder, the recompressor and the
   transcoder's decode leave out DERIVATIVES by their `jxlphoto-derived`
   marker in mode 6 and in mode 7 without an explicit subfolder (#602:
   decoder's marker read, `_drop_derivative_inputs`,

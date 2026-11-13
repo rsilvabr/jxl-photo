@@ -3791,7 +3791,12 @@ def _planned_output(src: Path, args, lossless: Optional[bool] = None):
         lossless = has_jbrd_box(src) and not _is_derivative()
     single_file = args.input.is_file()
     _input_root = args.input.parent if single_file else args.input
-    output_root = args.output or _input_root
+    # Modes 6/7 anchor the export marker at or below the INPUT (#601, as the
+    # encoder and the recompressor do), never at the output folder: given an
+    # output positional, a 'Lightroom_Export' above the library anchored there
+    # and the output landed in Lightroom_Export/<folder>/<the library's path>.
+    output_root = (_input_root if args.mode in (6, 7)
+                   else args.output or _input_root)
     if lossless:
         return resolve_output_transcode(src, args.mode, output_root,
                                         src.suffix.lower() not in JPEG_EXTS,

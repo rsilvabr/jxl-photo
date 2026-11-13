@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #655.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #661.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -30,6 +30,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-83 — where each output goes: the wizard asks the scripts](#round-83--where-each-output-goes-the-wizard-asks-the-scripts-2026-11-13) | 2026-11-13 | v2.30.0 | #655–#660 (6) |
 | [Round-82 — the review of the Python refactor](#round-82--the-review-of-the-python-refactor-2026-11-13) | 2026-11-13 | v2.30.0_beta1 | #652–#654 (3) |
 | [Round-81 — the Python refactor](#round-81--the-python-refactor-2026-11-13) | 2026-11-13 | v2.29.1 | #648–#651 (4) |
 | [Round-80 — what the sweep left to decide](#round-80--what-the-sweep-left-to-decide-2026-11-11) | 2026-11-11 | v2.28.0 | #642–#647 (6) |
@@ -98,6 +99,25 @@ were never tagged and never shipped.
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
 
 ---
+
+## Round-83 — where each output goes: the wizard asks the scripts (2026-11-13)
+
+The wizard's file count and its manifest collision check stopped computing
+destinations themselves (refactor C1): they ask each script which files a run
+takes and where each output goes. Comparing the old and the new answers on
+hostile trees (`tools/verdicts.py`, 8340 cases) found #655–#659, where the
+wizard's copy disagreed with what the scripts do — the owner chose the
+scripts' answer for all five — and #660, a bug in two scripts themselves. All
+need an unusual setup; nothing was deleted or damaged.
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 655 | **The delete preview of a JPEG → JXL run counted the JPEGs inside the transcoder's own output folders** (`recovered_jpeg`, `jpeg_recovered`, `converted`): a recursive run skips them (they are its own recovered files), but the count walked every JPEG — 4 announced for a run that touches 1. The collision check already skipped them | `jxl_photo.py` | ✅ Fixed — the count asks the transcoder (`_planned_sources`). `tests/test_where_outputs_go.py` (failed before) |
+| 656 | **The delete preview counted 1 for a single file in modes 6/7 that the run takes nothing from**: the encoder's finders find nothing in a file, and the transcoder leaves out a file outside the export marker (and refuses a single file in those modes) | `jxl_photo.py` | ✅ Fixed — the count asks the script; a file of another format still counts 0. `tests/test_where_outputs_go.py` (failed before) |
+| 657 | **A manifest row whose Source is a file, in mode 0 with an empty Destination, was checked as writing into a folder named after the file**: the manifest loader puts the file itself in an empty Destination cell, and the collision check took it as the output folder. A same-named output written into the file's folder by another row went unseen, and so did a JXL → JXL row on that file next to a row on its folder (the file recompressed twice, by two runs) | `jxl_photo.py` | ✅ Fixed — the script answers where the file's output goes (its own folder); the output → Source check now warns about the second case. `tests/test_where_outputs_go.py` (failed before) |
+| 658 | **A rename left in an old preset was applied by the collision check to directions that never rename** (TIFF → JXL, JXL → TIFF, JPEG → JXL): the scripts get `--rename-from` only for JXL → JXL and the lossy JXL → JPEG/PNG of a manifest, so the check could refuse a manifest over a collision that does not exist | `jxl_photo.py` | ✅ Fixed — the check hands the script the rename only where the run gets it (`_rename_reaches_child`, the rule of `build_child_cmd`). `tests/test_where_outputs_go.py` (failed before) |
+| 659 | **A manifest row with a file of another format as its Source (a TIFF in a JXL → JXL manifest) was checked as if it wrote an output**: the recompressor refuses such a file and writes nothing, so a collision reported for it refused the manifest for nothing | `jxl_photo.py` | ✅ Fixed — the script's answer counts (the recompressor refuses the file; the transcoder routes it by its extension). `tests/test_where_outputs_go.py` (failed before) |
+| 660 | **The decoder and the transcoder anchored the export marker of modes 6/7 on the OUTPUT folder when one was given**: a manifest row with an explicit Destination (or the command line) and a folder like `Lightroom_Export` above the library sent the outputs to `Lightroom_Export/16B_TIFF/<the library's path>/...` instead of next to the library's own `_EXPORT` (#601's rule, which the encoder and the recompressor kept). With the Destination equal to the Source — what a manifest row normally has — the place was right | `jxl_tiff_decoder.py`, `jxl_jpeg_transcoder.py` | ✅ Fixed — `_planned_output` anchors modes 6/7 on the input in both. `tests/test_where_outputs_go.py` (real dry runs, hostile folder; failed before) |
 
 ## Round-82 — the review of the Python refactor (2026-11-13)
 

@@ -4871,9 +4871,18 @@ def _planned_output(naming_path: Path, args):
     wrapper's collision scan passes each JXL itself, the approximation it has
     always made, because grouping reads every file's markers (refactor C1).
     Needs args.input, args.output and args.mode; the marker and folder
-    settings are this module's globals."""
-    return resolve_output(naming_path, args.mode, _output_root(args),
-                          single_file=args.input.is_file())
+    settings are this module's globals.
+
+    Modes 6/7 anchor the export marker at or below the INPUT (#601, as the
+    finders and the encoder do), never at the output folder: given an output
+    positional, a 'Lightroom_Export' above the library anchored there and
+    the TIFF landed in Lightroom_Export/16B_TIFF/<the library's path>."""
+    single_file = args.input.is_file()
+    if args.mode in (6, 7):
+        root = args.input.parent if single_file else args.input
+    else:
+        root = _output_root(args)
+    return resolve_output(naming_path, args.mode, root, single_file=single_file)
 
 
 def _planned_sources(args, read_markers=True) -> list:
