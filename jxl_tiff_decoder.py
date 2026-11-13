@@ -4860,6 +4860,14 @@ def _find_sources(args):
     return single_file, jxls, output_root
 
 
+def _planned_sources(args) -> list:
+    """The JXLs a run with these arguments takes (_find_sources): what the
+    wrapper counts and scans before a run, asking this script instead of
+    copying its rules (refactor C1). Needs args.input, args.output and
+    args.mode; the marker and folder settings are this module's globals."""
+    return list(_find_sources(args)[1])
+
+
 def main():
     # Every module global this function assigns (D-1). Declared as one block at
     # the top so no assignment can ever textually precede its declaration when

@@ -5048,6 +5048,15 @@ def _find_sources(args):
     return single_file, files, input_root
 
 
+def _planned_sources(args) -> list:
+    """The JXLs a run with these arguments takes (_find_sources, derivatives
+    left out in modes 6/7 as the run does, #602): what the wrapper counts and
+    scans before a run, asking this script instead of copying its rules
+    (refactor C1). Needs args.input, args.output and args.mode; the marker and
+    folder settings are this module's globals."""
+    return list(_find_sources(args)[1])
+
+
 def main():
     global EXPLORER_THUMBNAIL
     global _gen_divergence_logged, _error_details

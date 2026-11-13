@@ -6545,6 +6545,14 @@ def _find_sources(args):
     return tiffs, output_root
 
 
+def _planned_sources(args) -> list:
+    """The TIFFs a run with these arguments takes (_find_sources): what the
+    wrapper counts and scans before a run, asking this script instead of
+    copying its rules (refactor C1). Needs args.input, args.output and
+    args.mode; the marker and folder settings are this module's globals."""
+    return list(_find_sources(args)[0])
+
+
 def _guard_existing_outputs(args, all_items, _restamped, failed_files):
     """The guard over outputs that already exist (provenance, overwrite, the
     strict guard of a run that collapses folders), moved out of main()

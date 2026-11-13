@@ -7095,25 +7095,15 @@ class InteractiveMenu:
             if root.is_file():
                 return 1 if root.suffix.lower() in exts else 0
 
+            # The child answers which files a run takes (_planned_sources, its
+            # own _find_sources): no copy of its "which finder in which mode"
+            # rules here (refactor C1).
             child = None
-            try:
-                if origin == 'tiff' and dest == 'jxl':
-                    import jxl_tiff_encoder as child
-                    finders = {6: 'find_tiffs_mode6', 7: 'find_tiffs_mode7',
-                               0: 'find_files_mode0', 1: 'find_files_mode0'}
-                    recursive = 'find_tiffs_recursive'
-                elif origin == 'jxl' and dest == 'tiff':
-                    import jxl_tiff_decoder as child
-                    finders = {6: 'find_jxls_mode6', 7: 'find_jxls_mode7',
-                               0: 'find_jxls_flat', 1: 'find_jxls_flat'}
-                    recursive = 'find_jxls_recursive'
-                elif origin == 'jxl' and dest == 'jxl':
-                    import jxl_recompressor as child
-                    finders = {6: 'find_jxls_mode6', 7: 'find_jxls_mode7',
-                               0: 'find_files_mode0', 1: 'find_files_mode0'}
-                    recursive = 'find_jxls_recursive'
-            except ImportError:
-                child = None
+            if (origin, dest) in (('tiff', 'jxl'), ('jxl', 'tiff'), ('jxl', 'jxl')):
+                try:
+                    child = importlib.import_module(_child_module(origin, dest))
+                except ImportError:
+                    child = None
 
             _mc = workflow.get('mode_config', {}) or {}
             marker = _mc.get('export_marker') or self.config.config.export_marker
@@ -7139,8 +7129,10 @@ class InteractiveMenu:
                     # set the run would skip (bug #297's class again).
                     with _with_child_marker(child, marker, subfolder, jxl_folder,
                                             exclude_folders=workflow.get('exclude_folders')):
-                        fn = getattr(child, finders.get(mode, recursive))
-                        return len(fn(root))
+                        args = argparse.Namespace(input=root, output=None, mode=mode)
+                        return len(child._planned_sources(args))
+                except SystemExit:
+                    return -1      # the child refuses this input: no count to promise
                 finally:
                     child.logger.disabled = _was_disabled
 
