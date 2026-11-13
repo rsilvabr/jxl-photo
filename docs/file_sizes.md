@@ -257,5 +257,7 @@ Why it comes out this way:
 | `d=1.0`, e7 | 82.58 | 0.614 | 1.66 |
 | `d=1.0`, e9 | 82.52 | 0.625 | 1.35 |
 
-These numbers hold for libjxl 0.12.0 with its default buffering; other
-versions may behave differently.
+These numbers hold for libjxl 0.12.0 with its default buffering, and for
+0.13.0: on nine 16-bit photos and scans (lossless e7, d=0.05/0.1/1 e7, d=0.5
+e9) it wrote byte-identical files, with the same ssimulacra2 (measured
+2026-11-14; e9 about a quarter faster). Other versions may behave differently.

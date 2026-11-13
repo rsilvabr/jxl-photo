@@ -1015,6 +1015,24 @@ The script walks the full ISOBMFF box chain of JXL files (to EOF) to detect the 
 - **False negatives**: only if the file is not a valid container-format JXL
 - **False positives**: impossible (exact byte signature matching)
 
+### An archive every libjxl rebuilds bit for bit
+
+libjxl 0.13 marks the archive of a **4:4:4 or gray** JPEG for LF smoothing by
+default: a viewer smooths the 8×8 block averages a little (at most 2 levels of
+255, measured) when it shows the JXL. djxl 0.12 and 0.11 apply that smoothing
+when they **rebuild the JPEG** too (libjxl #4931, fixed in 0.13) and write a
+different file: pixels 1–3 levels off in a few percent of the samples, other
+bytes, and one progressive 4:4:4 JPEG of the fixtures not at all — 15 of the 76
+JPEG fixtures. Nothing is missing from the archive (djxl 0.13 rebuilds all 76
+bit for bit); an older reader just reads the new mark wrong.
+
+So the transcoder passes `--jpeg_reconstruction_lfs=0` to cjxl 0.13 and newer
+(the flag does not exist before) on both paths that write a jbrd archive: the
+lossless transcode and `--force-convert` at `--distance 0` on a JPEG. Measured on
+the 76 fixtures: same size; rebuilt bit for bit by djxl 0.11.2, 0.12.0 and
+0.13.0; shown exactly as the archives made by cjxl 0.12 always were. Archives
+made before (by cjxl 0.12 or older) were never marked and need nothing (#669).
+
 ### Where the first master came from (`jxlphoto-origin`)
 
 A pixel re-encode (`--force-convert`) of a JPEG or PNG whose metadata carries

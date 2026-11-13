@@ -10,7 +10,8 @@ as [GitHub Releases](https://github.com/rsilvabr/jxl-photo/releases).
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.30.1-rc1](version_history.md#v2301-rc1)** | 2026-11-13 | Pre-release (test releases are now named `-rcN`). The wizard's manifest check and delete preview read every option the run gets; a file row in mode 2 with an empty Destination runs; the count and the check as fast as before v2.30.0 |
+| **[v2.30.1-rc2](version_history.md#v2301-rc2)** | 2026-11-14 | Pre-release. Tested with libjxl 0.13.0: with it, a JPEG archive is still rebuilt bit for bit by every libjxl since 0.11, and a lossy encode keeps an all-opaque alpha channel; everything in v2.30.1-rc1 |
+| [v2.30.1-rc1](version_history.md#v2301-rc1) | 2026-11-13 | Pre-release (test releases are now named `-rcN`). The wizard's manifest check and delete preview read every option the run gets; a file row in mode 2 with an empty Destination runs; the count and the check as fast as before v2.30.0 |
 | [v2.30.0](version_history.md#v2300) | 2026-11-13 | Archiving a TIFF takes about half the time; flags must be written in full; the history names the libjxl version; modes 6/7 of the decoder and the transcoder with an output folder land next to the library's own export folder |
 | [v2.30.0_beta1](version_history.md#v2300_beta1) | 2026-11-13 | Pre-release. Faster metadata writing; flags must be written in full; the history names the libjxl version; a PNG named `.jpg` is refused by the lossless JPEG transcode |
 | [v2.29.1](version_history.md#v2291) | 2026-11-13 | A release is six files that go together; yes/no answers read the same way on both wizard screens; the scripts' detail lines reach the log file |
@@ -36,6 +37,15 @@ as [GitHub Releases](https://github.com/rsilvabr/jxl-photo/releases).
 | [v2.17.0](version_history.md#v2170) | 2026-10-24 | Film scans archived lossless and never recompressed lossy unless asked; they keep what their scanner software needs (whole XMP, private tags); thumbnail pages kept by default, except Capture One's |
 
 Every release since v1.0: [version_history.md](version_history.md#release-history).
+
+## v2.30.1-rc2
+
+2026-11-14. The second test release (pre-release) of v2.30.1; the last stable release is [v2.30.0](#v2300). Everything in v2.30.1-rc1, plus:
+
+- **Tested with libjxl 0.13.0.** With it, a lossless JPEG → JXL archive is still rebuilt bit for bit by every libjxl since 0.11 (cjxl 0.13 would otherwise mark 4:4:4 and gray JPEGs in a way older versions rebuild wrong), and a lossy encode keeps an alpha channel with nothing in it (cjxl 0.13 would drop it). Same sizes; files made before need nothing.
+- Masters, copies, sizes and quality are the same as with libjxl 0.12.0.
+
+[Technical notes](version_history.md#v2301-rc2)
 
 ## v2.30.1-rc1
 

@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.30.1-rc1** (2026-11-13, pre-release; last stable: [v2.30.0](docs/version_history.md#v2300)) · [What's new](#whats-new-in-v2301-rc1) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.30.1-rc2** (2026-11-14, pre-release; last stable: [v2.30.0](docs/version_history.md#v2300)) · [What's new](#whats-new-in-v2301-rc2) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 **Windows program, no Python needed:** [jxl-photo-exe](https://github.com/rsilvabr/jxl-photo-exe/releases/latest) — unzip and double-click; cjxl/djxl, ExifTool, ImageMagick and jxl-thumb included.
 
@@ -201,16 +201,16 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## What's new in v2.30.1-rc1
+## What's new in v2.30.1-rc2
 
-2026-11-13. A test release (pre-release) of v2.30.1; the last stable release is [v2.30.0](docs/whats_new.md#v2300). Test releases are now named `-rc1`, `-rc2`…: that name is what the files converted with one record in their history.
+2026-11-14. A test release (pre-release) of v2.30.1; the last stable release is [v2.30.0](docs/whats_new.md#v2300). Test releases are named `-rc1`, `-rc2`…: that name is what the files converted with one record in their history.
 
+- **Tested with libjxl 0.13.0.** With it, a lossless JPEG → JXL archive is still rebuilt bit for bit by every libjxl since 0.11, and a lossy encode keeps an all-opaque alpha channel. Masters, copies, sizes and quality are the same as with 0.12.0.
 - The wizard's manifest check and delete preview read every option the run gets: a resize, the output folder name and the expert flags. A manifest whose resized, renamed JPEGs land on another row's JPEG is now refused before anything runs.
 - A manifest row whose Source is a single file runs in mode 2 with an empty Destination (it used to fail).
-- The file count and the manifest check of a JPEG ↔ JXL run are as fast as before v2.30.0.
-- Closes edge cases in the delete preview (a single file in modes 6/7) and in the decoder's history entry.
+- The file count and the manifest check of a JPEG ↔ JXL run are as fast as before v2.30.0. Closes edge cases in the delete preview (a single file in modes 6/7) and in the decoder's history entry.
 
-[Technical notes](docs/version_history.md#v2301-rc1) · [earlier releases, in short](docs/whats_new.md) · [every release](docs/version_history.md#release-history)
+[Technical notes](docs/version_history.md#v2301-rc2) · [earlier releases, in short](docs/whats_new.md) · [every release](docs/version_history.md#release-history)
 
 ---
 

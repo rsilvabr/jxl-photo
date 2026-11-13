@@ -23,7 +23,7 @@ The scripts find exiftool under either name, `exiftool.exe` or the download's `e
 
 `jxlinfo.exe` comes in the same libjxl zip, next to `cjxl.exe` and `djxl.exe`: keep the three together. The scripts ask it whether a JXL holds float or animated content (and came from a rotated JPEG); without it they warn once, skip the float/animation check and read the orientation from the JXL's header themselves.
 
-Tested with libjxl 0.12.0 (0.11.2 still works), exiftool 13.59, ImageMagick 7.1.2-27, numpy 2.5.1, tifffile 2026.6.1, Pillow 12.3.0, imagecodecs 2026.6.26 and rich 15.0.0. The scripts detect the libjxl version and adapt. A high `--workers` is safe: the encoder and the recompressor run only as many cjxl at once as the free memory holds ([how much each takes](README_jxl_tiff_encoder.md#ram-per-worker)).
+Tested with libjxl 0.13.0 (0.12.0 and 0.11.2 still work), exiftool 13.59, ImageMagick 7.1.2-27, numpy 2.5.1, tifffile 2026.6.1, Pillow 12.3.0, imagecodecs 2026.6.26 and rich 15.0.0. The scripts detect the libjxl version and adapt. A high `--workers` is safe: the encoder and the recompressor run only as many cjxl at once as the free memory holds ([how much each takes](README_jxl_tiff_encoder.md#ram-per-worker)).
 
 ### 3. Add to PATH (PowerShell)
 

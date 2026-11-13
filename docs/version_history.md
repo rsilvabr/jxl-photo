@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.30.1-rc1](#v2301-rc1)** | 2026-11-13 | Pre-release (test releases are now named `-rcN`). The wizard's manifest check and delete preview read every flag the run gets (resize, output folder name, expert flags); a file row in mode 2 with an empty Destination converts; the count and the check of a JPEG ↔ JXL run as fast as before v2.30.0 (round 84, 6 fixes) |
+| **[v2.30.1-rc2](#v2301-rc2)** | 2026-11-14 | Pre-release. Tested with libjxl 0.13.0: with it, a lossless JPEG archive is still rebuilt bit for bit by every djxl since 0.11, and a lossy encode keeps an all-opaque alpha channel (round 85, 2 fixes) |
+| [v2.30.1-rc1](#v2301-rc1) | 2026-11-13 | Pre-release (test releases are now named `-rcN`). The wizard's manifest check and delete preview read every flag the run gets (resize, output folder name, expert flags); a file row in mode 2 with an empty Destination converts; the count and the check of a JPEG ↔ JXL run as fast as before v2.30.0 (round 84, 6 fixes) |
 | [v2.30.0](#v2300) | 2026-11-13 | Archiving a TIFF takes about half the time (one ExifTool process per file); everything else in v2.30.0_beta1 (flags written in full, the libjxl version in the history); the wizard asks the scripts where each output goes; modes 6/7 of the decoder and the transcoder with an output folder land next to the library's own export folder; `--help` with its output in a file (round 83, 8 fixes) |
 | [v2.30.0_beta1](#v2300_beta1) | 2026-11-13 | Pre-release. A file's metadata written by one ExifTool process (archiving about twice as fast); flags must be written in full; the History names the libjxl version; a PNG named `.jpg` refused by the lossless JPEG transcode |
 | [v2.29.1](#v2291) | 2026-11-13 | The code the scripts share lives in one file, `jxl_photo_common.py` (a release is six files); yes/no answers read the same way on both wizard screens; the scripts' detail lines reach the log file; the delete gates' code reorganized and tested directly |
@@ -104,6 +105,42 @@ GitHub release notes before v1.8.2:
 Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refactoring.md).
 
 ---
+
+## v2.30.1-rc2
+
+**Released 2026-11-14, the second test release (pre-release) of v2.30.1**; the
+last stable release is [v2.30.0](#v2300), and everything in
+[v2.30.1-rc1](#v2301-rc1) is in it. Tested with libjxl 0.13.0 (released
+2026-11-12), and two fixes for it (round 85, #669–#670). Nothing to do when
+upgrading.
+
+- **Fixed — with libjxl 0.13, a lossless JPEG archive is rebuilt bit for bit by
+  every djxl (#669).** cjxl 0.13 marks the archive of a 4:4:4 or gray JPEG for
+  LF smoothing by default (a viewer softens the 8×8 block averages by up to 2
+  levels when it shows the JXL); djxl 0.12 and 0.11 apply that smoothing when
+  they rebuild the JPEG too, and gave back another JPEG (pixels 1–3 levels off,
+  other bytes) for 15 of the 76 JPEG fixtures, and none for one. djxl 0.13 rebuilt
+  them all, so nothing was lost. With cjxl 0.13 or newer the transcoder now passes
+  `--jpeg_reconstruction_lfs=0` on both paths that write a jbrd archive (the
+  lossless transcode, `--force-convert --distance 0` on a JPEG): the same size,
+  rebuilt bit for bit by djxl 0.11.2, 0.12.0 and 0.13.0, and shown exactly as
+  the archives made with cjxl 0.12. Archives made before were never marked.
+- **Fixed — with libjxl 0.13, a lossy encode keeps an all-opaque alpha channel
+  (#670).** cjxl 0.13 drops, by default, an alpha channel with nothing in it
+  from a lossy encode (`--strip_alpha`); the real-photo battery, run with 0.13,
+  caught a 16-bit RGBA scan whose lossy master came back as a 3-channel TIFF.
+  With cjxl 0.13 or newer every lossy pixel encode (the encoder, the
+  recompressor, the transcoder's convert) passes `--strip_alpha=0`, next to
+  the `--keep_invisible=1` it already passed: every channel of the source is
+  kept, as with 0.12. Lossless encodes always kept it.
+- **libjxl 0.13.0, measured against 0.12.0** (the toolkit's own masters and
+  copies, 9 photos and scans, the owner's 346 JPEG archives): masters lossless,
+  d=0.05 and streaming decode pixel for pixel the same in both versions, each
+  version reading the other's files; byte-identical files at every setting of
+  the size table, with the same ssimulacra2; the 0.05 distance floor and the
+  memory per pixel unchanged; e9 about a quarter faster; the 346 archives made
+  with 0.12 rebuilt bit for bit by 0.13. The suite and the real-photo battery
+  pass with it (the battery's first run with 0.13 found #670).
 
 ## v2.30.1-rc1
 

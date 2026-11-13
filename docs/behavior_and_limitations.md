@@ -32,7 +32,7 @@ The default is **near-lossless, not lossless**. At `d=0.1` a 45 MP file drops to
 
 ### The distance floor depends on your cjxl: 0.05 on libjxl 0.12, 0.01 on 0.11
 
-**cjxl 0.12 clamps every lossy distance at or below 0.05 to the same value.** On two real 16-bit photos, `--distance 0.005` through `0.05` produced a **byte-identical** file. The menu and the CLI accept anything from 0 to 25, so setting `0.02` looks like it buys you something, but on 0.12 it does not: either stay at `0.05`, or go to `--distance 0` for true lossless. The floor was added in libjxl 0.12 ([PR #4238](https://github.com/libjxl/libjxl/pull/4238)): below it the DC coefficients leave the `int16` range, so the file no longer conforms to Level 5 of the JPEG XL spec. libjxl itself still decodes such files, but a decoder built for Level 5 may not.
+**cjxl 0.12 and 0.13 clamp every lossy distance at or below 0.05 to the same value.** On two real 16-bit photos, `--distance 0.005` through `0.05` produced a **byte-identical** file. The menu and the CLI accept anything from 0 to 25, so setting `0.02` looks like it buys you something, but on 0.12 it does not: either stay at `0.05`, or go to `--distance 0` for true lossless. The floor was added in libjxl 0.12 ([PR #4238](https://github.com/libjxl/libjxl/pull/4238)): below it the DC coefficients leave the `int16` range, so the file no longer conforms to Level 5 of the JPEG XL spec. libjxl itself still decodes such files, but a decoder built for Level 5 may not.
 
 **cjxl 0.11.2 does not clamp at 0.05.** Its floor is 0.01, and the distances between 0.01 and 0.05 are real steps. Measured on the same photos (effort 7):
 
@@ -44,7 +44,17 @@ The default is **near-lossless, not lossless**. At `d=0.1` a 45 MP file drops to
 | 0.05 | 17.4 MB, 51.7 dB | 17.7 MB, 51.9 dB |
 | 0.1 | 13.2 MB, 48.9 dB | 13.4 MB, 49.0 dB |
 
-At 0.05 and above both versions write nearly the same file (0.12 is ~1–2% bigger and ~0.2 dB better). Since v2.2.0 the scripts read the installed cjxl version: the dead-zone warning and the recompressor's "same distance" check use 0.05 on libjxl 0.12 and later, and 0.01 before it.
+At 0.05 and above both versions write nearly the same file (0.12 is ~1–2% bigger and ~0.2 dB better). Since v2.2.0 the scripts read the installed cjxl version: the dead-zone warning and the recompressor's "same distance" check use 0.05 on libjxl 0.12 and later, and 0.01 before it. libjxl 0.13.0 keeps the 0.05 floor and, at the settings of the size table below, writes byte-identical files to 0.12.0 (measured 2026-11-14).
+
+## A JPEG archive is rebuilt bit for bit by every libjxl
+
+A lossless JPEG → JXL archive (`jbrd`) must give back the original JPEG with any
+djxl, not only the one that made it. libjxl 0.13 marks the archive of a 4:4:4 or
+gray JPEG for LF smoothing by default, and djxl 0.12 and 0.11 then rebuild a
+slightly different JPEG (or none); the transcoder turns that mark off with cjxl
+0.13 and newer, so every djxl since 0.11 rebuilds its archives bit for bit, at
+the same size (since v2.30.1-rc2; [details](README_jxl_jpeg_transcoder.md#an-archive-every-libjxl-rebuilds-bit-for-bit)).
+Archives made with cjxl 0.12 or older never had the mark.
 
 Measured ratios on real 16-bit ProPhoto photos already stored as Deflate TIFF (output ÷ source), so you can see where the curve actually bends:
 

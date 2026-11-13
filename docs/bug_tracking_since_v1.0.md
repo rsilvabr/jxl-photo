@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #669.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #671.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -30,6 +30,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-85 — libjxl 0.13: JPEG archives and alpha channels](#round-85--libjxl-013-jpeg-archives-and-alpha-channels-2026-11-14) | 2026-11-14 | v2.30.1-rc2 | #669–#670 (2) |
 | [Round-84 — the independent review of v2.30.0](#round-84--the-independent-review-of-v2300-2026-11-13) | 2026-11-13 | v2.30.1-rc1 | #663–#668 (6) |
 | [Round-83 — where each output goes: the wizard asks the scripts](#round-83--where-each-output-goes-the-wizard-asks-the-scripts-2026-11-13) | 2026-11-13 | v2.30.0 | #655–#662 (8) |
 | [Round-82 — the review of the Python refactor](#round-82--the-review-of-the-python-refactor-2026-11-13) | 2026-11-13 | v2.30.0_beta1 | #652–#654 (3) |
@@ -100,6 +101,19 @@ were never tagged and never shipped.
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
 
 ---
+
+## Round-85 — libjxl 0.13: JPEG archives and alpha channels (2026-11-14)
+
+libjxl 0.13.0 came out and was tested against the toolkit before use (the old
+and new cjxl/djxl side by side, plus 0.11.2): masters, the distance floor,
+memory, sizes and quality are unchanged; two new cjxl defaults changed what
+the toolkit writes — one in the JPEG archives (#669), one caught by the
+real-photo battery run with 0.13 (#670).
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 669 | **With cjxl 0.13, the lossless archive of a 4:4:4 or gray JPEG was not rebuilt bit for bit by djxl 0.12 or 0.11** (every toolkit version, once run with cjxl 0.13, out on 2026-11-12): cjxl 0.13 marks such an archive for LF smoothing by default, and the older djxl apply that smoothing when they rebuild the JPEG too (libjxl #4931, fixed in 0.13) — 15 of the 76 JPEG fixtures came back with other bytes (pixels 1–3 levels off in up to 21% of the samples), one not at all. djxl 0.13 rebuilt all of them, so nothing was lost and the delete gate (which proves the rebuild with the installed djxl) stayed right; but an archive is meant to be rebuilt by any djxl, the Windows program carried 0.12, and 345 of the owner's 346 JPEGs waiting in `JPG_only` are 4:4:4 | `jxl_jpeg_transcoder.py` | ✅ Fixed — with cjxl 0.13 or newer the transcoder passes `--jpeg_reconstruction_lfs=0` on both paths that write a jbrd archive (`_jpeg_archive_flags`): same size, rebuilt bit for bit by djxl 0.11.2, 0.12.0 and 0.13.0 (76/76), shown as the 0.12 archives always were. `tests/test_jpeg_archive_any_djxl.py` (real codecs; failed before) |
+| 670 | **With cjxl 0.13, a lossy encode dropped an alpha channel with nothing in it** (every sample opaque; libjxl #4981, `--strip_alpha`): the real-photo battery's lossy round trip of a 16-bit RGBA scan (a Luminar export with an unassociated, all-opaque alpha) came back as a 3-channel TIFF. No pixel of the picture changed, but the master no longer matched its TIFF's structure; a 4th channel of an RGB+IR scan reaches cjxl as alpha too. Lossless encodes kept it | `jxl_photo_common.py`, the encoder, the recompressor, the transcoder | ✅ Fixed — with cjxl 0.13 or newer every lossy pixel encode passes `--strip_alpha=0` (`_keep_alpha_flags`, next to the existing `--keep_invisible=1`), as cjxl 0.12 behaved. `tests/test_alpha_kept_with_cjxl_013.py` (the three scripts, real codecs; failed before) |
 
 ## Round-84 — the independent review of v2.30.0 (2026-11-13)
 
