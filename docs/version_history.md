@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.29.1](#v2291)** | 2026-11-13 | The code the scripts share lives in one file, `jxl_photo_common.py` (a release is six files); yes/no answers read the same way on both wizard screens; the scripts' detail lines reach the log file; the delete gates' code reorganized and tested directly |
+| **[v2.30.0_beta1](#v2300_beta1)** | 2026-11-13 | Pre-release. A file's metadata written by one ExifTool process (archiving about twice as fast); flags must be written in full; the History names the libjxl version; a PNG named `.jpg` refused by the lossless JPEG transcode |
+| [v2.29.1](#v2291) | 2026-11-13 | The code the scripts share lives in one file, `jxl_photo_common.py` (a release is six files); yes/no answers read the same way on both wizard screens; the scripts' detail lines reach the log file; the delete gates' code reorganized and tested directly |
 | [v2.29.0_beta1](#v2290_beta1) | 2026-11-12 | Pre-release. The code the scripts share lives in one file, `jxl_photo_common.py`, which ships next to them: a release is six files that go together. No change in behaviour |
 | [v2.28.0](#v2280) | 2026-11-11 | A small Photoshop resource block of a TIFF comes back in the decoded TIFF; JPEG/PNG copies no longer carry the TIFF-tag markers; no copy is made of a camera TIFF's own thumbnail page; resized copies work in a folder named like `100%off` (round 80, 6 fixes) |
 | [v2.27.1](#v2271) | 2026-11-11 | A lossy JPEG → JXL never deletes a JPEG whose HDR gain map (Ultra HDR phone photos) the JXL does not hold, and says which files have one; the way out of unparseable maker notes named for more exiftool wordings (round 79, 1 fix) |
@@ -101,6 +102,87 @@ GitHub release notes before v1.8.2:
 Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refactoring.md).
 
 ---
+
+## v2.30.0_beta1
+
+**Pre-release, 2026-11-13.** The last stable release before it is v2.29.1. Faster
+metadata writing, a stricter command line, the libjxl version in each output's
+history, and three fixes; the files written are the same apart from that
+field. What to check: [upgrading.md](upgrading.md) (flags written in full, a
+PNG named `.jpg`).
+
+- **Faster — a file's exiftool commands share one process.** The encoder's
+  metadata writes after cjxl (and the reads before them) and the decoder's
+  metadata copy run their commands in one exiftool process, separated by
+  `-execute`, each with its own exit status (`-echo3`/`-echo4 ${status}`
+  markers; a missing marker counts as a failure). An exiftool older than 12.15,
+  which does not report a status per command, keeps one process per command;
+  the log file says which way a run went, with the exiftool version. The
+  encoder's temporary PNG for cjxl is written without zlib compression (16-bit
+  photo data barely compresses; it cost 6.5 s of Python per 43 MP photo).
+  Measured on 8 varied photos (54 MP in all): encode 12.6 → 6.8 s, decode
+  14.2 → 10.5 s; on the 4 largest (146 MP): encode 18.0 → 9.7 s, decode
+  21.0 → 18.9 s. A batch of N commands has N × `EXIFTOOL_TIMEOUT` to finish,
+  so a hung command is noticed later than one run on its own (a known limit,
+  not a change in what is written).
+- **Changed — flags are written in full.** The four scripts refuse a shortened
+  flag (`--work 4` for `--workers 4`, `--delete-so` for `--delete-source`):
+  `unrecognized arguments`, exit code 2, before anything runs. The wizard
+  writes every flag in full and refuses a shortened expert flag on its review
+  screen; the Windows program and tiff-workflow use none.
+- **New — `python jxl_photo.py encode|decode|recompress|transcode ARGS`** runs
+  that script as if started directly (its exit code, Ctrl+C and console), with
+  the names of the Windows program.
+- **New — the History names the libjxl version.** The `SoftwareAgent` of the
+  `xmpMM:History` entry every output gains ends with the libjxl version of the
+  codec that made the file — `jxl-photo 2.30.0 (…) with libjxl 0.12.0`: cjxl
+  for a JXL, djxl for a TIFF, JPEG or PNG decoded from one. The same encode
+  record does not always mean the same file in two libjxl versions (0.12
+  encodes every distance below 0.05 as 0.05; 0.11 did not). The version comes
+  from the `--version` each script already asks once per run, never per file;
+  it is left out when unknown. Nothing reads it back; a jbrd container and a
+  verbatim copy still gain no History entry.
+  ([metadata_written.md](metadata_written.md#processing-history-xmpmmhistory))
+- **Fixed — a PNG named `.jpg` in a lossless JPEG → JXL run (#654).** cjxl
+  reads a file by its content, so such a PNG was encoded from its pixels at
+  cjxl's own default distance (lossy) by the path that promises a reversible
+  archive. Without metadata the result failed the integrity check by chance;
+  with EXIF or XMP it was logged as OK, with a `checksums.md5` line, and a
+  failure writing its provenance markers was swallowed. Now a JXL without a
+  jbrd box from that path is an error for the file: no output, the file stays,
+  and the message names `--force-convert`. Nothing was deleted by it: the
+  delete gate keeps a JPEG whose JXL has no jbrd box.
+- **Fixed — the encoder's memory cap for 16-bit pages of four channels (#653)**
+  (RGB + infrared film scans, RGBA): the Python side is budgeted per channel
+  (19 bytes per pixel for RGB, 26 for four channels), so a run of such scans
+  may start one worker fewer near the memory limit.
+- **Fixed before release (#652):** the wizard's count for a JXL → JXL run in
+  modes 6/7 read every JXL's markers with exiftool at each redraw of the
+  review screen; it counts as v2.29.1 did, without exiftool.
+- **Changed, internal.** The wizard asks each script's own parser whether the
+  expert flags delete or set the mode, and asks the encoder, the decoder and
+  the recompressor which files a run takes (its file count and the manifest's
+  collision scan) instead of keeping a copy of their rules; where each file
+  goes is still computed by the wizard (the next step). The ten planning-time
+  exiftool batch readers run on one engine (`_exiftool_batch`); `setup_logger`,
+  the decoder's and the recompressor's JXL finders and the duplicate-output
+  abort have one copy in `jxl_photo_common.py`; the manifest's pre-run
+  refusals are named steps; pyflakes finds nothing in the six files. Tools for
+  this kind of change: `tools/batch_equivalence.py` (every batch reader, old
+  against new, on the same exiftool answers) and `tools/verdicts.py` (the
+  wizard's counts and collisions, two versions, hostile trees).
+- Tests: 4007 tests and the real-photo battery pass (174 checks in 1535 s,
+  in folders named with Japanese characters, `[ ]`, a space and `%`). The
+  side-by-side comparison of 27 scenarios on real photos against v2.29.1
+  found no difference in what the scripts write apart from the History's
+  libjxl version (19 bytes more XMP; in a decoded TIFF the camera's EXIF
+  preview, stored after the XMP, starts 20 bytes later) and one new line in
+  the log file; with the libjxl version switched off, none at all. The
+  wizard's transcripts (every screen and child command line, both screens)
+  are identical. An independent review of the refactor found no must-fix
+  item; its should-fix items are done (#652, #653, four tests that had lost
+  their teeth, the log line, a test that failed in a copy without git
+  history).
 
 ## v2.29.1
 

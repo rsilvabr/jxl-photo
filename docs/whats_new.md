@@ -10,7 +10,8 @@ as [GitHub Releases](https://github.com/rsilvabr/jxl-photo/releases).
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.29.1](version_history.md#v2291)** | 2026-11-13 | A release is six files that go together; yes/no answers read the same way on both wizard screens; the scripts' detail lines reach the log file |
+| **[v2.30.0_beta1](version_history.md#v2300_beta1)** | 2026-11-13 | Pre-release. Faster metadata writing; flags must be written in full; the history names the libjxl version; a PNG named `.jpg` is refused by the lossless JPEG transcode |
+| [v2.29.1](version_history.md#v2291) | 2026-11-13 | A release is six files that go together; yes/no answers read the same way on both wizard screens; the scripts' detail lines reach the log file |
 | [v2.29.0_beta1](version_history.md#v2290_beta1) | 2026-11-12 | Pre-release. A release is six files that go together: the five scripts and `jxl_photo_common.py`, the code they share; nothing changes in what they do |
 | [v2.28.0](version_history.md#v2280) | 2026-11-11 | A small Photoshop resource block of a TIFF comes back in the decoded TIFF; JPEG/PNG copies drop the TIFF-tag markers; no copy of a camera TIFF's thumbnail page; resized copies work in a folder named like `100%off` |
 | [v2.27.1](version_history.md#v2271) | 2026-11-11 | A lossy JPEG → JXL keeps a JPEG whose HDR gain map the JXL does not hold; the way out of unparseable maker notes named for more exiftool wordings |
@@ -33,6 +34,18 @@ as [GitHub Releases](https://github.com/rsilvabr/jxl-photo/releases).
 | [v2.17.0](version_history.md#v2170) | 2026-10-24 | Film scans archived lossless and never recompressed lossy unless asked; they keep what their scanner software needs (whole XMP, private tags); thumbnail pages kept by default, except Capture One's |
 
 Every release since v1.0: [version_history.md](version_history.md#release-history).
+
+## v2.30.0_beta1
+
+2026-11-13, pre-release; the last stable release is [v2.29.1](version_history.md#v2291).
+
+- **Faster**: each file's metadata is written by one ExifTool process instead of several, and archiving a TIFF takes about half the time it did (decoding one back, 10–25% less).
+- **Flags must be written in full**: a shortened flag such as `--work 4` is refused before anything runs. The wizard writes them in full; check your own `.bat` files ([upgrading](upgrading.md)).
+- **Each output's history names the libjxl version that made it** (`… with libjxl 0.12.0`), next to the toolkit's version.
+- A PNG saved with a `.jpg` name is no longer turned into a lossy JXL by the lossless JPEG transcode: it is an error, and the file stays.
+- `python jxl_photo.py encode|decode|recompress|transcode …` runs a script directly, with the names of the Windows program.
+
+[Version history](version_history.md#v2300_beta1).
 
 ## v2.29.1
 

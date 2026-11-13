@@ -11,7 +11,7 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
-## v2.30.0: flags are written in full
+## v2.30.0: flags are written in full; a PNG named `.jpg` is refused
 
 - **A shortened flag is refused.** Python's command-line reader used to
   accept any unambiguous start of a flag: `--delete-so` worked as
@@ -25,6 +25,12 @@ Per-release notes: [version_history.md](version_history.md) and the
 - **New, optional:** `python jxl_photo.py encode ARGS` runs
   `jxl_tiff_encoder.py ARGS` (also `decode`, `recompress`, `transcode`: the
   names of the Windows program). The scripts still run on their own.
+- **A PNG (or another format) saved with a `.jpg` name** is an error in a
+  lossless JPEG → JXL run of the JPEG transcoder, and the file stays where it
+  is. Before, cjxl encoded its pixels at its own default distance and the run
+  logged a lossy JXL as `OK` (nothing was deleted). Rename it to its real
+  extension, or use `--force-convert` to encode its pixels at the distance you
+  choose.
 
 ## v2.29.1 (and the v2.29.0_beta1 pre-release): the scripts need `jxl_photo_common.py` next to them
 

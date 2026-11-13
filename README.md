@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.29.1** (2026-11-13) · [What's new](#whats-new-in-v2291) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.30.0_beta1** (2026-11-13, pre-release; last stable: [v2.29.1](docs/version_history.md#v2291)) · [What's new](#whats-new-in-v2300_beta1) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 **Windows program, no Python needed:** [jxl-photo-exe](https://github.com/rsilvabr/jxl-photo-exe/releases/latest) — unzip and double-click; cjxl/djxl, ExifTool, ImageMagick and jxl-thumb included.
 
@@ -201,16 +201,17 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## What's new in v2.29.1
+## What's new in v2.30.0_beta1
 
-2026-11-13. The first stable release since v2.28.0; it includes the v2.29.0_beta1 pre-release.
+2026-11-13, pre-release; the last stable release is [v2.29.1](docs/version_history.md#v2291).
 
-- **A release is now six files that go together**: the five scripts and `jxl_photo_common.py`, which holds the code they share. Keep them in one folder ([upgrading](docs/upgrading.md)); a script copied on its own stops with a line that says so. The Windows program already carries all of them.
-- **Yes/no questions in the wizard read the answer the same way on both screens**: `y`/`yes`/`s`/`sim` and `n`/`no`/`nao`/`não`, `Enter` for the default, and anything else asks again (the plain screen took an answer that did not start with `n` as a yes).
-- **The log file now holds the scripts' detail lines** (`DEBUG`: why a delete gate kept a file, which ICC profile was used); the console shows what it always did.
-- The code behind the delete gates and the start of each run was reorganized and is now tested directly; same command lines, settings and files written.
+- **Faster**: each file's metadata is written by one ExifTool process instead of several, and archiving a TIFF takes about half the time it did (decoding one back, 10–25% less).
+- **Flags must be written in full**: a shortened flag such as `--work 4` is refused before anything runs. The wizard writes them in full; check your own `.bat` files ([upgrading](docs/upgrading.md)).
+- **Each output's history names the libjxl version that made it** (`… with libjxl 0.12.0`), next to the toolkit's version.
+- A PNG saved with a `.jpg` name is no longer turned into a lossy JXL by the lossless JPEG transcode: it is an error, and the file stays.
+- `python jxl_photo.py encode|decode|recompress|transcode …` runs a script directly, with the names of the Windows program.
 
-[Technical notes](docs/version_history.md#v2291) · [earlier releases, in short](docs/whats_new.md) · [every release](docs/version_history.md#release-history)
+[Technical notes](docs/version_history.md#v2300_beta1) · [earlier releases, in short](docs/whats_new.md) · [every release](docs/version_history.md#release-history)
 
 ---
 
