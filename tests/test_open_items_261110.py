@@ -648,11 +648,17 @@ def test_review_minus_m_reaches_exiftool_only_from_the_decoder_with_the_setting(
     monkeypatch.setattr(m, "_run_captured", fake_run)
     m._run_exiftool_argfile(["-ver"])
     assert "-m" not in seen[-1], seen[-1]
+    # The same rule in the runner of several commands in one process (refactor
+    # F6): -m once per command with the setting, never without it.
+    m._common._exiftool_one_process(m._G, [["-ver"], ["-ver"]], 60)
+    assert "-m" not in seen[-1], seen[-1]
     if module == "jxl_tiff_decoder":
         assert m.EXIFTOOL_IGNORE_MINOR is False
         monkeypatch.setattr(m, "EXIFTOOL_IGNORE_MINOR", True)
         m._run_exiftool_argfile(["-ver"])
         assert "-m" in seen[-1], seen[-1]
+        m._common._exiftool_one_process(m._G, [["-ver"], ["-ver"]], 60)
+        assert seen[-1].count("-m") == 2, seen[-1]
         assert "EXIFTOOL_IGNORE_MINOR" not in m._OVERLAY_SETTINGS
     else:
         assert not hasattr(m, "EXIFTOOL_IGNORE_MINOR")

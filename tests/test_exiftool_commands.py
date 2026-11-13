@@ -113,6 +113,39 @@ def test_a_prefetched_read_answers_exactly_like_its_own_run(tmp_path, monkeypatc
     assert enc._EXIFTOOL_PREFETCH.results == {}
 
 
+def test_copy_metadata_runs_every_command_when_a_cleanup_fails(tmp_path, monkeypatch):
+    """The decoder's copy_metadata on the one-process-per-command path (an
+    exiftool older than 12.15, or a test double): a cosmetic clean-up that
+    fails never stops the commands after it (stop_at_failure=False, review
+    V2) — the three reads the next step decides from still run, the
+    provenance write still runs, and the copy is not failed for it, as when
+    each was a call of its own."""
+    calls = []
+
+    def fake(args, timeout=60):
+        args = [str(a) for a in args]
+        calls.append(args)
+        if "-ifd1:Software=" in args:
+            return subprocess.CompletedProcess(args, 1, "", "Error: cosmetic")
+        if "-XMP-dc:Relation" in args and "-j" in args:
+            return subprocess.CompletedProcess(args, 0, '[{"SourceFile": "x"}]', "")
+        if "-IFD0:Software" in args or "-ImageDescription" in args:
+            return subprocess.CompletedProcess(args, 0, "", "")
+        return subprocess.CompletedProcess(args, 0, "    1 image files updated\n", "")
+    monkeypatch.setattr(dec, "_run_exiftool_argfile", fake)
+    monkeypatch.setattr(dec, "_exiftool_source", lambda p, tmp: str(p))
+    monkeypatch.setattr(dec, "_xmp_block_args", lambda p, tmp: ["-tagsfromfile", str(p), "-XMP"])
+    monkeypatch.setattr(dec, "_orientation_reset_args", lambda p: [])
+    dec.setup_logger()
+    folder = tmp_path / HOSTILE
+    ok = dec.copy_metadata(folder / "a (1).jxl", folder / "a (1).tif", tmp_path)
+    assert ok is True
+    assert sum("-IFD0:Software" in c for c in calls) == 1        # the reads ran
+    assert sum("-j" in c and "-XMP-dc:Relation" in c for c in calls) == 1
+    assert any(any(a.startswith("-XMP-xmpMM:History+=") for a in c) for c in calls), \
+        "the last write never ran"
+
+
 def test_a_test_double_sees_every_command_on_its_own(monkeypatch):
     """A replaced _run_exiftool_argfile keeps its old view: one call per
     command, stopping at the first that fails (as the old code did)."""

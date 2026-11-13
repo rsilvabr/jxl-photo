@@ -135,21 +135,23 @@ def test_eb_png_bytes_identical_to_the_old_writer(dtype, channels, icc):
                 == _png_content(_old_make_png_bytes(img, icc)))
 
 
-def test_eb_png_writer_holds_no_whole_image_copy():
+def test_eb_png_writer_holds_no_whole_image_copy(monkeypatch):
     """A smooth 16-bit page: the old writer held a big-endian copy AND the raw
-    filtered buffer (2x the page) at once, on top of its output. Since zlib
-    level 0 (refactor B2) the output itself is page-sized, and joining its
-    pieces holds it twice for a moment: the bound is that, plus less than
-    half a page of row blocks — never another copy of the image."""
+    filtered buffer (2x the page) at once, on top of its output. Measured with
+    a zlib that really compresses: the writer itself uses level 0 since
+    refactor B2, where the output alone is page-sized and would hide a copy of
+    the image (review V2); compressed, the output is small again and any
+    whole-image copy shows."""
+    real = zlib.compressobj
+    monkeypatch.setattr(enc.zlib, "compressobj", lambda level=-1, *a, **k: real(6, *a, **k))
     img = (np.linspace(0, 65535, 1500 * 2000 * 3).reshape(1500, 2000, 3)).astype(np.uint16)
     tracemalloc.start()
     try:
-        png = enc.make_png_bytes(img)
+        enc.make_png_bytes(img)
         _cur, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
-    limit = 2 * len(png) + img.nbytes // 2
-    assert peak < limit, f"peak {peak / 2**20:.0f} MiB for a {img.nbytes / 2**20:.0f} MiB page"
+    assert peak < img.nbytes, f"peak {peak / 2**20:.0f} MiB for a {img.nbytes / 2**20:.0f} MiB page"
 
 
 @real

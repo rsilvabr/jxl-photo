@@ -75,6 +75,33 @@ def test_mode_fallback_reads_the_tokens(flags, _child, tokens):
     assert wp._flags_set_mode(flags) == tokens
 
 
+def test_the_child_s_own_spellings_decide(monkeypatch):
+    """Where the child and the tokens disagree, the child wins (review V2: since
+    allow_abbrev=False the table above agrees everywhere, so a wrapper that
+    stopped asking the child would pass it). A child with its own spellings —
+    an alias of --delete-source, a short -m for --mode — that the fallback's
+    exact reading cannot know."""
+    import argparse
+    import types
+
+    def build_parser():
+        p = argparse.ArgumentParser(allow_abbrev=False)
+        p.add_argument("input", nargs="?")
+        p.add_argument("--delete-originals", "--delete-source", dest="delete_source",
+                       action="store_true")
+        p.add_argument("-m", "--mode", type=int, default=0)
+        return p
+    fake = types.SimpleNamespace(build_parser=build_parser)
+    real_import = wp.importlib.import_module
+    monkeypatch.setattr(wp.importlib, "import_module",
+                        lambda name, *a, **k: fake if name == "jxl_tiff_encoder"
+                        else real_import(name, *a, **k))
+    assert wp._flags_request_delete("--delete-originals", "tiff", "jxl") is True
+    assert wp._flags_request_delete("--delete-originals") is False      # tokens alone
+    assert wp._flags_set_mode("-m 8", "tiff", "jxl") == "--mode"
+    assert wp._flags_set_mode("-m 8") is None                           # tokens alone
+
+
 def test_the_encoder_s_modular_flag_is_not_a_mode():
     assert wp._flags_set_mode("--modular on --effort 9", "tiff", "jxl") is None
 
