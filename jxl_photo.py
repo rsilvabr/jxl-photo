@@ -166,7 +166,40 @@ def _split_expert_flags(flags: str) -> List[str]:
     return stripped
 
 
-def _flags_request_delete(flags: Optional[str]) -> bool:
+# The `mode` a probe parse starts from: tells "no --mode in the flags" from
+# every value the flags could give it.
+_MODE_NOT_GIVEN = object()
+
+
+def _child_flags(origin: Optional[str], dest: Optional[str], flags: Optional[str]):
+    """The child's OWN parse of the expert flags (its build_parser(), read in
+    process like _expert_flags_problem): an argparse Namespace whose `mode` is
+    _MODE_NOT_GIVEN unless the flags set it. None when there is nothing to
+    parse, the direction is unknown, the child cannot be imported or its
+    parser rejects the flags (the gates refuse such a run); the callers then
+    read the tokens themselves, which fails closed.
+
+    Abbreviations, spellings and store_true values are the child's to judge:
+    six bugs of the tracker were the wrapper's copy of those rules drifting
+    from argparse (#210, #263, #457, #518, #603, #604)."""
+    tokens = _split_expert_flags(flags or '')
+    if not tokens or not origin or not dest:
+        return None
+    try:
+        parser = importlib.import_module(_child_module(origin, dest)).build_parser()
+        parser.set_defaults(mode=_MODE_NOT_GIVEN)
+    except Exception:
+        return None
+    try:
+        with redirect_stderr(io.StringIO()):
+            ns, _extras = parser.parse_known_args(["__jxlphoto_probe__"] + tokens)
+    except SystemExit:
+        return None
+    return ns
+
+
+def _flags_request_delete(flags: Optional[str], origin: Optional[str] = None,
+                          dest: Optional[str] = None) -> bool:
     """True when the free-form expert-flags string asks the child to delete sources.
 
     Expert flags are appended to the child's argv verbatim, so `--delete-source`
@@ -179,7 +212,13 @@ def _flags_request_delete(flags: Optional[str]) -> bool:
     argparse also lets a later `--mode 8` in these flags override the mode the
     wrapper passed, so the callers deliberately do NOT combine this with a mode
     check: expert-flag deletion is gated on its own, whatever the stored mode says.
+
+    With the direction given, the child's own parse answers (_child_flags);
+    the token reading below is the fallback when it cannot.
     """
+    ns = _child_flags(origin, dest, flags)
+    if ns is not None:
+        return bool(getattr(ns, "delete_source", False))
     # The children run argparse with allow_abbrev=True, so any UNAMBIGUOUS
     # prefix of --delete-source also deletes: `--delete-s` works, and paired
     # with `--delete-c` (an abbreviation of --delete-confirm-off) a preset
@@ -248,7 +287,8 @@ def _flags_ambiguous_delete(flags: Optional[str]) -> Optional[str]:
     return None
 
 
-def _flags_set_mode(flags: Optional[str]) -> Optional[str]:
+def _flags_set_mode(flags: Optional[str], origin: Optional[str] = None,
+                    dest: Optional[str] = None) -> Optional[str]:
     """The expert-flag token that would set the child's --mode, or None.
 
     The wrapper decides everything around a run from ITS mode: the in-place
@@ -257,12 +297,23 @@ def _flags_set_mode(flags: Optional[str]) -> Optional[str]:
     last), so the run would replace files in place behind a gate that saw
     another mode (W-B of the 2026-11-03 audit). `--mo`/`--mod` count too:
     argparse accepts an unambiguous abbreviation (the decoder has no other
-    --mo... flag)."""
+    --mo... flag).
+
+    With the direction given, the child's own parse decides whether the mode
+    is set (_child_flags); the tokens only name it in the message ("--mode"
+    when none of them looks like it)."""
+    token = None
     for t in _split_expert_flags(flags or ''):
         tok = t.split('=', 1)[0]
         if tok.startswith('--') and len(tok) >= 4 and '--mode'.startswith(tok):
-            return t
-    return None
+            token = t
+            break
+    ns = _child_flags(origin, dest, flags)
+    if ns is None:
+        return token
+    if getattr(ns, "mode", _MODE_NOT_GIVEN) is _MODE_NOT_GIVEN:
+        return None
+    return token or "--mode"
 
 
 def _expert_flags_problem(origin: str, dest: str, flags: Optional[str]) -> Optional[str]:
@@ -491,7 +542,8 @@ _marker_matches = _common._marker_matches
 _path_excluded_below_root = _common._path_excluded_below_root
 
 
-def _append_expert_flags(cmd: List[str], flags: str) -> None:
+def _append_expert_flags(cmd: List[str], flags: str, origin: Optional[str] = None,
+                         dest: Optional[str] = None) -> None:
     """Append free-form expert flags to a child command line.
 
     When the flags ask to delete sources, the wrapper charges the HHMM token
@@ -505,7 +557,7 @@ def _append_expert_flags(cmd: List[str], flags: str) -> None:
         return
     tokens = _split_expert_flags(flags)
     cmd.extend(tokens)
-    if _flags_request_delete(flags) and not any(
+    if _flags_request_delete(flags, origin, dest) and not any(
             t.split('=', 1)[0] in ('--delete-confirm-off', '--delete_confirm_off')
             for t in tokens):
         cmd.append('--delete-confirm-off')
@@ -2154,7 +2206,9 @@ def _step6_delete_on(workflow: Dict) -> bool:
     2026-10-08 audit)."""
     return bool(workflow.get('delete_source')
                 or (workflow.get('advanced_options') or {}).get('delete_source')
-                or _flags_request_delete(workflow.get('expert_flags')))
+                or _flags_request_delete(workflow.get('expert_flags'),
+                                         workflow.get('origin_format'),
+                                         workflow.get('dest_format')))
 
 
 _NO_DERIVATIVE_WITH_DELETE = ("A derivative (colour conversion, resize, sharpening) never "
@@ -4219,7 +4273,8 @@ def _gate_registry_rules(menu, wf, ctx) -> bool:
 
 
 def _gate_mode_in_expert_flags(menu, wf, ctx) -> bool:
-    _mode_flag = _flags_set_mode(wf.get('expert_flags'))
+    _mode_flag = _flags_set_mode(wf.get('expert_flags'), wf.get('origin_format'),
+                                 wf.get('dest_format'))
     if _mode_flag:
         menu._print_error(
             f"Expert flag {_mode_flag!r} cannot run: the mode is chosen in the "
@@ -4247,7 +4302,7 @@ def _gate_direct_derivatives(menu, wf, ctx) -> bool:
     _adv_pre = wf.get('advanced_options') or {}
     _shaping_pre = _has_derivative_options(_adv_pre)
     _delete_pre = bool(_adv_pre.get('delete_source')
-                       or _flags_request_delete(wf.get('expert_flags')))
+                       or _flags_request_delete(wf.get('expert_flags'), origin, dest))
     _conv_pre = wf.get('conversion_type', '')
     if origin == 'jxl' and dest == 'jxl':
         if _shaping_pre:
@@ -4344,7 +4399,7 @@ def _gate_manifest_derivatives(menu, wf, ctx) -> bool:
                      if _has_derivative_options(_a)]
     _rename_rows = [i + 1 for i, (_w, _a) in enumerate(row_effs) if _a.get('rename_from')]
     _manifest_delete = bool(advanced.get('delete_source')
-                            or _flags_request_delete(wf.get('expert_flags')))
+                            or _flags_request_delete(wf.get('expert_flags'), origin, dest))
     if origin == 'jxl' and dest == 'jxl' and (_derived_rows or _rename_rows):
         if _derived_rows and _manifest_delete:
             menu._print_error("A derivative (colour conversion/resize/sharpening) "
@@ -4398,7 +4453,8 @@ def _gate_preset_unattended(menu, wf, ctx) -> bool:
         return False
     session = ctx['session']
     _adv_delete = bool((session.get('last_advanced_options') or {}).get('delete_source'))
-    _flag_delete = _flags_request_delete(session.get('last_expert_flags'))
+    _flag_delete = _flags_request_delete(session.get('last_expert_flags'),
+                                         ctx['origin'], ctx['dest'])
     _in_place_recompress = (ctx['origin'] == 'jxl' and ctx['dest'] == 'jxl'
                             and ctx['mode'] in (0, 8))
     if _flag_delete or _adv_delete or _in_place_recompress:
@@ -8160,11 +8216,11 @@ class InteractiveMenu:
                 "here. Run it from the menu, or add --dry-run to simulate it.")
             return False
 
-        if not dry_run and (_flags_request_delete(workflow.get('expert_flags'))
+        if not dry_run and (_flags_request_delete(workflow.get('expert_flags'), origin, dest)
                             or advanced.get('delete_source')
                             or _any_in_place_recompress):
             if _any_in_place_recompress and not (
-                    _flags_request_delete(workflow.get('expert_flags'))
+                    _flags_request_delete(workflow.get('expert_flags'), origin, dest)
                     or advanced.get('delete_source')):
                 _confirmed = self._confirm_in_place_replace()
             else:
@@ -9537,7 +9593,7 @@ class InteractiveMenu:
         self._append_provenance_flags(cmd, ctx.advanced, origin, dest)
         self._append_overwrite_guard_flag(cmd, ctx.advanced)
         self._policy_format(cmd, ctx)
-        _append_expert_flags(cmd, workflow.get('expert_flags'))
+        _append_expert_flags(cmd, workflow.get('expert_flags'), origin, dest)
         return cmd
 
     def _policy_exclude_folders(self, cmd: List, ctx: "_CmdCtx") -> None:
@@ -9901,7 +9957,7 @@ class InteractiveMenu:
         # so a mode test here would suppress the ONLY confirmation in the chain.
         # (It used to be `and mode == 8`, which held only because the children
         # then ignored the flag outside mode 8.)
-        _flag_delete = _flags_request_delete(workflow.get('expert_flags'))
+        _flag_delete = _flags_request_delete(workflow.get('expert_flags'), origin, dest)
         _adv_delete = bool(workflow.get('advanced_options', {}).get('delete_source'))
         # JXL -> JXL in modes 0/8 REPLACES the source files with the
         # recompressed versions — as irreversible as a delete, so the same

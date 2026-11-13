@@ -544,7 +544,14 @@
   `--restamp-then-sync` conflicts with the deletes and Overwrite. Expert
   flags are parsed with the child's `build_parser()` before the run
   (`_expert_flags_problem`) and a `--mode` there is refused
-  (`_flags_set_mode`): every pre-run check judged the wizard's mode.
+  (`_flags_set_mode`): every pre-run check judged the wizard's mode. "Do
+  the flags delete / set the mode?" is the child's own parse too
+  (`_child_flags`): every caller of `_flags_request_delete` /
+  `_flags_set_mode` / `_append_expert_flags` passes the direction
+  (`tests/test_flags_ask_the_child.py`), and reading the tokens is only the
+  fallback when the child cannot be imported — it errs towards "deletes".
+  Never re-implement argparse's rules (abbreviations, spellings) in the
+  wrapper again: six bugs came from that copy.
 - **The UI layer** (`UI`, `PlainUI`, `RichUI`, `ScriptedUI`) asks by
   question id (`opt.screen`, `opt.<id>`, `restamp.*`, `icccache.confirm`,
   `settings.*`); tests answer by id with `ScriptedUI` (a question with no
