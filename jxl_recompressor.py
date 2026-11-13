@@ -94,7 +94,6 @@ _G = _common.Script(globals())
 GUARD_DOC_URL = (f"{TOOLKIT_URL}/blob/main/docs/behavior_and_limitations.md"
                  f"#renamed-folders-and-the-overwrite-guard")
 
-# MIME types named in the xmpMM:History entry (_history_args).
 _HISTORY_MIME = _common._HISTORY_MIME
 
 # Module-level logger; setup_logger() replaces it with a configured instance when main() runs.
@@ -296,17 +295,6 @@ def _scan_done(*a, **k): return _common._scan_done(_G, *a, **k)
 # --- Staging leftovers ------------------------------------------------------
 # The code of this section has ONE copy, in jxl_photo_common.py (AGENTS.md,
 # "The common module"); the names below bind it here. Fix it there.
-#
-# A file whose conversion failed is deliberately KEPT in staging for manual
-# recovery ("KEEP in staging" below), and nothing ever swept it. Over weeks of
-# scheduled runs that is a slow leak on precisely the small scratch SSD the
-# disk-full abort exists to protect -- the leftovers eventually cause the
-# condition they were evidence of.
-#
-# Every staging name this tool writes starts with a uuid4 hex prefix, and that
-# is what makes a sweep safe: a staging directory is frequently a shared scratch
-# folder, so nothing that did not come from here may be touched. The scan is
-# non-recursive for the same reason.
 _STAGING_PREFIX_RE = _common._STAGING_PREFIX_RE
 # A file still being written belongs to a run in flight, possibly a CONCURRENT
 # one sharing this directory. Only sweep what has been sitting still a while.
@@ -893,7 +881,6 @@ SUBFILETYPE_PREFIX = "jxlphoto-subfiletype:"
 # (a reduced-resolution preview). A derivative run makes none of it.
 THUMB_FLAG = "jxlphoto-thumb"
 PAGE_PREFIX = _common.PAGE_PREFIX
-# The encoder's PAGE_XMP_PREFIX: which page of its TIFF this JXL holds.
 _CAMERA_THUMB_MAX_SIDE = _common._CAMERA_THUMB_MAX_SIDE
 
 
@@ -943,29 +930,12 @@ ICC_INHERITED_XMP_FLAG = "jxlphoto-icc:inherited"
 # a " | "-separated chain (the LAST one is the current file's).
 _ENCODE_TAG_RE = _common._ENCODE_TAG_RE
 
-# The stored generation token, read ONLY as a complete " | "-delimited segment
-# (or bounded by the field's start/end): "Project gen=3 phase 2" is running
-# text, not a token, and must never be read as one.
 _GEN_TAG_RE = _common._GEN_TAG_RE
 
-# The whole machine block as ONE unit: an optional gen= lead segment followed
-# by the contiguous cjxl d=/e= chain. The block only starts at a segment
-# boundary ((?:^|\|)), so it never bites into a caption's running text; and
-# matching only the first cjxl entry would leave an orphaned gen= and a
-# partial chain behind. Legacy fields (a chain with no gen=) are the normal
-# case and match in full.
 _MACHINE_BLOCK_RE = _common._MACHINE_BLOCK_RE
 
 _MIN_EFFECTIVE_DISTANCE = _common._MIN_EFFECTIVE_DISTANCE
-# cjxl >= 0.12 clamps every lossy distance below this to the same value:
-# --distance 0.005 ... 0.05 were measured producing BYTE-IDENTICAL output
-# (VarDCT and lossy modular alike). libjxl PR #4238 set the floor so the DC
-# coefficients stay inside int16 — below it the bitstream leaves Level 5 of
-# the JPEG XL spec.
 _MIN_EFFECTIVE_DISTANCE_PRE_012 = _common._MIN_EFFECTIVE_DISTANCE_PRE_012
-# cjxl 0.11.2 (measured, 2026-09-24): only 0.005 and 0.01 were identical;
-# 0.02/0.03/0.04 were real steps above 0.05 (d=0.01: +8.7 dB PSNR at 1.75x
-# the size of d=0.05). Older builds share the pre-#4238 code.
 
 
 _min_effective_distance = _common._min_effective_distance
@@ -987,9 +957,6 @@ def _cjxl_buffering_flag():
     return []
 
 
-# Peak private memory of ONE cjxl, in bytes per pixel of the image, measured on
-# libjxl 0.12.0 with 45 MP 16-bit photos (+~10% margin). Plan
-# 261004_Claude_plan_memoria-workers.md has the full table.
 _STREAMING_BYTES_PER_PIXEL = _common._STREAMING_BYTES_PER_PIXEL
 _WHOLE_IMAGE_E7_BYTES_PER_PIXEL = _common._WHOLE_IMAGE_E7_BYTES_PER_PIXEL
 _WHOLE_IMAGE_E8_BYTES_PER_PIXEL = _common._WHOLE_IMAGE_E8_BYTES_PER_PIXEL
@@ -1454,14 +1421,6 @@ _DEVNULL = subprocess.DEVNULL
 _CompletedProcess = subprocess.CompletedProcess
 
 
-# cjxl and djxl fail on a path of 260 characters or more ("Could not write
-# jxl file", "couldn't load") even with Windows long paths enabled; given the
-# extended-length prefix \\?\ they read and write it, Japanese included
-# (measured with libjxl 0.12 on a 320-character path, 2026-10-22). A temp
-# written beside the output adds ~50 characters to the source path, and 1459
-# files of the owner's library reach the limit that way. exiftool handles long
-# paths itself, and ImageMagick only ever sees short temp paths (and would
-# read the '?' of the prefix as a wildcard), so only the two codecs get it.
 _LONG_PATH_THRESHOLD = _common._LONG_PATH_THRESHOLD
 
 
@@ -1514,9 +1473,6 @@ def _run_exiftool_argfile(*a, **k): return _common._run_exiftool_argfile(_G, *a,
 # classify the requested recompression against it, and restamp after encoding.
 # ---------------------------------------------------------------------------
 
-# The History entry a deliberate "--encode-tag off" writes: a reader that meets
-# it before any record stops there (the lineage was discarded on purpose, an
-# older entry's record must not come back).
 _NO_RECORD_SEGMENT = _common._NO_RECORD_SEGMENT
 
 
@@ -2509,18 +2465,6 @@ _icc_a2b_only = _common._icc_a2b_only
 
 
 # ─── Explorer thumbnail (EXPLORER_THUMBNAIL) ─────────────────────────────
-# A small sRGB JPEG of the image in a box of the JXL container, for jxl-thumb
-# (0.2.0+), which shows it in Windows Explorer instead of decoding the photo.
-# The box is an ISO BMFF `uuid` box — the format's own way to carry a
-# program's private data: decoders and editors that do not know it skip it
-# (djxl, exiftool and this toolkit's box reorder keep it in place; exiftool's
-# -tagsfromfile does not copy it, so a re-encode never inherits the source's).
-# Not EXIF: a 768 px JPEG does not fit a JPEG's 64 KB EXIF segment, and
-# djxl, which copies a JXL's EXIF into the JPEG it writes, then fails.
-# Payload: the UUID, then b"jxlphoto-thumbnail:v1:<codestream bytes>:<FNV-1a
-# 64 of its first 64 KiB>\n", then the JPEG. jxl-thumb shows it only while
-# that fingerprint still names the file's codestream: a program that
-# re-encodes the pixels and keeps the box would leave a stale one, ignored.
 # One copy, in jxl_photo_common.py.
 THUMB_BOX_UUID = _common.THUMB_BOX_UUID
 THUMB_BOX_MARKER = _common.THUMB_BOX_MARKER

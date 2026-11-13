@@ -78,15 +78,15 @@ def _script_get(g, name, default=None):
 
 # === Boxes and codestream ===
 
-_MODULAR_LOSSY_BYTES_PER_PIXEL = 110
-
-_STREAMING_BYTES_PER_PIXEL = 40
-
 _THUMB_HEAD = 65536
 
+# Peak private memory of ONE cjxl, in bytes per pixel of the image, measured on
+# libjxl 0.12.0 with 45 MP 16-bit photos (+~10% margin). Plan
+# 261004_Claude_plan_memoria-workers.md has the full table.
+_STREAMING_BYTES_PER_PIXEL = 40
 _WHOLE_IMAGE_E7_BYTES_PER_PIXEL = 90
-
 _WHOLE_IMAGE_E8_BYTES_PER_PIXEL = 320
+_MODULAR_LOSSY_BYTES_PER_PIXEL = 110
 
 
 def reorder_jxl_boxes(jxl_path):
@@ -635,8 +635,21 @@ def _decoded_in_original_space(out_icc: Path, orig_icc: Path):
 
 # === Paths and folder names ===
 
+# The modes that COLLAPSE folder structure (2/4/5/6/7) drop the source's folder
+# from the output path, so two sources in different folders resolve to the same
+# output. _abort_on_duplicate_outputs catches that inside one run; only a
+# recorded marker catches it ACROSS runs — and with --delete-source the second
+# run would otherwise overwrite the first archive and delete both originals.
 _COLLAPSING_MODES = frozenset({2, 4, 5, 6, 7})
 
+# cjxl and djxl fail on a path of 260 characters or more ("Could not write
+# jxl file", "couldn't load") even with Windows long paths enabled; given the
+# extended-length prefix \\?\ they read and write it, Japanese included
+# (measured with libjxl 0.12 on a 320-character path, 2026-10-22). A temp
+# written beside the output adds ~50 characters to the source path, and 1459
+# files of the owner's library reach the limit that way. exiftool handles long
+# paths itself, and ImageMagick only ever sees short temp paths (and would
+# read the '?' of the prefix as a wildcard), so only the two codecs get it.
 _LONG_PATH_THRESHOLD = 240
 
 
@@ -880,12 +893,29 @@ def _stderr_tail(stderr, limit=200):
 
 # === Encode record and lineage ===
 
+# dc:Relation token naming what the FIRST master of this photo was made from:
+# tiff8 / tiff16 (encoder), jpeg / png8 / png16 / png (transcoder, pixel
+# re-encode), jpeg (recompressor re-encoding a jbrd JXL), jxl-lossy /
+# jxl-lossless (recompressor, a JXL no toolkit script wrote, as jxlinfo reads
+# its header; plain `jxl` when jxlinfo could not tell, and in files written by
+# v2.10.0). Written once by the script that first touches a clean input, then
+# carried forward unchanged — absent means unknown, never guessed. The only
+# reader is the recompressor's --on-regeneration guard (_hidden_generations).
 ORIGIN_PREFIX = "jxlphoto-origin:"
 
 _ENCODE_TAG_RE = re.compile(r"cjxl\s+d=([0-9.]+)\s+e=(\d+)")
 
+# The stored generation token, read ONLY as a complete " | "-delimited segment
+# (or bounded by the field's start/end): "Project gen=3 phase 2" is running
+# text, not a token, and must never be read as one.
 _GEN_TAG_RE = re.compile(r"(?:^|\|)\s*gen=(\d+)\s*(?=\||$)")
 
+# The whole machine block as ONE unit: an optional gen= lead segment followed
+# by the contiguous cjxl d=/e= chain. The block only starts at a segment
+# boundary ((?:^|\|)), so it never bites into a caption's running text; and
+# matching only the first cjxl entry would leave an orphaned gen= and a
+# partial chain behind. Legacy fields (a chain with no gen=) are the normal
+# case and match in full.
 _MACHINE_BLOCK_RE = re.compile(
     r"(?:^|\|)\s*"
     r"(?:gen=\d+\s*\|\s*)?"
@@ -893,6 +923,9 @@ _MACHINE_BLOCK_RE = re.compile(
     r"(?:\s*\|\s*cjxl\s+d=[0-9.]+\s+e=\d+)*"
 )
 
+# The History entry a deliberate "--encode-tag off" writes: a reader that meets
+# it before any record stops there (the lineage was discarded on purpose, an
+# older entry's record must not come back).
 _NO_RECORD_SEGMENT = "no encode record"
 
 _TOOLKIT_MARKER_NAMESPACE = "jxlphoto-"
@@ -1184,10 +1217,24 @@ def _settings_overlay_section(path, module: str):
 
 # === Staging, locks and small helpers ===
 
+# Must match the encoder's PAGE_XMP_PREFIX: which page of its TIFF this JXL
+# holds. It carries the page index of a split page, so reconstruction does
+# not depend on the file name (which breaks for sources named *_page<N> or
+# *_thumbnail).
 PAGE_PREFIX = "jxlphoto-page:"
 
 _CAMERA_THUMB_MAX_SIDE = 160
 
+# Staging leftovers. A file whose conversion failed is deliberately KEPT in
+# staging for manual recovery ("KEEP in staging"), and nothing ever swept it.
+# Over weeks of scheduled runs that is a slow leak on precisely the small
+# scratch SSD the disk-full abort exists to protect -- the leftovers eventually
+# cause the condition they were evidence of.
+#
+# Every staging name the toolkit writes starts with a uuid4 hex prefix, and
+# that is what makes a sweep safe: a staging directory is frequently a shared
+# scratch folder, so nothing that did not come from here may be touched. The
+# scan is non-recursive for the same reason.
 _STAGING_PREFIX_RE = re.compile(r"^[0-9a-f]{32}_")
 
 
@@ -1980,6 +2027,18 @@ def _windows_memory_status():
 
 # === Explorer thumbnail box ===
 
+# A small sRGB JPEG of the image in a box of the JXL container, for jxl-thumb
+# (0.2.0+), which shows it in Windows Explorer instead of decoding the photo.
+# The box is an ISO BMFF `uuid` box — the format's own way to carry a
+# program's private data: decoders and editors that do not know it skip it
+# (djxl, exiftool and this toolkit's box reorder keep it in place; exiftool's
+# -tagsfromfile does not copy it, so a re-encode never inherits the source's).
+# Not EXIF: a 768 px JPEG does not fit a JPEG's 64 KB EXIF segment, and
+# djxl, which copies a JXL's EXIF into the JPEG it writes, then fails.
+# Payload: the UUID, then b"jxlphoto-thumbnail:v1:<codestream bytes>:<FNV-1a
+# 64 of its first 64 KiB>\n", then the JPEG. jxl-thumb shows it only while
+# that fingerprint still names the file's codestream: a program that
+# re-encodes the pixels and keeps the box would leave a stale one, ignored.
 THUMB_BOX_MARKER = b"jxlphoto-thumbnail:v1:"
 
 THUMB_BOX_UUID = bytes.fromhex("4e0b4016f51c473d9669bc35aebe3c16")
@@ -2271,8 +2330,16 @@ def _encode_tag_mode(g) -> str:
 
 # === Other tools' folders, orientation and distance ===
 
+# cjxl >= 0.12 clamps every lossy distance below this to the same value:
+# --distance 0.005 ... 0.05 were measured producing BYTE-IDENTICAL output
+# (VarDCT and lossy modular alike). libjxl PR #4238 set the floor so the DC
+# coefficients stay inside int16 — below it the bitstream leaves Level 5 of
+# the JPEG XL spec.
 _MIN_EFFECTIVE_DISTANCE = 0.05
 
+# cjxl 0.11.2 (measured, 2026-09-24): only 0.005 and 0.01 were identical;
+# 0.02/0.03/0.04 were real steps above 0.05 (d=0.01: +8.7 dB PSNR at 1.75x
+# the size of d=0.05). Older builds share the pre-#4238 code.
 _MIN_EFFECTIVE_DISTANCE_PRE_012 = 0.01
 
 
@@ -3174,6 +3241,7 @@ def _jxlinfo_text(g, jxl_path):
 
 # === Run state and logs ===
 
+# MIME types named in the xmpMM:History entry (_history_args).
 _HISTORY_MIME = {".tif": "image/tiff", ".tiff": "image/tiff",
                  ".jxl": "image/jxl", ".jpg": "image/jpeg",
                  ".jpeg": "image/jpeg", ".png": "image/png"}

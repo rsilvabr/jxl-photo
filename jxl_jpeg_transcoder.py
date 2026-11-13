@@ -100,7 +100,6 @@ _G = _common.Script(globals())
 GUARD_DOC_URL = (f"{TOOLKIT_URL}/blob/main/docs/behavior_and_limitations.md"
                  f"#renamed-folders-and-the-overwrite-guard")
 
-# MIME types named in the xmpMM:History entry (_history_args).
 _HISTORY_MIME = _common._HISTORY_MIME
 
 
@@ -477,17 +476,6 @@ def _scan_done(*a, **k): return _common._scan_done(_G, *a, **k)
 # --- Staging leftovers ------------------------------------------------------
 # The code of this section has ONE copy, in jxl_photo_common.py (AGENTS.md,
 # "The common module"); the names below bind it here. Fix it there.
-#
-# A file whose conversion failed is deliberately KEPT in staging for manual
-# recovery ("KEEP in staging" below), and nothing ever swept it. Over weeks of
-# scheduled runs that is a slow leak on precisely the small scratch SSD the
-# disk-full abort exists to protect -- the leftovers eventually cause the
-# condition they were evidence of.
-#
-# Every staging name this tool writes starts with a uuid4 hex prefix, and that
-# is what makes a sweep safe: a staging directory is frequently a shared scratch
-# folder, so nothing that did not come from here may be touched. The scan is
-# non-recursive for the same reason.
 _STAGING_PREFIX_RE = _common._STAGING_PREFIX_RE
 # A file still being written belongs to a run in flight, possibly a CONCURRENT
 # one sharing this directory. Only sweep what has been sitting still a while.
@@ -755,15 +743,7 @@ def _metadata_boxes_flag():
 _CJXL_STRIP_EXIF = ["-x", "strip=exif"]
 
 _MIN_EFFECTIVE_DISTANCE = _common._MIN_EFFECTIVE_DISTANCE
-# cjxl >= 0.12 clamps every lossy distance below this to the same value:
-# --distance 0.005 ... 0.05 were measured producing BYTE-IDENTICAL output
-# (VarDCT and lossy modular alike). libjxl PR #4238 set the floor so the DC
-# coefficients stay inside int16 — below it the bitstream leaves Level 5 of
-# the JPEG XL spec.
 _MIN_EFFECTIVE_DISTANCE_PRE_012 = _common._MIN_EFFECTIVE_DISTANCE_PRE_012
-# cjxl 0.11.2 (measured, 2026-09-24): only 0.005 and 0.01 were identical;
-# 0.02/0.03/0.04 were real steps above 0.05 (d=0.01: +8.7 dB PSNR at 1.75x
-# the size of d=0.05). Older builds share the pre-#4238 code.
 
 
 _min_effective_distance = _common._min_effective_distance
@@ -849,14 +829,6 @@ _DEVNULL = subprocess.DEVNULL
 _CompletedProcess = subprocess.CompletedProcess
 
 
-# cjxl and djxl fail on a path of 260 characters or more ("Could not write
-# jxl file", "couldn't load") even with Windows long paths enabled; given the
-# extended-length prefix \\?\ they read and write it, Japanese included
-# (measured with libjxl 0.12 on a 320-character path, 2026-10-22). A temp
-# written beside the output adds ~50 characters to the source path, and 1459
-# files of the owner's library reach the limit that way. exiftool handles long
-# paths itself, and ImageMagick only ever sees short temp paths (and would
-# read the '?' of the prefix as a wildcard), so only the two codecs get it.
 _LONG_PATH_THRESHOLD = _common._LONG_PATH_THRESHOLD
 
 
@@ -900,14 +872,6 @@ _GAIN_MAP_XMP_REMOVAL = ["-XMP-hdrgm:all=", "-XMP-GContainer:all="]
 # The XMP that announces an HDR gain map (Android's Ultra HDR): removed from
 # every output of the convert path, which never holds the gain map itself.
 ORIGIN_PREFIX = _common.ORIGIN_PREFIX
-# dc:Relation token naming what the FIRST master of this photo was made from:
-# tiff8 / tiff16 (encoder), jpeg / png8 / png16 / png (transcoder, pixel
-# re-encode), jpeg (recompressor re-encoding a jbrd JXL), jxl-lossy /
-# jxl-lossless (recompressor, a JXL no toolkit script wrote, as jxlinfo reads
-# its header; plain `jxl` when jxlinfo could not tell, and in files written by
-# v2.10.0). Written once by the script that first touches a clean input, then
-# carried forward unchanged — absent means unknown, never guessed. The only
-# reader is the recompressor's --on-regeneration guard (_hidden_generations).
 ORIENTATION_PREFIX = "jxlphoto-orientation:"
 # dc:Relation token: the EXIF Orientation (2-8) of the JPEG this photo came
 # from, written by the recompressor when its re-encode turns the pixels
@@ -922,12 +886,6 @@ _ORIGIN_RECORD_RE = re.compile(r"(?:^|\|)\s*cjxl d=", re.MULTILINE)
 # --- Provenance: which source made this output -----------------------------
 # The code of this section has ONE copy, in jxl_photo_common.py (AGENTS.md,
 # "The common module"); the names below bind it here. Fix it there.
-#
-# The modes that COLLAPSE folder structure (2/4/5/6/7) drop the source's folder
-# from the output path, so two sources in different folders resolve to the same
-# output. _abort_on_duplicate_outputs catches that inside one run; only a
-# recorded marker catches it ACROSS runs — and with --delete-source the second
-# run would otherwise overwrite the first archive and delete both originals.
 _COLLAPSING_MODES = _common._COLLAPSING_MODES
 
 
@@ -1352,7 +1310,6 @@ DERIVED_XMP_PREFIX = "jxlphoto-derived:"
 # (the reduced preview it carried). A derivative is never made of one (#555).
 THUMB_FLAG = "jxlphoto-thumb"
 PAGE_PREFIX = _common.PAGE_PREFIX
-# The encoder's PAGE_XMP_PREFIX: which page of its TIFF this JXL holds.
 _CAMERA_THUMB_MAX_SIDE = _common._CAMERA_THUMB_MAX_SIDE
 
 

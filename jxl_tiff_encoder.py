@@ -83,7 +83,6 @@ _G = _common.Script(globals())
 GUARD_DOC_URL = (f"{TOOLKIT_URL}/blob/main/docs/behavior_and_limitations.md"
                  f"#renamed-folders-and-the-overwrite-guard")
 
-# MIME types named in the xmpMM:History entry (_history_args).
 _HISTORY_MIME = _common._HISTORY_MIME
 
 # Module-level logger; setup_logger() replaces it with a configured instance when main() runs.
@@ -257,17 +256,6 @@ def _scan_done(*a, **k): return _common._scan_done(_G, *a, **k)
 # --- Staging leftovers ------------------------------------------------------
 # The code of this section has ONE copy, in jxl_photo_common.py (AGENTS.md,
 # "The common module"); the names below bind it here. Fix it there.
-#
-# A file whose conversion failed is deliberately KEPT in staging for manual
-# recovery ("KEEP in staging" below), and nothing ever swept it. Over weeks of
-# scheduled runs that is a slow leak on precisely the small scratch SSD the
-# disk-full abort exists to protect -- the leftovers eventually cause the
-# condition they were evidence of.
-#
-# Every staging name this tool writes starts with a uuid4 hex prefix, and that
-# is what makes a sweep safe: a staging directory is frequently a shared scratch
-# folder, so nothing that did not come from here may be touched. The scan is
-# non-recursive for the same reason.
 _STAGING_PREFIX_RE = _common._STAGING_PREFIX_RE
 # A file still being written belongs to a run in flight, possibly a CONCURRENT
 # one sharing this directory. Only sweep what has been sitting still a while.
@@ -347,9 +335,6 @@ def _cjxl_buffering_flag():
         return [f"--buffering={CJXL_BUFFERING}"]
     return []
 
-# Peak private memory of ONE cjxl, in bytes per pixel of the image, measured on
-# libjxl 0.12.0 with 45 MP 16-bit photos (+~10% margin). Plan
-# 261004_Claude_plan_memoria-workers.md has the full table.
 _STREAMING_BYTES_PER_PIXEL = _common._STREAMING_BYTES_PER_PIXEL
 _WHOLE_IMAGE_E7_BYTES_PER_PIXEL = _common._WHOLE_IMAGE_E7_BYTES_PER_PIXEL
 _WHOLE_IMAGE_E8_BYTES_PER_PIXEL = _common._WHOLE_IMAGE_E8_BYTES_PER_PIXEL
@@ -967,14 +952,6 @@ THUMB_XMP_FLAG = "jxlphoto-thumb"
 SRC_PREFIX = "jxlphoto-src:"
 SRCSUM_PREFIX = "jxlphoto-srcsum:"
 ORIGIN_PREFIX = _common.ORIGIN_PREFIX
-# dc:Relation token naming what the FIRST master of this photo was made from:
-# tiff8 / tiff16 (encoder), jpeg / png8 / png16 / png (transcoder, pixel
-# re-encode), jpeg (recompressor re-encoding a jbrd JXL), jxl-lossy /
-# jxl-lossless (recompressor, a JXL no toolkit script wrote, as jxlinfo reads
-# its header; plain `jxl` when jxlinfo could not tell, and in files written by
-# v2.10.0). Written once by the script that first touches a clean input, then
-# carried forward unchanged — absent means unknown, never guessed. The only
-# reader is the recompressor's --on-regeneration guard (_hidden_generations).
 _TOOLKIT_MARKER_NAMESPACE = _common._TOOLKIT_MARKER_NAMESPACE
 # An encode record anywhere in Description/Software: the input came from this
 # toolkit (an older version, before the origin marker existed).
@@ -1730,14 +1707,6 @@ _DEVNULL = subprocess.DEVNULL
 _CompletedProcess = subprocess.CompletedProcess
 
 
-# cjxl and djxl fail on a path of 260 characters or more ("Could not write
-# jxl file", "couldn't load") even with Windows long paths enabled; given the
-# extended-length prefix \\?\ they read and write it, Japanese included
-# (measured with libjxl 0.12 on a 320-character path, 2026-10-22). A temp
-# written beside the output adds ~50 characters to the source path, and 1459
-# files of the owner's library reach the limit that way. exiftool handles long
-# paths itself, and ImageMagick only ever sees short temp paths (and would
-# read the '?' of the prefix as a wildcard), so only the two codecs get it.
 _LONG_PATH_THRESHOLD = _common._LONG_PATH_THRESHOLD
 
 
@@ -1987,18 +1956,6 @@ _decoded_in_original_space = _common._decoded_in_original_space
 
 
 # ─── Explorer thumbnail (EXPLORER_THUMBNAIL) ─────────────────────────────
-# A small sRGB JPEG of the image in a box of the JXL container, for jxl-thumb
-# (0.2.0+), which shows it in Windows Explorer instead of decoding the photo.
-# The box is an ISO BMFF `uuid` box — the format's own way to carry a
-# program's private data: decoders and editors that do not know it skip it
-# (djxl, exiftool and this toolkit's box reorder keep it in place; exiftool's
-# -tagsfromfile does not copy it, so a re-encode never inherits the source's).
-# Not EXIF: a 768 px JPEG does not fit a JPEG's 64 KB EXIF segment, and
-# djxl, which copies a JXL's EXIF into the JPEG it writes, then fails.
-# Payload: the UUID, then b"jxlphoto-thumbnail:v1:<codestream bytes>:<FNV-1a
-# 64 of its first 64 KiB>\n", then the JPEG. jxl-thumb shows it only while
-# that fingerprint still names the file's codestream: a program that
-# re-encodes the pixels and keeps the box would leave a stale one, ignored.
 # One copy, in jxl_photo_common.py.
 THUMB_BOX_UUID = _common.THUMB_BOX_UUID
 THUMB_BOX_MARKER = _common.THUMB_BOX_MARKER
@@ -2516,17 +2473,8 @@ def extract_xmp_original(tiff_path, tmp_dir):
 # " | "-separated chain (the LAST one is the current file's).
 _ENCODE_TAG_RE = _common._ENCODE_TAG_RE
 
-# The stored generation token, read ONLY as a complete " | "-delimited segment
-# (or bounded by the field's start/end): "Project gen=3 phase 2" is running
-# text, not a token, and must never be read as one.
 _GEN_TAG_RE = _common._GEN_TAG_RE
 
-# The whole machine block as ONE unit: an optional gen= lead segment followed
-# by the contiguous cjxl d=/e= chain. The block only starts at a segment
-# boundary ((?:^|\|)), so it never bites into a caption's running text; and
-# matching only the first cjxl entry would leave an orphaned gen= and a
-# partial chain behind. Legacy fields (a chain with no gen=) are the normal
-# case and match in full.
 _MACHINE_BLOCK_RE = _common._MACHINE_BLOCK_RE
 
 # Divergence between a stored gen= and the chain length is logged once per
@@ -2534,9 +2482,6 @@ _MACHINE_BLOCK_RE = _common._MACHINE_BLOCK_RE
 _gen_divergence_logged = False
 
 
-# The History entry a deliberate "--encode-tag off" writes: a reader that meets
-# it before any record stops there (the lineage was discarded on purpose, an
-# older entry's record must not come back).
 _NO_RECORD_SEGMENT = _common._NO_RECORD_SEGMENT
 
 
@@ -3490,17 +3435,10 @@ _SAMPLE_COUNT = 3
 # visible tax on a job that only takes a couple of minutes.
 _PREFLIGHT_MIN_BYTES = 5 * 1024 ** 3
 # Projecting the preflight from a distance below the installed cjxl's floor
-# would model a file that cjxl will never write — see the constants below.
+# would model a file that cjxl will never write — see _MIN_EFFECTIVE_DISTANCE
+# in jxl_photo_common.py.
 _MIN_EFFECTIVE_DISTANCE = _common._MIN_EFFECTIVE_DISTANCE
-# cjxl >= 0.12 clamps every lossy distance below this to the same value:
-# --distance 0.005 ... 0.05 were measured producing BYTE-IDENTICAL output
-# (VarDCT and lossy modular alike). libjxl PR #4238 set the floor so the DC
-# coefficients stay inside int16 — below it the bitstream leaves Level 5 of
-# the JPEG XL spec.
 _MIN_EFFECTIVE_DISTANCE_PRE_012 = _common._MIN_EFFECTIVE_DISTANCE_PRE_012
-# cjxl 0.11.2 (measured, 2026-09-24): only 0.005 and 0.01 were identical;
-# 0.02/0.03/0.04 were real steps above 0.05 (d=0.01: +8.7 dB PSNR at 1.75x
-# the size of d=0.05). Older builds share the pre-#4238 code.
 
 
 _min_effective_distance = _common._min_effective_distance
@@ -3743,12 +3681,6 @@ _VERIFY_CHUNK_ROWS = 512
 # --- Provenance: which source made this output -----------------------------
 # The code of this section has ONE copy, in jxl_photo_common.py (AGENTS.md,
 # "The common module"); the names below bind it here. Fix it there.
-#
-# The modes that COLLAPSE folder structure (2/4/5/6/7) drop the source's folder
-# from the output path, so two sources in different folders resolve to the same
-# output. _abort_on_duplicate_outputs catches that inside one run; only a
-# recorded marker catches it ACROSS runs — and with --delete-source the second
-# run would otherwise overwrite the first archive and delete both originals.
 _COLLAPSING_MODES = _common._COLLAPSING_MODES
 
 
