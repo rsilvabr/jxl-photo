@@ -24,13 +24,10 @@ REPO = Path(__file__).resolve().parent.parent
 FILES = ("jxl_tiff_encoder.py", "jxl_tiff_decoder.py", "jxl_jpeg_transcoder.py",
          "jxl_recompressor.py", "jxl_photo.py", "jxl_photo_common.py")
 
-# (file, start of the message): why it stays
+# (file, start of the message): why it stays. Empty since the collision scan
+# asks the children where outputs go (refactor C1): its own `resolver` and
+# `_skip_check`, defined on some branches only, are gone.
 ALLOWED = {
-    ("jxl_photo.py", "redefinition of unused 'resolver'"):
-        "the collision scan's resolver is None until a child module is imported; "
-        "the nested def replaces that default only on that branch",
-    ("jxl_photo.py", "redefinition of unused '_skip_check'"):
-        "same shape: None unless the child is the encoder",
 }
 
 

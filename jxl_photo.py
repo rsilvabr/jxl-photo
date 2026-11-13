@@ -2912,6 +2912,46 @@ class Opt:
     conflicts: tuple = ()       # ids that must be off with this one
 
 
+def _is_decode_lossy(origin: str, dest: str, conv_type: Optional[str]) -> bool:
+    """The transcoder's decode conversions that shape pixels (resize,
+    sharpening, rename apply); the lossless recovery cannot."""
+    return (origin == 'jxl' and dest in ('jpeg', 'png')
+            and conv_type in _DECODE_LOSSY_CONVERSIONS)
+
+
+def _rename_reaches_child(direction: str, decode_lossy: bool, manifest: bool) -> bool:
+    """Does build_child_cmd pass --rename-from/--rename-to? The recompressor
+    plans the rename up front; the transcoder applies it on its lossy decode
+    only (the bit-exact recovery keeps the original name), and only the
+    manifest route passes it there. Every other child never gets it."""
+    return direction == "jxl2jxl" or (manifest and decode_lossy)
+
+
+# The transcoder's flags per conversion type: build_child_cmd
+# (_policy_conversion) and the plan the wrapper asks the transcoder about
+# (_child_plan_args) read this one table. --from-jpeg keeps a lossy
+# JPEG -> JXL run off the PNGs in the folder (in mode 8 it would delete them);
+# --from-jxl keeps the auto JXL -> JPEG run from transcoding the folder's JPEGs
+# INTO JXL; the PNG output never transcodes even when a jbrd box is present.
+_TRANSCODER_CONVERSION_FLAGS = {
+    'transcode_lossless': ('--force-transcode',),
+    'convert_lossy': ('--force-convert', '--from-jpeg'),
+    'jxl_to_jpeg_auto': ('--from-jxl',),
+    'jxl_to_jpeg_lossless': ('--force-transcode', '--decode'),
+    'jxl_to_jpeg_force': ('--force-convert', '--decode'),
+    'jxl_to_png': ('--force-convert', '--decode'),
+}
+
+
+def _transcoder_format_flags(dest: str) -> List[str]:
+    """The transcoder's output format, from the destination."""
+    if dest == 'png':
+        return ['--format', 'png']
+    if dest in ('jpeg', 'jpg'):
+        return ['--format', 'jpeg']
+    return []
+
+
 class _CmdCtx:
     """What build_child_cmd's rules look at, computed once per command."""
 
@@ -2930,10 +2970,7 @@ class _CmdCtx:
         self.config_marker = config_marker
         self.conv_type = workflow.get('conversion_type', '')
         self.derivative = _has_derivative_options(self.advanced)
-        # The transcoder's decode conversions that shape pixels (resize,
-        # sharpening, rename apply); the lossless recovery cannot.
-        self.decode_lossy = (origin == 'jxl' and dest in ('jpeg', 'png')
-                             and self.conv_type in _DECODE_LOSSY_CONVERSIONS)
+        self.decode_lossy = _is_decode_lossy(origin, dest, self.conv_type)
 
     def get(self, legacy_key: str):
         where, _, key = legacy_key.partition('.')
@@ -3395,6 +3432,45 @@ def _dest_is_source_file(source, dest_path, mode) -> bool:
     except (OSError, ValueError):
         return False
     return False
+
+
+def _child_plan_args(child, origin: str, dest: str, source, dest_path, mode: int,
+                     conversion_type: Optional[str] = None, rename_from: str = '',
+                     rename_to: str = '', manifest: bool = True):
+    """The child's own parse of the command line one run gives it — the part
+    that decides which files it takes and where each output goes, by
+    build_child_cmd's rules: the input, the output positional
+    (_dest_is_source_file), --mode, the transcoder's conversion and format
+    flags, and the rename where it reaches the child (_rename_reaches_child).
+    Every other flag keeps the child's default. The marker, subfolder, export
+    folder and exclusions are the child's module globals, which
+    _with_child_marker sets. What the wrapper hands the child's
+    _planned_sources/_planned_output (refactor C1). None when the child's
+    parser refuses that command line: such a run writes nothing."""
+    tokens = [str(source)]
+    if dest_path and not _dest_is_source_file(source, dest_path, mode):
+        tokens.append(str(dest_path))
+    tokens += ['--mode', str(mode)]
+    direction = _direction(origin, dest)
+    if direction in _TRANSCODER_DIRECTIONS:
+        tokens += list(_TRANSCODER_CONVERSION_FLAGS.get(conversion_type or '', ()))
+        tokens += _transcoder_format_flags(dest)
+    if rename_from and _rename_reaches_child(
+            direction, _is_decode_lossy(origin, dest, conversion_type or ''), manifest):
+        tokens += ['--rename-from', rename_from, '--rename-to', rename_to or '']
+    try:
+        with redirect_stderr(io.StringIO()):
+            return child.build_parser().parse_args(tokens)
+    except SystemExit:
+        return None
+
+
+def _is_origin_file(f: Path, exts) -> bool:
+    """A file of the run's origin format (unreadable = no)."""
+    try:
+        return f.is_file() and f.suffix.lower() in exts
+    except OSError:
+        return False
 
 # === END OF OPTION REGISTRY ==================================================
 
@@ -7092,18 +7168,22 @@ class InteractiveMenu:
         try:
             root = Path(workflow['input_dir'])
             exts = FolderAnalyzer(root, origin, dest)._get_extensions(origin)
-            if root.is_file():
-                return 1 if root.suffix.lower() in exts else 0
-
-            # The child answers which files a run takes (_planned_sources, its
-            # own _find_sources): no copy of its "which finder in which mode"
-            # rules here (refactor C1).
-            child = None
-            if (origin, dest) in (('tiff', 'jxl'), ('jxl', 'tiff'), ('jxl', 'jxl')):
-                try:
-                    child = importlib.import_module(_child_module(origin, dest))
-                except ImportError:
-                    child = None
+            # The child answers which files a run takes (_planned_sources: its
+            # own finders, skips and modes 6/7 filter, a single file included):
+            # no copy of its rules here (refactor C1).
+            try:
+                child = importlib.import_module(_child_module(origin, dest))
+            except ImportError:
+                child = None
+            if root.is_file() and root.suffix.lower() not in exts:
+                return 0       # not a file of the origin format: none to count
+            if child is None:
+                # No child to ask: the files of the origin format, flat or
+                # recursive like the modes.
+                if root.is_file():
+                    return 1
+                it = root.rglob('*') if mode in _RECURSIVE_MANIFEST_MODES else root.glob('*')
+                return len([f for f in it if f.suffix.lower() in exts and f.is_file()])
 
             _mc = workflow.get('mode_config', {}) or {}
             marker = _mc.get('export_marker') or self.config.config.export_marker
@@ -7119,60 +7199,36 @@ class InteractiveMenu:
             # child's own finders read it as a module global.
             jxl_folder = _mc.get('export_jxl_folder')
 
-            if child is not None:
-                _was_disabled = child.logger.disabled
-                child.logger.disabled = True        # its finders log; this is a preview
-                try:
-                    # The exclusion too — the child's finders filter through
-                    # their own EXCLUDE_FOLDERS global, which _with_child_marker
-                    # now mirrors. Without it the delete panel would count a
-                    # set the run would skip (bug #297's class again).
-                    with _with_child_marker(child, marker, subfolder, jxl_folder,
-                                            exclude_folders=workflow.get('exclude_folders')):
-                        args = argparse.Namespace(input=root, output=None, mode=mode)
-                        # read_markers=False: the review redraws this count on
-                        # every turn, and the recompressor's modes 6/7 would read
-                        # the derivative markers of every JXL with exiftool each
-                        # time, silently (#652, review V1). The count stays the one
-                        # v2.29.1 showed: derivatives included.
-                        return len(child._planned_sources(args, read_markers=False))
-                except SystemExit:
-                    return -1      # the child refuses this input: no count to promise
-                finally:
-                    child.logger.disabled = _was_disabled
-
-            # Transcoder directions: no single finder covers them (JPEG, PNG and
-            # JXL are scanned separately), so count by extension with the same
-            # flat/recursive split the children use.
-            it = root.rglob('*') if mode in _RECURSIVE_MANIFEST_MODES else root.glob('*')
-            files = [f for f in it if f.suffix.lower() in exts and f.is_file()]
-
-            # ...and then through the child's OWN output resolver, because the
-            # extension count alone was wrong in exactly the modes this user
-            # runs most. The transcoder has no mode-6/7 finder: it scans
-            # everything and drops files outside the export marker by returning
-            # None from the resolver. Counting them anyway announced "23 file(s)"
-            # for a run that touches 3 — the same over-count fixed for the
-            # encoder and decoder in #269, still live here. The resolver returns
-            # a path for every other mode, so this filter costs nothing there.
+            _was_disabled = child.logger.disabled
+            child.logger.disabled = True        # its finders log; this is a preview
             try:
-                import jxl_jpeg_transcoder as _tr
-            except ImportError:
-                return len(files)
-            _was_disabled = _tr.logger.disabled
-            _tr.logger.disabled = True      # the resolver warns; this is a preview
-            try:
-                # Same marker AND subfolder the encoder/decoder branch uses: the
-                # transcoder filters modes 6/7 inside its resolver rather than in
-                # a finder, but it reads the same globals.
-                with _with_child_marker(_tr, marker, subfolder, jxl_folder,
+                # The exclusion too — the child's finders filter through
+                # their own EXCLUDE_FOLDERS global, which _with_child_marker
+                # now mirrors. Without it the delete panel would count a
+                # set the run would skip (bug #297's class again).
+                with _with_child_marker(child, marker, subfolder, jxl_folder,
                                         exclude_folders=workflow.get('exclude_folders')):
-                    _decode = (origin == 'jxl')
-                    return sum(1 for f in files
-                               if _tr.resolve_output_transcode(f, mode, root, _decode)
-                               is not None)
+                    # The run's command line as the child parses it (the
+                    # transcoder's conversion and format flags decide its
+                    # command); no output positional, as always here.
+                    args = _child_plan_args(child, origin, dest, root, None, mode,
+                                            conversion_type=workflow.get('conversion_type'),
+                                            manifest=False)
+                    if args is None:
+                        return -1  # the child refuses this command line
+                    # read_markers=False: the review redraws this count on
+                    # every turn, and the recompressor's modes 6/7 would read
+                    # the derivative markers of every JXL with exiftool each
+                    # time, silently (#652, review V1). The count stays the one
+                    # v2.29.1 showed: derivatives included. Files of the
+                    # origin format, like the panel says (an auto transcoder
+                    # run with no conversion type takes the other two too).
+                    return sum(1 for f in child._planned_sources(args, read_markers=False)
+                               if f.suffix.lower() in exts)
+            except SystemExit:
+                return -1      # the child refuses this input: no count to promise
             finally:
-                _tr.logger.disabled = _was_disabled
+                child.logger.disabled = _was_disabled
         except (OSError, KeyError, AttributeError):
             return -1   # unreadable: the preview says so instead of claiming 0
 
@@ -8837,9 +8893,14 @@ class InteractiveMenu:
         A direct run aborts on this; a manifest run silently converts one and
         skips (or overwrites) the other while reporting 0 errors.
 
-        Outputs are resolved with the CHILD SCRIPT'S OWN resolver (imported
-        lazily, only when origin/dest are known). Two blind spots of the old
-        flat-Destination scan motivated this:
+        The CHILD SCRIPT answers, per row (imported lazily, only when
+        origin/dest are known): which files the row's run takes
+        (_planned_sources) and where each output goes (_planned_output), given
+        the command line that row's run gets (_child_plan_args) — the output
+        positional, the mode, the rename where it reaches the child, the
+        transcoder's conversion flags. Nothing of its rules is copied here
+        (refactor C1). Two blind spots of the old flat-Destination scan
+        motivated asking the child at all:
 
           * Mode 2 is recursive-FLAT: every file under the source lands in the
             Destination, but the old scan only looked at direct children, so
@@ -8850,10 +8911,15 @@ class InteractiveMenu:
             separately and detected nothing (the hand-written mode-5 manifest
             this guard was built for).
 
-        Using the real resolver also honors user-edited folder constants and
-        returns None for files the child would skip (e.g. outside the export
-        marker in modes 6/7), keeping the guard free of collisions the child
-        would never produce.
+        Asking the child also honors user-edited folder constants and leaves
+        out the files the child would skip (e.g. outside the export marker in
+        modes 6/7), keeping the guard free of collisions the child would
+        never produce. What stays here is the wrapper's own question: two
+        rows on one output, a row's output that is another row's Source
+        (cross_sink), the derivatives re-checked only where files collide,
+        and the pages of a split TIFF (probed only for page-shaped names).
+        The decoder names a TIFF after its page GROUP, read from markers; the
+        scan asks it about each JXL, the approximation it has always made.
 
         `cross_sink` (optional): when a dict is passed, it is filled with each
         entry index -> the set of output folders that entry resolved to. The
@@ -8877,24 +8943,23 @@ class InteractiveMenu:
 
         `row_excludes` (optional): one raw exclude_folders value (';' string
         or None) per entry, aligned with manifest_entries — the manifest's
-        ExcludeFolders column, ALREADY effective per row. The children's
-        finders never run here (this walk goes through its own rglob +
-        resolver), so the exclusion must be applied in the walk's resolver
-        branch or a flat-output row would abort on PHANTOM collisions: the
-        excluded file would never be processed at all. When None, no entry
-        has an exclusion (the only real caller always passes the list).
-        The filter is only applied for the tiff<->jxl directions — the only
-        ones whose child ever RECEIVES --exclude-folders (the cmd builder's
-        emission gate). Filtering anywhere else would shrink the walk below
-        what the child processes and hide REAL collisions.
+        ExcludeFolders column, ALREADY effective per row. It reaches the
+        child's finders through _with_child_marker (its EXCLUDE_FOLDERS
+        global), and the legacy flat scan applies it itself, or a
+        flat-output row would abort on PHANTOM collisions: the excluded file
+        would never be processed at all. When None, no entry has an exclusion
+        (the only real caller always passes the list). Only for the
+        tiff<->jxl directions — the only ones whose child ever RECEIVES
+        --exclude-folders (the cmd builder's emission gate). Filtering
+        anywhere else would shrink the walk below what the child processes
+        and hide REAL collisions.
 
-        `conversion_type` (optional): the workflow's conversion type. The
+        `conversion_type` (optional): the workflow's conversion type, which
+        decides the transcoder's command (_TRANSCODER_CONVERSION_FLAGS). The
         transcoder recovers jbrd files with their ORIGINAL name — it ignores
-        --rename-from on that path (and on jxl_to_jpeg_lossless entirely) —
-        so the scan must not model the rename for those files, in either
-        direction: applying it misses real collisions (two rows, renames
-        x->a and x->b, child writes x.jpg twice) and inventing it refuses
-        legitimate runs. Files are probed once, with has_jbrd_box cached.
+        --rename-from on that path (and on jxl_to_jpeg_lossless entirely);
+        its _planned_output reads a JXL's jbrd box only when the two routes
+        would name the output differently.
 
         `page_options` (optional): the run's advanced options, read for
         'multipage_mode'/'thumbnail_mode'/'thumbnail_suffix' (the encoder's
@@ -8908,244 +8973,23 @@ class InteractiveMenu:
         Returns a list of (file_a, file_b, dest_folder) tuples.
         """
 
-        resolver = None
-        _skip_check = None
         _child = None
-        if origin and dest:
+        if origin and dest and (origin in ('jpeg', 'jxl') or (origin, dest) == ('tiff', 'jxl')):
             try:
-                if origin == 'tiff' and dest == 'jxl':
-                    import jxl_tiff_encoder as _child
-                    out_ext, conv_folder = '.jxl', _child.CONVERTED_JXL_FOLDER
-                elif origin == 'jxl' and dest == 'tiff':
-                    import jxl_tiff_decoder as _child
-                    out_ext, conv_folder = '.tif', _child.CONVERTED_TIFF_FOLDER
-                elif origin == 'jxl' and dest == 'jxl':
-                    import jxl_recompressor as _child
-                    out_ext, conv_folder = '.jxl', _child.CONVERTED_JXL_FOLDER
-                elif origin in ('jpeg', 'jxl'):
-                    import jxl_jpeg_transcoder as _child
-                    out_ext = '.jpg' if origin == 'jxl' else '.jxl'
-                    conv_folder = (_child.RECOVERED_JPEG_FOLDER if origin == 'jxl'
-                                   else _child.CONVERTED_JXL_FOLDER)
+                _child = importlib.import_module(_child_module(origin, dest))
             except ImportError:
                 _child = None
-            if _child is not None:
-                def _apply_rename_name(name: str, rf: str, rt: str) -> str:
-                    """Literal first-occurrence, case-sensitive stem
-                    replacement — the semantics the recompressor's
-                    _apply_rename and the transcoder's resolve_output_convert
-                    share (a token that differs only by case does NOT rename)."""
-                    if rf:
-                        stem, ext = os.path.splitext(name)
-                        if rf in stem:
-                            return stem.replace(rf, rt, 1) + ext
-                    return name
-
-                def _rename_out(p: Optional[Path], rf: str, rt: str) -> Optional[Path]:
-                    """--rename-from changes the output NAME at planning time
-                    (all modes, 0/1/2 included): mirror it, so a collision the
-                    rename creates is caught here too (folders are unchanged).
-                    The transcoder applies the rename on its decode/convert
-                    paths only, but the manifest option columns are only ever
-                    offered for the directions that honour them."""
-                    if p is not None and rf:
-                        return p.with_name(_apply_rename_name(p.name, rf, rt))
-                    return p
-
-                # Per-file jbrd probe, cached: the scan calls it twice per
-                # file (resolver + stem key), and only when a rename is in
-                # play at all.
-                _jbrd_cache: Dict[str, bool] = {}
-
-                def _jbrd_keeps_name(f: Path) -> bool:
-                    """True when THIS file's output keeps the original stem
-                    even with --rename-from in play: the transcoder recovers
-                    jbrd files byte-for-byte under the ORIGINAL JPEG name (the
-                    child logs "rename ignored"), and jxl_to_jpeg_lossless
-                    never renames at all. Modelling the rename there
-                    desynchronizes the guard from the run both ways (a missed
-                    real collision AND a refused legitimate one)."""
-                    if (_child.__name__ != 'jxl_jpeg_transcoder'
-                            or origin != 'jxl' or dest not in ('jpeg', 'jpg')):
-                        return False
-                    if conversion_type == 'jxl_to_jpeg_lossless':
-                        return True
-                    if conversion_type != 'jxl_to_jpeg_auto':
-                        return False
-                    key = os.path.normcase(str(f))
-                    hit = _jbrd_cache.get(key)
-                    if hit is None:
-                        try:
-                            hit = bool(_child.has_jbrd_box(f))
-                        except OSError:
-                            hit = False
-                        _jbrd_cache[key] = hit
-                    return hit
-
-                def resolver(f: Path, mode: int, src_root: Path, dest_cell: str,
-                             rf: str, rt: str) -> Optional[Path]:
-                    # Mode 0 HONORS the Destination column: the cmd builder
-                    # always passes it as the child's output positional, and
-                    # every child resolves `output_root = args.output or
-                    # args.input`. Resolving mode 0 in-place made the scan that
-                    # #234 deliberately re-opened for it find nothing at all —
-                    # two entries sharing one Destination collapsed onto a
-                    # single output in silence. Mode 0 is FLAT, so f.parent ==
-                    # src_root and a Destination equal to the Source resolves
-                    # identically: one branch covers both.
-                    # The rename THIS file actually gets: empty when the child
-                    # will ignore it (jbrd recovery / the lossless decode).
-                    erf, ert = ((rf, rt) if rf and not _jbrd_keeps_name(f)
-                                else ('', ''))
-                    if mode in (0, 2):
-                        return _rename_out(Path(dest_cell) / (f.stem + out_ext), erf, ert)
-                    if mode == 8:
-                        return _rename_out(f.parent / (f.stem + out_ext), erf, ert)
-                    if mode == 1:
-                        return _rename_out(src_root / conv_folder / (f.stem + out_ext), erf, ert)
-                    if _child.__name__ == 'jxl_jpeg_transcoder':
-                        # The transcoder has TWO resolvers and this used
-                        # resolve_output_transcode for every direction — the
-                        # lossless JPEG<->JXL one. The lossy convert paths
-                        # (PNG, and JXL->JPEG without jbrd) land in different
-                        # folders, so the guard was comparing paths the run
-                        # would never write.
-                        #
-                        # It has not produced a wrong VERDICT, because both
-                        # entries were resolved by the same wrong function and
-                        # the difference is a constant folder name — a
-                        # collision under one mapping is a collision under the
-                        # other. Fixing it anyway: the next person to add a
-                        # per-direction rule to either resolver would inherit a
-                        # guard that silently disagrees with the run.
-                        _dec = origin == 'jxl'
-                        if dest in ('png', 'jpeg', 'jpg') and _dec:
-                            return _child.resolve_output_convert(
-                                f, mode, _child.CONVERT_OUTPUT_FOLDER, "",
-                                (dest if dest != 'jpg' else 'jpeg'),
-                                rename_from=erf, rename_to=ert,
-                                output_root=src_root, decode=True)
-                        return _child.resolve_output_transcode(f, mode, src_root, _dec)
-                    return _rename_out(_child.resolve_output(f, mode, src_root), erf, ert)
-
-                def _stem_key(f: Path, rf: str, rt: str) -> str:
-                    """The output stem this source will land under — renamed when
-                    the row's --rename-from applies, exactly like the child
-                    plans it (a jbrd recovery keeps the ORIGINAL name)."""
-                    if rf and not _jbrd_keeps_name(f):
-                        name = _apply_rename_name(f.name, rf, rt)
-                        return os.path.normcase(os.path.splitext(name)[0])
-                    return os.path.normcase(f.stem)
-
-                # Which files would the child itself skip on its scan? Mirror
-                # EXACTLY that — a wrong skip set works both ways: it reports
-                # collisions the child would never produce (false positive ->
-                # legit manifest refused) and misses files the child WOULD
-                # process (false negative -> the blind spot is back):
-                #
-                #   * encoder (tiff->jxl): skips decoder-output folders below
-                #     the export marker, and ONLY in modes 6/7 — its other
-                #     finders (flat/recursive) are unfiltered;
-                #   * transcoder ENCODE (jpeg->jxl): skips its own output
-                #     folders via _is_tool_output_path, and only on recursive
-                #     scans (modes 2-8) — the flat finders are unfiltered;
-                #   * decoder (jxl->tiff): in modes 6/7 only, the OTHER
-                #     tools' JXL output folders below the export marker
-                #     (_skip_other_tool_output, X-B) — every other finder is
-                #     unfiltered (round-trip sources must be found);
-                #   * transcoder DECODE (jxl->jpeg): deliberately UNFILTERED
-                #     (it is how a JPEG archive comes back) — no skip at all.
-                def _other_tool_skip(f: Path, root: Path, mode: int) -> bool:
-                    """The decoder's/recompressor's mode 6/7 filter (X-B),
-                    mirrored: a folder below the marker that is another
-                    tool's JXL output folder."""
-                    if mode not in (6, 7) or not hasattr(_child, '_skip_other_tool_output'):
-                        return False
-                    parts = list(f.parts[:-1])
-                    marker_lower = _child.EXPORT_MARKER.lower()
-                    idx = _child._marker_anchor_index(parts, root, marker_lower)
-                    if idx is None:
-                        return False
-                    below = [p.lower() for p in parts[idx + 1:]]
-                    # Mode 6's finder passes honor_requested_subfolder=False.
-                    return _child._skip_other_tool_output(
-                        below, honor_requested_subfolder=(mode != 6))
-
-                if _child.__name__ == 'jxl_tiff_encoder':
-                    def _skip_check(f: Path, root: Path, mode: int) -> bool:
-                        if mode not in (6, 7):
-                            return False
-                        parts = list(f.parts[:-1])
-                        marker_lower = _child.EXPORT_MARKER.lower()
-                        # The children's anchor rule (E-H): the first marker
-                        # at or below the row's root, else the closest above.
-                        idx = _child._marker_anchor_index(parts, root, marker_lower)
-                        if idx is None:
-                            return False
-                        below = [p.lower() for p in parts[idx + 1:]]
-                        # Mode 6's real finder calls this with
-                        # honor_requested_subfolder=False (jxl_tiff_encoder.py);
-                        # mirroring the default True here could only ever
-                        # produce a false-positive collision — keep them equal.
-                        return _child._skip_decoder_output(
-                            below, honor_requested_subfolder=(mode != 6))
-                elif _child.__name__ == 'jxl_jpeg_transcoder' and origin == 'jpeg':
-                    def _skip_check(f: Path, root: Path, mode: int) -> bool:
-                        if mode < 2:
-                            return False
-                        return _child._is_tool_output_path(f, root)
-                elif _child.__name__ == 'jxl_recompressor':
-                    def _skip_check(f: Path, root: Path, mode: int) -> bool:
-                        # Its recursive finders (modes 2-8) skip this tool's OWN
-                        # output folder names BELOW the input root (pointing a
-                        # run AT such a folder is legitimate); the flat finders
-                        # are unfiltered. Mode 4's FALLBACK output folder
-                        # ("<name>_JXL_small", created when the JXL token is
-                        # missing from the folder name) is its output too:
-                        # recognized as a _jxl_small SUFFIX, the same semantic
-                        # change _is_own_output_path received in
-                        # jxl_recompressor.py. Checked here as well (not only
-                        # via the child) so the mirror keeps guarding even if
-                        # the child copy it imports ever drifts back — and the
-                        # "only BELOW the root" rule is untouched: `below` is
-                        # still computed relative to the root, exactly like the
-                        # child's own finders compute it.
-                        if mode < 2:
-                            return False
-                        try:
-                            below = [p.lower() for p in f.relative_to(root).parts[:-1]]
-                        except ValueError:
-                            below = [p.lower() for p in f.parts[:-1]]
-                        return (_child._is_own_output_path(below)
-                                or any(p.endswith("_jxl_small") for p in below)
-                                or _other_tool_skip(f, root, mode))
-                elif _child.__name__ == 'jxl_tiff_decoder':
-                    def _skip_check(f: Path, root: Path, mode: int) -> bool:
-                        return _other_tool_skip(f, root, mode)
 
         by_dest: Dict[str, Dict[str, Path]] = {}
         collisions = []
         # (output folder, stem) -> [(file, output folder, derivative-skip
         # applies)] — the children's modes 6/7 leave out the JXLs that carry a
-        # jxlphoto-derived marker (B2); the mirror re-checks only the files
+        # jxlphoto-derived marker (B2); the scan re-checks only the files
         # that collide, after the walk.
         _members: Dict[Tuple[str, str], List[Tuple[Path, Path, bool]]] = {}
         _derived_capable = _child is not None and (
             _child.__name__ in ('jxl_tiff_decoder', 'jxl_recompressor')
             or (_child.__name__ == 'jxl_jpeg_transcoder' and origin == 'jxl'))
-
-        def _record_output(f: Path, out_folder, rf: str, rt: str) -> None:
-            """Collision bookkeeping for one resolved source file."""
-            if out_folder is None:
-                return
-            key = os.path.normcase(str(out_folder))
-            seen = by_dest.setdefault(key, {})
-            stem = _stem_key(f, rf, rt) if _child is not None else os.path.normcase(f.stem)
-            prev = seen.get(stem)
-            if prev is None:
-                seen[stem] = f
-            elif os.path.normcase(str(prev)) != os.path.normcase(str(f)):
-                collisions.append((prev, f, out_folder))
         # The child resolvers WARN on modes 4/5 (outside-tree outputs, missing
         # suffix token). The real run emits those lines itself — duplicated
         # here, one per scanned file, they are pure noise.
@@ -9173,9 +9017,7 @@ class InteractiveMenu:
                                     export_jxl_folder))
                 # This entry's exclusion (ExcludeFolders column, or None for
                 # a legacy manifest), mirrored into the child's
-                # EXCLUDE_FOLDERS global AND applied on the walk below — the
-                # walk never passes through the child's finders, where the
-                # filter otherwise lives.
+                # EXCLUDE_FOLDERS global, where its finders read it.
                 _excl_eff = (row_excludes[ei] if row_excludes is not None
                              else None)
                 # ...but ONLY where the child honors it: the cmd builder emits
@@ -9201,128 +9043,98 @@ class InteractiveMenu:
                                    if cross_sink is not None else None)
                     src_root = Path(source)
                     try:
-                        if src_root.is_file():
-                            # A file Source is a legitimate manifest row, and the
-                            # cross-entry collision guard must see it too: it used
-                            # to be skipped here, silently. Resolve it exactly like
-                            # the folder walk resolves one file (parent as root).
-                            if resolver is None or mode is None:
-                                _file_out = Path(dest_path)
-                            elif _skip_check is not None and _skip_check(src_root, src_root.parent, mode):
-                                _file_out = None
-                            else:
-                                _file_out = resolver(src_root, mode, src_root.parent, dest_path, rf, rt)
-                            if _file_out is not None:
-                                _record_output(src_root, _file_out.parent, rf, rt)
-                                if _entry_outs is not None:
-                                    _entry_outs.add(os.path.normcase(
-                                        os.path.abspath(str(_file_out.parent))))
-                            continue
-                        if not src_root.is_dir():
+                        # A file Source is a legitimate manifest row, and the
+                        # cross-entry collision guard must see it too.
+                        _file_row = src_root.is_file()
+                        if not _file_row and not src_root.is_dir():
                             continue
                     except OSError:
                         continue
-                    # Legacy manifests carry no Mode cell: the child detects the mode
-                    # per folder downstream, so the flat Destination scan is the best
-                    # the wrapper can do there (the old behavior for every entry).
-                    # Modes 6/7 with no explicit subfolder: the child leaves out
-                    # the derivatives (B2). Read inside _with_child_marker, so
-                    # the row's own subfolder is the one seen here.
-                    _sub_now = (getattr(_child, 'EXPORT_JPEG_SUBFOLDER', '')
-                                if _child is not None
-                                and _child.__name__ == 'jxl_jpeg_transcoder'
-                                else getattr(_child, 'EXPORT_JXL_SUBFOLDER', ''))
-                    _derived_skip = bool(_derived_capable and mode is not None and (
-                        mode == 6 or (mode == 7 and not _sub_now)))
-                    if resolver is None or mode is None:
-                        try:
-                            files = sorted(src_root.iterdir())
-                        except OSError:
-                            continue
-                        # Same exclusion filter as the resolver branch (already
-                        # gated to the tiff<->jxl directions above): a legacy
-                        # TIFF manifest still gets --exclude-folders from the
-                        # cmd builder, so the child skips those files while
-                        # this flat scan counted them — a phantom abort.
-                        if _excl_names:
-                            files = [f for f in files
-                                     if not _path_excluded_below_root(
-                                         f, src_root, _excl_names)]
-                        outputs = ((f, Path(dest_path)) for f in files)
+                    if _child is None or mode is None:
+                        # Legacy manifests carry no Mode cell (only a direct
+                        # call sees one: the manifest step resolves every row's
+                        # mode first), and a direction with no child: the flat
+                        # Destination scan by source name is the best the
+                        # wrapper can do there (the old behavior for every
+                        # entry).
+                        if _file_row:
+                            outputs = [(src_root, Path(dest_path).parent, None)]
+                        else:
+                            try:
+                                files = sorted(src_root.iterdir())
+                            except OSError:
+                                continue
+                            # Same exclusion as the children's finders (already
+                            # gated to the tiff<->jxl directions above): a
+                            # legacy TIFF manifest still gets --exclude-folders
+                            # from the cmd builder, so the child skips those
+                            # files while this flat scan counted them — a
+                            # phantom abort.
+                            if _excl_names:
+                                files = [f for f in files
+                                         if not _path_excluded_below_root(
+                                             f, src_root, _excl_names)]
+                            outputs = [(f, Path(dest_path), False) for f in files
+                                       if _is_origin_file(f, origin_exts)]
+                        outputs = [(f, o, os.path.normcase(f.stem), el)
+                                   for f, o, el in outputs]
                     else:
-                        # This walk is the slow part on large trees (recursive glob
-                        # + per-file stat + resolver per source file) — say so.
-                        self.ui.markup(f"[grey70]Collision check: scanning {_rich_safe(src_root)} ...[/grey70]", f"Collision check: scanning {src_root} ...")
-                        # The encoder, the decoder and the recompressor answer
-                        # WHICH files this row's run takes (_planned_sources:
-                        # their own finders, exclusion and skips — refactor
-                        # C1), so none of those rules is copied here; the
-                        # recompressor's derivatives are checked below only
-                        # where files collide. The transcoder has no such
-                        # answer yet: its rows keep the walk and the mirror.
-                        _asks_child = hasattr(_child, '_planned_sources')
+                        # The child answers WHICH files this row's run takes
+                        # (_planned_sources: its own finders, exclusion and
+                        # skips) and WHERE each output goes (_planned_output:
+                        # the mode's folder, the rename, the jbrd recovery's
+                        # original name), given the command line the row's
+                        # run gets (_child_plan_args). Nothing of those rules
+                        # is copied here (refactor C1); the derivatives the
+                        # child leaves out are checked below, only where files
+                        # collide.
+                        ns = _child_plan_args(_child, origin, dest, src_root, dest_path,
+                                              mode, conversion_type=conversion_type,
+                                              rename_from=rf, rename_to=rt)
+                        if ns is None:
+                            continue            # the child refuses this command line
+                        if not _file_row:
+                            # This walk is the slow part on large trees (recursive
+                            # glob + per-file stat + resolver per source file) — say so.
+                            self.ui.markup(f"[grey70]Collision check: scanning {_rich_safe(src_root)} ...[/grey70]", f"Collision check: scanning {src_root} ...")
                         try:
-                            if _asks_child:
-                                files = sorted(_child._planned_sources(
-                                    argparse.Namespace(input=src_root, output=Path(dest_path),
-                                                       mode=mode), read_markers=False))
-                            else:
-                                files = sorted(src_root.rglob('*') if mode >= 2
-                                               else src_root.iterdir())
+                            files = sorted(_child._planned_sources(ns, read_markers=False))
                         except (OSError, SystemExit):
                             continue
-
-                        def _resolve_all(files, mode=mode, src_root=src_root, dest_path=dest_path,
-                                         rf=rf, rt=rt, _excl_names=_excl_names,
-                                         _asks_child=_asks_child):
-                            for f in files:
-                                # Filter BEFORE resolving: the child resolvers are
-                                # only meaningful for real source files, and running
-                                # them on directories/sidecars is wasted work.
-                                try:
-                                    if not f.is_file() or f.suffix.lower() not in origin_exts:
-                                        continue
-                                except OSError:
-                                    continue
-                                if not _asks_child:
-                                    # The entry's --exclude-folders and the child's
-                                    # skips, mirrored for the transcoder's walk:
-                                    # skipping an excluded file before resolving
-                                    # keeps a flat-output row from aborting on a
-                                    # collision the run would never produce.
-                                    if _excl_names and _path_excluded_below_root(
-                                            f, src_root, _excl_names):
-                                        continue
-                                    if _skip_check is not None and _skip_check(f, src_root, mode):
-                                        continue
-                                out = resolver(f, mode, src_root, dest_path, rf, rt)
-                                # out is None for files the child skips (e.g. outside
-                                # the export marker in modes 6/7).
-                                yield f, (out.parent if out is not None else None)
-
-                        outputs = _resolve_all(files)
-                    for f, out_folder in outputs:
-                        try:
-                            if not f.is_file() or f.suffix.lower() not in origin_exts:
+                        # Modes 6/7 with no explicit subfolder: the child leaves
+                        # out the derivatives (B2) — never for a single file.
+                        # Read inside _with_child_marker, so the row's own
+                        # subfolder is the one seen here.
+                        _sub_now = (getattr(_child, 'EXPORT_JPEG_SUBFOLDER', '')
+                                    if _child.__name__ == 'jxl_jpeg_transcoder'
+                                    else getattr(_child, 'EXPORT_JXL_SUBFOLDER', ''))
+                        _derived_skip = (None if _file_row else bool(
+                            _derived_capable and (mode == 6 or (mode == 7 and not _sub_now))))
+                        outputs = []
+                        for f in files:
+                            if not _file_row and not _is_origin_file(f, origin_exts):
                                 continue
-                        except OSError:
-                            continue
-                        if out_folder is None:
-                            continue
+                            out = _child._planned_output(f, ns)
+                            # None for files the child skips (e.g. outside the
+                            # export marker in modes 6/7).
+                            if out is not None:
+                                outputs.append((f, out.parent, os.path.normcase(out.stem),
+                                                _derived_skip))
+                    for f, out_folder, stem, el in outputs:
                         if _entry_outs is not None:
                             _entry_outs.add(os.path.normcase(
                                 os.path.abspath(str(out_folder))))
                         key = os.path.normcase(str(out_folder))
                         seen = by_dest.setdefault(key, {})
-                        # Outputs are named from the stem, so a stem clash is a clash
-                        # whatever the target extension is. normcase (not .lower()):
-                        # case-sensitive filesystems treat Foto.tif/foto.tif as
-                        # distinct files and must NOT collide. The recompressor's
-                        # --rename-from renames that stem at planning time.
-                        stem = (_stem_key(f, rf, rt) if _child is not None
-                                else os.path.normcase(f.stem))
-                        _members.setdefault((key, stem), []).append(
-                            (f, out_folder, _derived_skip))
+                        # Outputs are named from the stem, so a stem clash is a
+                        # clash whatever the target extension is. normcase (not
+                        # .lower()): case-sensitive filesystems treat
+                        # Foto.tif/foto.tif as distinct files and must NOT
+                        # collide. The stem is the output's own (a rename
+                        # applied, a jbrd recovery's original name kept).
+                        if el is not None:
+                            _members.setdefault((key, stem), []).append(
+                                (f, out_folder, el))
                         prev = seen.get(stem)
                         if prev is None:
                             seen[stem] = f
@@ -9628,31 +9440,18 @@ class InteractiveMenu:
                                                    at_most_once=ctx.manifest)
 
     def _policy_conversion(self, cmd: List, ctx: "_CmdCtx") -> None:
-        """The transcoder's conversion type. --from-jpeg keeps a lossy
-        JPEG -> JXL run off the PNGs in the folder (in mode 8 it would delete
-        them); --from-jxl keeps the auto JXL -> JPEG run from transcoding the
-        folder's JPEGs INTO JXL; the PNG output never transcodes even when a
-        jbrd box is present."""
+        """The transcoder's conversion type (_TRANSCODER_CONVERSION_FLAGS)."""
         if ctx.direction not in _TRANSCODER_DIRECTIONS:
             return
-        cmd.extend({
-            'transcode_lossless': ['--force-transcode'],
-            'convert_lossy': ['--force-convert', '--from-jpeg'],
-            'jxl_to_jpeg_auto': ['--from-jxl'],
-            'jxl_to_jpeg_lossless': ['--force-transcode', '--decode'],
-            'jxl_to_jpeg_force': ['--force-convert', '--decode'],
-            'jxl_to_png': ['--force-convert', '--decode'],
-        }.get(ctx.conv_type, []))
+        cmd.extend(_TRANSCODER_CONVERSION_FLAGS.get(ctx.conv_type, ()))
 
     def _policy_rename(self, cmd: List, ctx: "_CmdCtx") -> None:
-        """--rename-from/--rename-to, always as a pair. The recompressor plans
-        the rename up front; the transcoder applies it on its lossy decode
-        only (the bit-exact recovery keeps the original name), and only the
-        manifest route passes it there."""
+        """--rename-from/--rename-to, always as a pair, where the child takes
+        it (_rename_reaches_child)."""
         rf = ctx.advanced.get('rename_from')
         if not rf:
             return
-        if ctx.direction == "jxl2jxl" or (ctx.manifest and ctx.decode_lossy):
+        if _rename_reaches_child(ctx.direction, ctx.decode_lossy, ctx.manifest):
             cmd.extend(['--rename-from', rf, '--rename-to',
                         ctx.advanced.get('rename_to') or ''])
 
@@ -9698,10 +9497,7 @@ class InteractiveMenu:
         """The transcoder's output format, from the destination."""
         if ctx.direction not in _TRANSCODER_DIRECTIONS:
             return
-        if ctx.dest == 'png':
-            cmd.extend(['--format', 'png'])
-        elif ctx.dest in ('jpeg', 'jpg'):
-            cmd.extend(['--format', 'jpeg'])
+        cmd.extend(_transcoder_format_flags(ctx.dest))
 
     def _build_manifest_entry_cmd(self, script: str, source: str, dest_path: str, mode: int,
                                    origin: str, dest: str, workers: int,
