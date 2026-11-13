@@ -104,7 +104,47 @@ def test_rule_order_is_the_old_order():
     assert [r[0] for r in wp._GATE_RULES] == [
         "ambiguous_delete_flags", "expert_flags_parse", "registry_rules",
         "mode_in_expert_flags", "direct_derivatives", "manifest_derivatives",
-        "preset_unattended"]
+        "manifest_lossless_recovery", "preset_unattended"]
+
+
+class _UI:
+    def __init__(self):
+        self.notes = []
+
+    def markup(self, rich, plain):
+        self.notes.append(plain)
+
+
+@pytest.mark.parametrize("opts,text", [
+    ({"resize_mode": "long", "resize_value": 64}, "cannot be resized/sharpened"),
+    ({"rename_from": "a", "rename_to": "b"}, "keeps the original file names"),
+])
+def test_the_manifest_lossless_rule_refuses_a_shaped_row(opts, text):
+    m = _Menu()
+    ctx = {"origin": "jxl", "dest": "jpeg", "advanced": {},
+           "row_effs": [({}, {}), ({}, opts)], "resolved_entries": [("a", "x", 1), ("b", "y", 1)]}
+    wf = _wf(dest_format="jpeg", conversion_type="jxl_to_jpeg_lossless")
+    assert wp._job_gates(m, wf, "manifest", **ctx) is True
+    assert text in m.errors[0] and "row(s): 2" in m.errors[0]
+
+
+def test_the_manifest_lossless_rule_only_warns_about_output_icc():
+    m = _Menu()
+    m.ui = _UI()
+    ctx = {"origin": "jxl", "dest": "jpeg", "advanced": {},
+           "row_effs": [({}, {"output_icc": "sRGB"})], "resolved_entries": [("a", "x", 1)]}
+    wf = _wf(dest_format="jpeg", conversion_type="jxl_to_jpeg_lossless")
+    assert wp._job_gates(m, wf, "manifest", **ctx) is False and m.errors == []
+    assert "OutputICC is ignored" in m.ui.notes[0]
+
+
+def test_the_manifest_path_refuses_only_through_the_table_or_its_named_steps():
+    """Before the lossy delete-skipped confirmation, _execute_manifest_workflow
+    prints only its own setup errors: every refusal is a _GATE_RULES rule or a
+    _manifest_step_* method (refactor F4.7)."""
+    texts = _errors_before(_method("_execute_manifest_workflow"),
+                           "_confirm_lossy_delete_skipped")
+    assert all("No manifest entries" in t or "Script not found" in t for t in texts), texts
 
 
 def _method(name):

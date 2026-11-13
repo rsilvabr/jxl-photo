@@ -586,6 +586,11 @@
   where their checks always ran. A new pre-run refusal is a rule there
   (`tests/test_job_gates.py` fails on an inline one); the HHMM and in-place
   confirmations stay in `_confirm_archive_mode`/`_confirm_in_place_replace`.
+  The manifest's refusals that need the run's own intermediate state (the
+  mode-7 subfolder it derives, the collision scan's output folders) or ask
+  a question are `_manifest_step_*` methods, called in order by
+  `_execute_manifest_workflow` (`tests/test_manifest_steps.py` pins each one
+  and the order); never an inline refusal there either.
 
 ## Verification
 - **ALWAYS test with hostile paths** (owner's rule, 2026-10-17: "SEMPRE da erro").

@@ -4442,6 +4442,50 @@ def _gate_manifest_derivatives(menu, wf, ctx) -> bool:
     return False
 
 
+def _gate_manifest_lossless_recovery(menu, wf, ctx) -> bool:
+    """A bit-exact JPEG reconstruction keeps the JPEG's bytes and its name:
+    a manifest row that resizes, sharpens or renames cannot have one (the
+    child would refuse per file), so it is refused before the token. An
+    OutputICC there is only a warning: the recovery is what was asked."""
+    if not (ctx['origin'] == 'jxl' and ctx['dest'] in ('jpeg', 'png')
+            and wf.get('conversion_type') == 'jxl_to_jpeg_lossless'):
+        return False
+    # A bit-exact JPEG reconstruction cannot be resized/sharpened; the
+    # child would refuse per file — refuse here, before the token.
+    _bad = [i + 1 for i, (_w, _a) in enumerate(ctx['row_effs'])
+            if _a.get('resize_mode') or (_a.get('sharpen') or 'none') != 'none']
+    if _bad:
+        menu._print_error("A bit-exact JPEG reconstruction cannot be "
+                          "resized/sharpened — pick the lossy JXL→JPEG "
+                          "conversion for that "
+                          f"(row(s): {', '.join(map(str, _bad))}).")
+        return True
+    # --rename-from is just as impossible: the recovered JPEG keeps
+    # the ORIGINAL file name (the child ignores the flag on the
+    # lossless path), so a rename would only fool the collision scan
+    # into modelling outputs the run never writes. Refuse it too.
+    _ren = [i + 1 for i, (_w, _a) in enumerate(ctx['row_effs'])
+            if _a.get('rename_from')]
+    if _ren:
+        menu._print_error("A bit-exact JPEG reconstruction keeps the "
+                          "original file names — --rename-from does not "
+                          "apply to the lossless JXL→JPEG recovery "
+                          f"(row(s): {', '.join(map(str, _ren))}). Pick "
+                          "the lossy conversion for that.")
+        return True
+    # OutputICC is likewise ignored on the lossless path (there is no
+    # pixel to convert) — warn, don't refuse: the recovery itself is
+    # still exactly what was asked.
+    _icc = [i + 1 for i, (_w, _a) in enumerate(ctx['row_effs'])
+            if _a.get('output_icc')]
+    if _icc:
+        _msg = (f"OutputICC is ignored by a bit-exact JPEG reconstruction "
+                f"(row(s): {', '.join(map(str, _icc))}) — the recovered "
+                "JPEG keeps the original bytes, colour included.")
+        menu.ui.markup(f"[yellow]{_rich_safe(_msg)}[/yellow]", f"WARNING: {_msg}")
+    return False
+
+
 def _gate_preset_unattended(menu, wf, ctx) -> bool:
     """A destructive preset cannot run unattended: the delete gates ask for an
     HHMM token nobody can type, and skipping them would let a scheduled task
@@ -4479,6 +4523,8 @@ _GATE_RULES: Tuple[Tuple[str, frozenset, Callable], ...] = (
     ("mode_in_expert_flags", frozenset({"common"}), _gate_mode_in_expert_flags),
     ("direct_derivatives", frozenset({"direct"}), _gate_direct_derivatives),
     ("manifest_derivatives", frozenset({"manifest"}), _gate_manifest_derivatives),
+    ("manifest_lossless_recovery", frozenset({"manifest"}),
+     _gate_manifest_lossless_recovery),
     ("preset_unattended", frozenset({"preset"}), _gate_preset_unattended),
 )
 
@@ -7925,106 +7971,10 @@ class InteractiveMenu:
                       advanced=advanced, row_effs=_row_effs,
                       resolved_entries=resolved_entries):
             return False
-        if (origin == 'jxl' and dest in ('jpeg', 'png')
-                and workflow.get('conversion_type') == 'jxl_to_jpeg_lossless'):
-            # A bit-exact JPEG reconstruction cannot be resized/sharpened; the
-            # child would refuse per file — refuse here, before the token.
-            _bad = [i + 1 for i, (_w, _a) in enumerate(_row_effs)
-                    if _a.get('resize_mode') or (_a.get('sharpen') or 'none') != 'none']
-            if _bad:
-                self._print_error("A bit-exact JPEG reconstruction cannot be "
-                                  "resized/sharpened — pick the lossy JXL→JPEG "
-                                  "conversion for that "
-                                  f"(row(s): {', '.join(map(str, _bad))}).")
-                return False
-            # --rename-from is just as impossible: the recovered JPEG keeps
-            # the ORIGINAL file name (the child ignores the flag on the
-            # lossless path), so a rename would only fool the collision scan
-            # into modelling outputs the run never writes. Refuse it too.
-            _ren = [i + 1 for i, (_w, _a) in enumerate(_row_effs)
-                    if _a.get('rename_from')]
-            if _ren:
-                self._print_error("A bit-exact JPEG reconstruction keeps the "
-                                  "original file names — --rename-from does not "
-                                  "apply to the lossless JXL→JPEG recovery "
-                                  f"(row(s): {', '.join(map(str, _ren))}). Pick "
-                                  "the lossy conversion for that.")
-                return False
-            # OutputICC is likewise ignored on the lossless path (there is no
-            # pixel to convert) — warn, don't refuse: the recovery itself is
-            # still exactly what was asked.
-            _icc = [i + 1 for i, (_w, _a) in enumerate(_row_effs)
-                    if _a.get('output_icc')]
-            if _icc:
-                _msg = (f"OutputICC is ignored by a bit-exact JPEG reconstruction "
-                        f"(row(s): {', '.join(map(str, _icc))}) — the recovered "
-                        "JPEG keeps the original bytes, colour included.")
-                self.ui.markup(f"[yellow]{_rich_safe(_msg)}[/yellow]", f"WARNING: {_msg}")
 
-        # A mode-7 entry means "only <marker>/<subfolder>", and the subfolder
-        # reaches the children as --export-subfolder — which comes from
-        # mode_config. On a mode-99 (manifest) run it USED to be always empty;
-        # the item-19 fix now preserves export_marker/export_subfolder in the
-        # workflow, so a manifest recorded with a subfolder arrives with it
-        # set and skips this derivation entirely. Auto-generated manifests
-        # bake the subfolder into the Source itself (<marker>/<sub>), so it
-        # can also be derived back — and SHOULD be passed explicitly, because
-        # a child whose EXPORT_*_SUBFOLDER constant was edited would otherwise
-        # filter the entry by the wrong name. Entries naming DIFFERENT
-        # subfolders need no flag at all: each Source already scopes its own
-        # child process. The one dangerous shape is a HAND-WRITTEN entry with
-        # Mode=7 and a Source ABOVE the marker: with an empty subfolder its
-        # child converts EVERY subfolder of the marker — mode 6 wearing a
-        # mode-7 label.
-        if (any(m == 7 for _, _, m in resolved_entries)
-                and not (workflow.get('mode_config') or {}).get('export_subfolder')):
-            derived = set()
-            underivable = []
-            for i, (_s, _d, _m) in enumerate(resolved_entries):
-                if _m != 7:
-                    continue
-                # Rows with their own ExportSubfolder keep it: they neither
-                # participate in the derivation nor earn the warning.
-                if (_row_opts_all[i] or {}).get('export_subfolder'):
-                    continue
-                _parts = Path(_s).parts
-                # The deepest match: the children's anchor for this Source
-                # (_marker_anchor_index, E-H).
-                _idx = next((j for j in range(len(_parts) - 1, -1, -1)
-                             if _marker_matches(_parts[j].lower(),
-                                                _row_markers[i].lower())), None)
-                if _idx is not None and _idx + 1 < len(_parts):
-                    derived.add(_parts[_idx + 1])
-                else:
-                    underivable.append(_s)
-            if underivable:
-                _sub_warn = (
-                    "This manifest has mode-7 entries whose subfolder cannot be "
-                    "determined (the Source is not <marker>/<subfolder>). The "
-                    "children will use their script's EXPORT_*_SUBFOLDER default "
-                    "— and when that is empty, they process EVERY subfolder of "
-                    "the export marker: they will run as mode 6. Filling the "
-                    "ExportSubfolder column on those rows resolves this.")
-                self.ui.markup(f"[yellow]{_rich_safe(_sub_warn)}[/yellow]", f"WARNING: {_sub_warn}")
-                for _s in underivable[:5]:
-                    print(f"  mode 7, no subfolder in Source: {_s}")
-                if workflow.get('unattended'):
-                    # Fail closed, like the overlap guard: nobody is there to
-                    # notice the run is converting more than the manifest says.
-                    self._print_error(
-                        "Refusing to run unattended: write the mode-7 Sources as "
-                        "<marker>/<subfolder>, fill the ExportSubfolder column on "
-                        "those rows, or use mode 6 if every subfolder is intended.")
-                    return False
-                ok_sub = self.ui.ask_yes("manifest.run_anyway_subfolder", "Run anyway?", "Run anyway? [y/N]: ", False)
-                if not ok_sub:
-                    return False
-            elif len(derived) == 1:
-                _sub = derived.pop()
-                workflow.setdefault('mode_config', {})['export_subfolder'] = _sub
-                _sub_msg = (f"Mode-7 entries: processing only subfolder {_sub!r} "
-                            f"(derived from the manifest's Source paths).")
-                self.ui.markup(f"[grey70]{_rich_safe(_sub_msg)}[/grey70]", _sub_msg)
+        if not self._manifest_step_mode7_subfolder(
+                workflow, resolved_entries, _row_opts_all, _row_markers):
+            return False
 
         # The mode-7 derivation above may have filled the run's export_subfolder.
         # Rows with their own Export* columns hold a COPY of mode_config, so
@@ -8035,146 +7985,24 @@ class InteractiveMenu:
                      for _o in _row_opts_all]
         _row_export = [_row_export_cfg(_w) for _w, _a in _row_effs]
 
-        # The child validates the modes 6/7 output folder name at startup
-        # (argparse exit 2). Mirror that here, per row and with the row's
-        # EFFECTIVE trio (so the default name is checked against the row's
-        # marker too), so a bad name fails before the first entry instead of
-        # on entry N mid-run.
-        if (origin, dest) in (('tiff', 'jxl'), ('jxl', 'jxl')):
-            try:
-                if origin == 'tiff':
-                    import jxl_tiff_encoder as _vchild
-                else:
-                    import jxl_recompressor as _vchild
-            except ImportError:
-                _vchild = None      # the child validates it itself (exit 2)
-            if _vchild is not None:
-                _bad_folder = []
-                for i, (_s, _d, _m) in enumerate(resolved_entries, 1):
-                    if _m not in (6, 7):
-                        continue
-                    _mk, _sub, _jf = _row_export[i - 1]
-                    _why = _vchild._validate_export_folder_name(
-                        _jf or _vchild.EXPORT_JXL_FOLDER, _mk,
-                        (_sub or "") if _m == 7 else "")
-                    if _why:
-                        _bad_folder.append((i, _why))
-                if _bad_folder:
-                    for i, _why in _bad_folder[:5]:
-                        self._print_error(f"Manifest row {i}: output folder — {_why}")
-                    return False
-
-        # Overlapping source trees: one entry's Source inside another's means
-        # the same files are processed twice by SEPARATE child processes. Some
-        # users do this on purpose (e.g. E:\Fotos in mode 6 + E:\Fotos\2024_EXPORT
-        # in mode 0 — different outputs, no conflict), so attended runs get a
-        # loud warning and a choice; unattended presets are refused (fail
-        # closed, like the delete gates).
-        overlaps = self._manifest_source_overlaps(resolved_entries)
-        if overlaps:
-            head = (f"{len(overlaps)} manifest entry pair(s) have duplicate or nested "
-                    f"Source folders — the same files would be processed twice:")
-            self.ui.markup(f"[yellow]{_rich_safe(head)}[/yellow]", f"WARNING: {head}")
-            for a, b in overlaps[:10]:
-                print(f"  {a}  <->  {b}")
-            if workflow.get('unattended'):
-                self._print_error(
-                    "Refusing to run unattended: split the manifest so each folder "
-                    "is covered by exactly one entry, or run it from the menu.")
-                return False
-            ok_overlap = self.ui.ask_yes("manifest.run_anyway_overlap", "Run anyway?", "Run anyway? [y/N]: ", False)
-            if not ok_overlap:
-                return False
-
-        # Cross-entry duplicate outputs: each entry is a separate child process,
-        # so no child can see a collision that spans two entries. Refuse loudly
-        # instead of silently archiving only one of the two sources.
-        # The scan itself walks every Source recursively and can take minutes on
-        # large trees, so it is skipped when collisions are IMPOSSIBLE — see
-        # _manifest_needs_collision_scan for exactly when that holds.
-        # The same walk also records each entry's resolved output folders
-        # (cross_sink) for the output-x-Source check below; when the scan is
-        # skipped the cross case is impossible too — every entry then writes
-        # only inside its own Source tree, so another entry's Source sitting
-        # there would already be a Source overlap, which the gate refuses to
-        # declare safe.
-        cross_out_folders: Dict[int, Set[str]] = {}
-        # Each entry's marker comes from its own row (its ExportMarker column,
-        # or the run's), and the check reasons per row too: disjoint trees under
-        # markers that cannot nest stay skippable, while nested marker dirs
-        # force the scan.
-        _can_skip = not self._manifest_needs_collision_scan(
-            resolved_entries, _marker,
-            row_markers=[_m for _m, _s, _j in _row_export])
-        if _can_skip:
-            _skip_msg = ("Collision check: skipped (no two entries can share an "
-                         "output folder).")
-            self.ui.markup(f"[grey70]{_rich_safe(_skip_msg)}[/grey70]", _skip_msg)
-            collisions = []
-        else:
-            collisions = self._manifest_output_collisions(
-                resolved_entries, analyzer._get_extensions(origin),
-                origin=origin, dest=dest,
-                export_marker=_marker,
-                export_subfolder=workflow.get('mode_config', {}).get('export_subfolder'),
-                export_jxl_folder=workflow.get('mode_config', {}).get('export_jxl_folder'),
-                rename_from=(workflow.get('advanced_options') or {}).get('rename_from', ''),
-                rename_to=(workflow.get('advanced_options') or {}).get('rename_to', ''),
-                row_renames=[((_a.get('rename_from') or ''),
-                              (_a.get('rename_to') or ''))
-                             for _w, _a in _row_effs],
-                row_export=_row_export,
-                row_excludes=[_w.get('exclude_folders') for _w, _a in _row_effs],
-                cross_sink=cross_out_folders,
-                conversion_type=workflow.get('conversion_type'),
-                page_options=(workflow.get('advanced_options') or {}),
-            )
-        if collisions:
-            self._print_error(
-                "Aborting: manifest entries would write different files to the same output."
-            )
-            for a, b, d in collisions[:10]:
-                msg = f"  {a} + {b}  ->  same name in {d}"
-                self.ui.markup(f"[red]{_rich_safe(msg)}[/red]", msg)
-            if len(collisions) > 10:
-                print(f"  ... and {len(collisions) - 10} more")
-            self._print_error(
-                "Rename the inputs, pick another mode, or run the folder directly "
-                "(a non-manifest run detects this itself)."
-            )
+        if not self._manifest_step_output_folder_names(
+                origin, dest, resolved_entries, _row_export):
             return False
 
-        # Cross-entry output x Source: one entry's output folder is another
-        # entry's Source — the folder often does not exist yet (the first entry
-        # creates it during the run), so neither the output-x-output scan nor
-        # the Source-x-Source overlap above can see it, and a disk-level check
-        # cannot either. Entry B would then process the files A just created:
-        # for JXL->JXL that is a lost generation; for every direction it is a
-        # silent dependency on another entry's success. Chaining on purpose is
-        # legitimate, so this follows the Source-overlap pattern: loud warning,
-        # unattended runs refused (fail closed), attended runs may continue.
-        cross_collisions = self._manifest_output_source_collisions(
-            resolved_entries, cross_out_folders)
-        if cross_collisions:
-            head = (f"{len(cross_collisions)} manifest entry pair(s) chain outputs into "
-                    f"inputs — one entry's OUTPUT folder is another entry's SOURCE:")
-            self.ui.markup(f"[yellow]{_rich_safe(head)}[/yellow]", f"WARNING: {head}")
-            for src_a, src_b, out in cross_collisions[:10]:
-                msg = (f"  output of [{self._truncate_path(src_a, 30)}] -> "
-                       f"{self._truncate_path(out, 30)}  ==  Source of "
-                       f"[{self._truncate_path(src_b, 30)}]")
-                self.ui.markup(f"[yellow]{_rich_safe(msg)}[/yellow]", msg)
-            if len(cross_collisions) > 10:
-                print(f"  ... and {len(cross_collisions) - 10} more")
-            if workflow.get('unattended'):
-                self._print_error(
-                    "Refusing to run unattended: this manifest reads folders that "
-                    "another entry of the same run writes. Run it from the menu, or "
-                    "split it into separate runs.")
-                return False
-            ok_cross = self.ui.ask_yes("manifest.run_anyway_cross", "Run anyway?", "Run anyway? [y/N]: ", False)
-            if not ok_cross:
-                return False
+        if not self._manifest_step_source_overlaps(workflow, resolved_entries):
+            return False
+
+        # Each row's resolved output folders, filled by the collision scan
+        # for the output-feeds-Source step after it.
+        cross_out_folders: Dict[int, Set[str]] = {}
+        if not self._manifest_step_output_collisions(
+                workflow, origin, dest, resolved_entries, analyzer, _marker,
+                _row_export, _row_effs, cross_out_folders):
+            return False
+
+        if not self._manifest_step_output_feeds_source(
+                workflow, resolved_entries, cross_out_folders):
+            return False
 
         # delete_source gets --delete-confirm-off from the cmd builder — so the
         # wrapper MUST charge the HHMM token itself, or nothing asks at all.
@@ -8439,6 +8267,238 @@ class InteractiveMenu:
         self._render_manifest_summary(entry_reports, ok_count, skip_count, error_count)
 
         return error_count == 0
+
+    def _manifest_step_mode7_subfolder(self, workflow, resolved_entries, _row_opts_all,
+            _row_markers) -> bool:
+        """A mode-7 row whose subfolder cannot be told from its Source: refused
+        unattended, asked otherwise. One subfolder named by every mode-7 Source
+        becomes the run's export_subfolder (workflow['mode_config']). False =
+        refused (the step printed why)."""
+        # A mode-7 entry means "only <marker>/<subfolder>", and the subfolder
+        # reaches the children as --export-subfolder — which comes from
+        # mode_config. On a mode-99 (manifest) run it USED to be always empty;
+        # the item-19 fix now preserves export_marker/export_subfolder in the
+        # workflow, so a manifest recorded with a subfolder arrives with it
+        # set and skips this derivation entirely. Auto-generated manifests
+        # bake the subfolder into the Source itself (<marker>/<sub>), so it
+        # can also be derived back — and SHOULD be passed explicitly, because
+        # a child whose EXPORT_*_SUBFOLDER constant was edited would otherwise
+        # filter the entry by the wrong name. Entries naming DIFFERENT
+        # subfolders need no flag at all: each Source already scopes its own
+        # child process. The one dangerous shape is a HAND-WRITTEN entry with
+        # Mode=7 and a Source ABOVE the marker: with an empty subfolder its
+        # child converts EVERY subfolder of the marker — mode 6 wearing a
+        # mode-7 label.
+        if (any(m == 7 for _, _, m in resolved_entries)
+                and not (workflow.get('mode_config') or {}).get('export_subfolder')):
+            derived = set()
+            underivable = []
+            for i, (_s, _d, _m) in enumerate(resolved_entries):
+                if _m != 7:
+                    continue
+                # Rows with their own ExportSubfolder keep it: they neither
+                # participate in the derivation nor earn the warning.
+                if (_row_opts_all[i] or {}).get('export_subfolder'):
+                    continue
+                _parts = Path(_s).parts
+                # The deepest match: the children's anchor for this Source
+                # (_marker_anchor_index, E-H).
+                _idx = next((j for j in range(len(_parts) - 1, -1, -1)
+                             if _marker_matches(_parts[j].lower(),
+                                                _row_markers[i].lower())), None)
+                if _idx is not None and _idx + 1 < len(_parts):
+                    derived.add(_parts[_idx + 1])
+                else:
+                    underivable.append(_s)
+            if underivable:
+                _sub_warn = (
+                    "This manifest has mode-7 entries whose subfolder cannot be "
+                    "determined (the Source is not <marker>/<subfolder>). The "
+                    "children will use their script's EXPORT_*_SUBFOLDER default "
+                    "— and when that is empty, they process EVERY subfolder of "
+                    "the export marker: they will run as mode 6. Filling the "
+                    "ExportSubfolder column on those rows resolves this.")
+                self.ui.markup(f"[yellow]{_rich_safe(_sub_warn)}[/yellow]", f"WARNING: {_sub_warn}")
+                for _s in underivable[:5]:
+                    print(f"  mode 7, no subfolder in Source: {_s}")
+                if workflow.get('unattended'):
+                    # Fail closed, like the overlap guard: nobody is there to
+                    # notice the run is converting more than the manifest says.
+                    self._print_error(
+                        "Refusing to run unattended: write the mode-7 Sources as "
+                        "<marker>/<subfolder>, fill the ExportSubfolder column on "
+                        "those rows, or use mode 6 if every subfolder is intended.")
+                    return False
+                ok_sub = self.ui.ask_yes("manifest.run_anyway_subfolder", "Run anyway?", "Run anyway? [y/N]: ", False)
+                if not ok_sub:
+                    return False
+            elif len(derived) == 1:
+                _sub = derived.pop()
+                workflow.setdefault('mode_config', {})['export_subfolder'] = _sub
+                _sub_msg = (f"Mode-7 entries: processing only subfolder {_sub!r} "
+                            f"(derived from the manifest's Source paths).")
+                self.ui.markup(f"[grey70]{_rich_safe(_sub_msg)}[/grey70]", _sub_msg)
+        return True
+
+    def _manifest_step_output_folder_names(self, origin, dest, resolved_entries,
+            _row_export) -> bool:
+        """Each mode 6/7 row's output folder name, as its child validates it at
+        startup. False = refused (the step printed why)."""
+        # The child validates the modes 6/7 output folder name at startup
+        # (argparse exit 2). Mirror that here, per row and with the row's
+        # EFFECTIVE trio (so the default name is checked against the row's
+        # marker too), so a bad name fails before the first entry instead of
+        # on entry N mid-run.
+        if (origin, dest) in (('tiff', 'jxl'), ('jxl', 'jxl')):
+            try:
+                if origin == 'tiff':
+                    import jxl_tiff_encoder as _vchild
+                else:
+                    import jxl_recompressor as _vchild
+            except ImportError:
+                _vchild = None      # the child validates it itself (exit 2)
+            if _vchild is not None:
+                _bad_folder = []
+                for i, (_s, _d, _m) in enumerate(resolved_entries, 1):
+                    if _m not in (6, 7):
+                        continue
+                    _mk, _sub, _jf = _row_export[i - 1]
+                    _why = _vchild._validate_export_folder_name(
+                        _jf or _vchild.EXPORT_JXL_FOLDER, _mk,
+                        (_sub or "") if _m == 7 else "")
+                    if _why:
+                        _bad_folder.append((i, _why))
+                if _bad_folder:
+                    for i, _why in _bad_folder[:5]:
+                        self._print_error(f"Manifest row {i}: output folder — {_why}")
+                    return False
+        return True
+
+    def _manifest_step_source_overlaps(self, workflow, resolved_entries) -> bool:
+        """Two rows whose Sources overlap: refused unattended, asked otherwise.
+        False = refused (the step printed why)."""
+        # Overlapping source trees: one entry's Source inside another's means
+        # the same files are processed twice by SEPARATE child processes. Some
+        # users do this on purpose (e.g. E:\Fotos in mode 6 + E:\Fotos\2024_EXPORT
+        # in mode 0 — different outputs, no conflict), so attended runs get a
+        # loud warning and a choice; unattended presets are refused (fail
+        # closed, like the delete gates).
+        overlaps = self._manifest_source_overlaps(resolved_entries)
+        if overlaps:
+            head = (f"{len(overlaps)} manifest entry pair(s) have duplicate or nested "
+                    f"Source folders — the same files would be processed twice:")
+            self.ui.markup(f"[yellow]{_rich_safe(head)}[/yellow]", f"WARNING: {head}")
+            for a, b in overlaps[:10]:
+                print(f"  {a}  <->  {b}")
+            if workflow.get('unattended'):
+                self._print_error(
+                    "Refusing to run unattended: split the manifest so each folder "
+                    "is covered by exactly one entry, or run it from the menu.")
+                return False
+            ok_overlap = self.ui.ask_yes("manifest.run_anyway_overlap", "Run anyway?", "Run anyway? [y/N]: ", False)
+            if not ok_overlap:
+                return False
+        return True
+
+    def _manifest_step_output_collisions(self, workflow, origin, dest, resolved_entries,
+            analyzer, _marker, _row_export, _row_effs, cross_out_folders) -> bool:
+        """Two rows writing the same output file: refused. Fills cross_out_folders
+        (each row's resolved output folders) for the next step. False =
+        refused (the step printed why)."""
+        # Cross-entry duplicate outputs: each entry is a separate child process,
+        # so no child can see a collision that spans two entries. Refuse loudly
+        # instead of silently archiving only one of the two sources.
+        # The scan itself walks every Source recursively and can take minutes on
+        # large trees, so it is skipped when collisions are IMPOSSIBLE — see
+        # _manifest_needs_collision_scan for exactly when that holds.
+        # The same walk also records each entry's resolved output folders
+        # (cross_sink) for the output-x-Source check below; when the scan is
+        # skipped the cross case is impossible too — every entry then writes
+        # only inside its own Source tree, so another entry's Source sitting
+        # there would already be a Source overlap, which the gate refuses to
+        # declare safe.
+        # Each entry's marker comes from its own row (its ExportMarker column,
+        # or the run's), and the check reasons per row too: disjoint trees under
+        # markers that cannot nest stay skippable, while nested marker dirs
+        # force the scan.
+        _can_skip = not self._manifest_needs_collision_scan(
+            resolved_entries, _marker,
+            row_markers=[_m for _m, _s, _j in _row_export])
+        if _can_skip:
+            _skip_msg = ("Collision check: skipped (no two entries can share an "
+                         "output folder).")
+            self.ui.markup(f"[grey70]{_rich_safe(_skip_msg)}[/grey70]", _skip_msg)
+            collisions = []
+        else:
+            collisions = self._manifest_output_collisions(
+                resolved_entries, analyzer._get_extensions(origin),
+                origin=origin, dest=dest,
+                export_marker=_marker,
+                export_subfolder=workflow.get('mode_config', {}).get('export_subfolder'),
+                export_jxl_folder=workflow.get('mode_config', {}).get('export_jxl_folder'),
+                rename_from=(workflow.get('advanced_options') or {}).get('rename_from', ''),
+                rename_to=(workflow.get('advanced_options') or {}).get('rename_to', ''),
+                row_renames=[((_a.get('rename_from') or ''),
+                              (_a.get('rename_to') or ''))
+                             for _w, _a in _row_effs],
+                row_export=_row_export,
+                row_excludes=[_w.get('exclude_folders') for _w, _a in _row_effs],
+                cross_sink=cross_out_folders,
+                conversion_type=workflow.get('conversion_type'),
+                page_options=(workflow.get('advanced_options') or {}),
+            )
+        if collisions:
+            self._print_error(
+                "Aborting: manifest entries would write different files to the same output."
+            )
+            for a, b, d in collisions[:10]:
+                msg = f"  {a} + {b}  ->  same name in {d}"
+                self.ui.markup(f"[red]{_rich_safe(msg)}[/red]", msg)
+            if len(collisions) > 10:
+                print(f"  ... and {len(collisions) - 10} more")
+            self._print_error(
+                "Rename the inputs, pick another mode, or run the folder directly "
+                "(a non-manifest run detects this itself)."
+            )
+            return False
+        return True
+
+    def _manifest_step_output_feeds_source(self, workflow, resolved_entries,
+            cross_out_folders) -> bool:
+        """One row's output folder is another row's Source: refused unattended,
+        asked otherwise. False = refused (the step printed why)."""
+        # Cross-entry output x Source: one entry's output folder is another
+        # entry's Source — the folder often does not exist yet (the first entry
+        # creates it during the run), so neither the output-x-output scan nor
+        # the Source-x-Source overlap above can see it, and a disk-level check
+        # cannot either. Entry B would then process the files A just created:
+        # for JXL->JXL that is a lost generation; for every direction it is a
+        # silent dependency on another entry's success. Chaining on purpose is
+        # legitimate, so this follows the Source-overlap pattern: loud warning,
+        # unattended runs refused (fail closed), attended runs may continue.
+        cross_collisions = self._manifest_output_source_collisions(
+            resolved_entries, cross_out_folders)
+        if cross_collisions:
+            head = (f"{len(cross_collisions)} manifest entry pair(s) chain outputs into "
+                    f"inputs — one entry's OUTPUT folder is another entry's SOURCE:")
+            self.ui.markup(f"[yellow]{_rich_safe(head)}[/yellow]", f"WARNING: {head}")
+            for src_a, src_b, out in cross_collisions[:10]:
+                msg = (f"  output of [{self._truncate_path(src_a, 30)}] -> "
+                       f"{self._truncate_path(out, 30)}  ==  Source of "
+                       f"[{self._truncate_path(src_b, 30)}]")
+                self.ui.markup(f"[yellow]{_rich_safe(msg)}[/yellow]", msg)
+            if len(cross_collisions) > 10:
+                print(f"  ... and {len(cross_collisions) - 10} more")
+            if workflow.get('unattended'):
+                self._print_error(
+                    "Refusing to run unattended: this manifest reads folders that "
+                    "another entry of the same run writes. Run it from the menu, or "
+                    "split it into separate runs.")
+                return False
+            ok_cross = self.ui.ask_yes("manifest.run_anyway_cross", "Run anyway?", "Run anyway? [y/N]: ", False)
+            if not ok_cross:
+                return False
+        return True
 
     def _render_manifest_summary(self, entry_reports: List[Dict], ok_count: int,
                                  skip_count: int, error_count: int) -> None:
