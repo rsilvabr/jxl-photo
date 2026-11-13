@@ -2083,11 +2083,18 @@ def _exiftool_batch_ok(g) -> bool:
         return False
     exe = g._get_exiftool_cmd()
     if exe not in state:
+        version = ""
         try:
-            r = _exiftool_one_process(g, [["-ver"]], 60)[0]
-            state[exe] = r.returncode == 0 and bool(r.stdout.strip())
+            r = _exiftool_one_process(g, [["-ver"]], g.EXIFTOOL_TIMEOUT)[0]
+            version = (r.stdout or "").strip()
+            state[exe] = r.returncode == 0 and bool(version)
         except Exception:
             state[exe] = False
+        # One line in the log file: a run that falls back to one process per
+        # command is only slower, and nothing else would tell (review V4).
+        g.logger.debug(f"exiftool {version or '(version unknown)'}: "
+                       + ("a file's commands share one process" if state[exe]
+                          else "one process per command (no status per command)"))
     return state[exe]
 
 

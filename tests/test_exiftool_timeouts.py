@@ -33,12 +33,13 @@ SCRIPTS = {
 # (_run_exiftool_argfile, and the runners of several commands in one process,
 # refactor F6), the version probes and the planning-time batch readers.
 EXEMPT = {"_run_exiftool_argfile", "_read_mpg_markers", "_tool_version",
-          "_exiftool_one_process", "_exiftool_commands", "_exiftool_batch_ok",
-          "_run_exiftool_writes"}
+          "_exiftool_one_process", "_exiftool_commands", "_run_exiftool_writes",
+          "_prefetch_exiftool_reads"}
 # Runners of several commands whose callers must give the setting too: the
 # timeout is the 2nd (_exiftool_commands, _run_exiftool_writes) or 3rd
 # (the common module's g-functions) argument, or `timeout=`.
-_COMMAND_RUNNERS = {"_exiftool_commands", "_run_exiftool_writes"}
+_COMMAND_RUNNERS = {"_exiftool_commands", "_run_exiftool_writes", "_exiftool_one_process",
+                    "_prefetch_exiftool_reads"}
 
 
 def _exiftool_calls(src: str):

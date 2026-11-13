@@ -60,9 +60,28 @@ def test_a_missing_marker_or_one_without_a_number_fails_closed():
 # --- real exiftool ------------------------------------------------------------
 
 @needs_exiftool
-def test_this_exiftool_reports_each_command(monkeypatch):
+def test_this_exiftool_reports_each_command(monkeypatch, caplog):
+    """...and the run's log file says so, with the version (review V4: a run
+    that falls back to one process per command is only slower, and nothing
+    else would tell)."""
+    import logging
     monkeypatch.setattr(enc, "_EXIFTOOL_BATCH", {})
-    assert common._exiftool_batch_ok(enc._G) is True
+    with caplog.at_level(logging.DEBUG, logger=enc.logger.name):
+        assert common._exiftool_batch_ok(enc._G) is True
+    lines = [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG]
+    assert any(m.startswith("exiftool ") and "a file's commands share one process" in m
+               for m in lines), lines
+
+
+def test_a_probe_that_fails_is_logged_as_the_old_path(monkeypatch, caplog):
+    import logging
+    monkeypatch.setattr(enc, "_EXIFTOOL_BATCH", {})
+    monkeypatch.setattr(common, "_exiftool_one_process",
+                        lambda g, commands, timeout: [subprocess.CompletedProcess(
+                            commands[0], -1, "", "")])
+    with caplog.at_level(logging.DEBUG, logger=enc.logger.name):
+        assert common._exiftool_batch_ok(enc._G) is False
+    assert any("one process per command" in r.getMessage() for r in caplog.records)
 
 
 @needs_exiftool
