@@ -444,10 +444,18 @@
   the configured `EXPORT_JXL_FOLDER` (a custom `--export-jxl-folder` must not
   be re-processed as a source on the next run) — but
   only BELOW the input root: pointing a run AT such a folder to compress it
-  again is legitimate. The wrapper's `_manifest_output_collisions` mirror must
-  match this exactly (it takes the root into account too) and follows the
-  configured folder via `_with_child_marker`, which applies the global on the
-  imported child module and restores it afterwards.
+  again is legitimate. The wrapper does not copy this rule any more: its file
+  count (`_count_origin_files`) and its collision walk
+  (`_manifest_output_collisions`, folder rows) ASK the encoder, the decoder
+  and the recompressor which files a run takes — `_planned_sources(args,
+  read_markers=)`, their own `_find_sources` — inside `_with_child_marker`,
+  which applies the run's marker/folders/exclusion on the imported child and
+  restores them afterwards (refactor F8). Still mirrored in the wrapper (a
+  change there needs the matching child rule): WHERE an output goes in modes
+  0/1/2/8 with the rename and the jbrd-keeps-its-name rule, a file Source row,
+  and the transcoder's whole walk (it has no `_planned_sources` yet).
+  `AI_tools/python-refactor_proofs/f8/verdicts.py` compares the wrapper's
+  counts and collisions of two versions on hostile trees.
 - **The modes 6/7 anchor** is `_marker_anchor_index` (#601, parity-pinned in
   the four backends, used by the wrapper's collision walk): the first marker
   match at or below the input root, else the closest one above; a path not
