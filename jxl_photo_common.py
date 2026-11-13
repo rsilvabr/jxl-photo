@@ -528,6 +528,32 @@ def _icc_profile_token(icc_bytes: bytes) -> str:
     return ICC_PROFILE_PREFIX + base64.b64encode(icc_bytes).decode("ascii")
 
 
+# The creation date (year, month, day, hour, minute, second) written into the
+# sRGB profile the toolkit generates (_generated_srgb_icc).
+_GENERATED_ICC_DATE = (2026, 11, 13, 0, 0, 0)
+
+
+def _generated_srgb_icc() -> bytes:
+    """Pillow's (littleCMS's) built-in sRGB profile with a FIXED creation
+    date. Generated as it is, it carries the moment it was made in its header
+    (bytes 24-35), so two identical derivatives made on different days
+    differed in their jxlphoto-iccprofile token. The profile ID (bytes 84-99)
+    covers the date: littleCMS leaves it zero (not computed); should it ever
+    be set, it is computed again for the new date (ICC.1 7.2.18: MD5 of the
+    profile with flags, rendering intent and ID zeroed). ImportError when
+    Pillow is missing: the caller says what needs it."""
+    from PIL import ImageCms
+    raw = bytearray(ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes())
+    raw[24:36] = struct.pack(">6H", *_GENERATED_ICC_DATE)
+    if any(raw[84:100]):
+        h = bytearray(raw)
+        h[44:48] = bytes(4)
+        h[64:68] = bytes(4)
+        h[84:100] = bytes(16)
+        raw[84:100] = hashlib.md5(bytes(h)).digest()
+    return bytes(raw)
+
+
 def _png_iccp(png_path: Path):
     """The ICC profile in a PNG's iCCP chunk (decompressed), or None. Reads
     chunk headers only up to the first IDAT."""

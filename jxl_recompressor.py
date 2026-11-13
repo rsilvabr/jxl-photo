@@ -2320,6 +2320,9 @@ def _adobe_rgb_icc_bytes() -> bytes:
                                  (0.3127, 0.3290), 563 / 256)
 
 
+_generated_srgb_icc = _common._generated_srgb_icc
+
+
 def _resolve_output_icc(value: str):
     """(label, icc_bytes) for --output-icc, or raise ValueError with the reason.
 
@@ -2329,10 +2332,9 @@ def _resolve_output_icc(value: str):
     key = value.strip().lower()
     if key == "srgb":
         try:
-            from PIL import ImageCms
+            return "sRGB", _generated_srgb_icc()
         except ImportError:
             raise ValueError("--output-icc sRGB needs Pillow (pip install pillow)")
-        return "sRGB", ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
     if key in ("adobergb", "adobe", "adobergb1998"):
         return "AdobeRGB", _adobe_rgb_icc_bytes()
     p = Path(value.strip().strip('"'))
@@ -4996,15 +4998,14 @@ def _configure_run(parser, args):
                 _OUTPUT_ICC_PATH = _icc_dir / f"target_{_OUTPUT_ICC_LABEL}.icc"
                 _OUTPUT_ICC_PATH.write_bytes(_OUTPUT_ICC_BYTES)
             try:
-                from PIL import ImageCms
+                _srgb_bytes = _generated_srgb_icc()
             except ImportError:
                 logger.error("derivatives need Pillow: the sRGB profile assigned to "
                              "sources that decode without one comes from Pillow "
                              "(pip install pillow)")
                 sys.exit(1)
             _SRGB_ICC_PATH = _icc_dir / "srgb.icc"
-            _SRGB_ICC_PATH.write_bytes(
-                ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes())
+            _SRGB_ICC_PATH.write_bytes(_srgb_bytes)
 
     if DERIVATIVE:
         KEEP_SMALLER = False

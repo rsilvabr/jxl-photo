@@ -72,7 +72,10 @@ software that made this file" printed the whole block.
   profile is this copy when the file carries one — also for a master whose
   pixels were encoded tagged sRGB, which used to come out labelled sRGB.
 - A recompressor derivative with `--output-icc` **replaces** it with the target
-  profile, so it always names the colour space the pixels are in.
+  profile, so it always names the colour space the pixels are in. The sRGB
+  profile the recompressor builds for `--output-icc sRGB` has a fixed creation
+  date since v2.30.0 (13 Nov 2026), so the same derivative made on another day
+  carries the same bytes; before, the header held the moment it was built.
 
 ### The encode record
 
