@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.30.0_beta1](#v2300_beta1)** | 2026-11-13 | Pre-release. A file's metadata written by one ExifTool process (archiving about twice as fast); flags must be written in full; the History names the libjxl version; a PNG named `.jpg` refused by the lossless JPEG transcode |
+| **[v2.30.0](#v2300)** | 2026-11-15 | Everything in v2.30.0_beta1 (faster metadata writing, flags written in full, the libjxl version in the history); the wizard asks the scripts where each output goes; modes 6/7 of the decoder and the transcoder with an output folder land next to the library's own export folder; `--help` with its output in a file (round 83, 8 fixes) |
+| [v2.30.0_beta1](#v2300_beta1) | 2026-11-13 | Pre-release. A file's metadata written by one ExifTool process (archiving about twice as fast); flags must be written in full; the History names the libjxl version; a PNG named `.jpg` refused by the lossless JPEG transcode |
 | [v2.29.1](#v2291) | 2026-11-13 | The code the scripts share lives in one file, `jxl_photo_common.py` (a release is six files); yes/no answers read the same way on both wizard screens; the scripts' detail lines reach the log file; the delete gates' code reorganized and tested directly |
 | [v2.29.0_beta1](#v2290_beta1) | 2026-11-12 | Pre-release. The code the scripts share lives in one file, `jxl_photo_common.py`, which ships next to them: a release is six files that go together. No change in behaviour |
 | [v2.28.0](#v2280) | 2026-11-11 | A small Photoshop resource block of a TIFF comes back in the decoded TIFF; JPEG/PNG copies no longer carry the TIFF-tag markers; no copy is made of a camera TIFF's own thumbnail page; resized copies work in a folder named like `100%off` (round 80, 6 fixes) |
@@ -103,9 +104,71 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.30.0
+
+**Released 2026-11-15.** Supersedes v2.30.0_beta1; the last stable release
+before it is v2.29.1, and everything in [v2.30.0_beta1](#v2300_beta1) is in it.
+Since the beta: the wizard asks the scripts where each output goes, and eight
+fixes for unusual setups (round 83, #655–#662), most found by comparing the
+wizard's old answers with the scripts'. What to check:
+[upgrading.md](upgrading.md) (modes 6/7 of the decoder and the transcoder with
+an output folder).
+
+- **Changed, internal — the wizard asks the scripts where each output goes.**
+  Every script has `_planned_output(src, args)`, the path its run writes for a
+  source; each `main()` (and the transcoder's three commands) resolves through
+  it, and the wizard's file count and manifest collision check call it with
+  the command line that run gets (`_child_plan_args`), next to
+  `_planned_sources`, which already answered which files a run takes. The
+  transcoder has both now. The wizard's own copy of those rules (its resolver,
+  the rename, the jbrd recovery that keeps a JPEG's name, the folders each
+  script skips, the transcoder's walk) is gone. Compared on 8 340 cases
+  (`tools/verdicts.py`: hostile trees, every direction and conversion type,
+  single-file rows, renames, jbrd containers), the old and new answers differ
+  only in the five families of #655–#659 below.
+- **Fixed — modes 6/7 of the decoder and the transcoder with an output folder
+  (#660).** Given an output folder on the command line, or an explicit
+  Destination on a manifest row, they anchored the export marker on that
+  folder: with a folder above the library that matches the marker
+  (`Lightroom_Export`), the outputs went to `Lightroom_Export\16B_TIFF\<the
+  library's path>\…`. They now anchor on the input, as the encoder and the
+  recompressor do (#601's rule). A manifest row with an empty Destination, or
+  one equal to its Source, was never affected.
+- **Fixed — the wizard's delete preview and manifest check (#655–#659)** give
+  the scripts' own answers: a JPEG → JXL count no longer includes the
+  transcoder's own recovered JPEGs (`recovered_jpeg`, `jpeg_recovered`,
+  `converted`), which the run skips; a single file in modes 6/7 that the run
+  takes nothing from counts 0; a row whose Source is a file, with an empty
+  Destination, is checked as writing into that file's own folder (a JXL → JXL
+  row on a file next to a row on its folder — the file recompressed twice — is
+  now flagged); a rename left in an old preset is no longer applied to the
+  directions that never rename (TIFF → JXL, JXL → TIFF, JPEG → JXL), which could
+  refuse a manifest over a collision that did not exist; a file of another
+  format as a row's Source (a TIFF in a JXL → JXL manifest) is no longer
+  checked as if it wrote an output.
+- **Fixed — a script's output in a file or a pipe (#661, #662).** stdout and
+  stderr are UTF-8 from the first line of each script's `main()`
+  (`_utf8_console`), as the log console already was: `--help` redirected to a
+  file, a command-line error or one of the transcoder's first messages with a
+  character outside the Windows code page (a Japanese folder name in a
+  setting, a missing input path with Japanese in it) ended in a traceback, and
+  the em dash of every help came out as a cp1252 byte. The transcoder's
+  `--help` shows its `EXPORT_JPEG_FOLDER` setting, and a `%` in it (`100%off`)
+  raised an error (#662).
+- **Changed — the sRGB profile the recompressor builds** (`--output-icc sRGB`,
+  and the one it assigns to sources decoded without a profile) has a fixed
+  creation date, so a derivative made again on another day carries the same
+  `jxlphoto-iccprofile` bytes. The derivative's recipe is the label, never
+  these bytes: no derivative is re-derived for it
+  ([metadata_written.md](metadata_written.md#the-icc-copy-jxlphoto-iccprofile)).
+- Tests: `tests/test_where_outputs_go.py` (#655–#660, real dry runs for
+  #660), `tests/test_utf8_before_argparse.py` (#661, #662) and
+  `tests/test_generated_srgb_icc.py` (real codecs); each failed on
+  v2.30.0_beta1.
+
 ## v2.30.0_beta1
 
-**Pre-release, 2026-11-13.** The last stable release before it is v2.29.1. Faster
+**Pre-release, 2026-11-13.** Superseded by v2.30.0. The last stable release before it is v2.29.1. Faster
 metadata writing, a stricter command line, the libjxl version in each output's
 history, and three fixes; the files written are the same apart from that
 field. What to check: [upgrading.md](upgrading.md) (flags written in full, a

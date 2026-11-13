@@ -11,7 +11,7 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
-## v2.30.0: flags are written in full; a PNG named `.jpg` is refused
+## v2.30.0: flags are written in full; a PNG named `.jpg` is refused; modes 6/7 with an output folder
 
 - **A shortened flag is refused.** Python's command-line reader used to
   accept any unambiguous start of a flag: `--delete-so` worked as
@@ -31,6 +31,16 @@ Per-release notes: [version_history.md](version_history.md) and the
   logged a lossy JXL as `OK` (nothing was deleted). Rename it to its real
   extension, or use `--force-convert` to encode its pixels at the distance you
   choose.
+- **Modes 6/7 of the decoder and the JPEG transcoder, given an output
+  folder** (on the command line, or as an explicit Destination on a manifest
+  row): when a folder ABOVE your library matches the export marker
+  (`Lightroom_Export` and `C1_Export` end in `_Export`), earlier versions
+  wrote the outputs below that folder — `Lightroom_Export\16B_TIFF\<your
+  library's path>\…` — instead of next to the library's own `_EXPORT`. From
+  v2.30.0 they land where the encoder and the recompressor always put them.
+  If you ran such a command, look for such a folder. Rows with an empty
+  Destination, or one equal to their Source (what the wizard writes), were
+  never affected.
 
 ## v2.29.1 (and the v2.29.0_beta1 pre-release): the scripts need `jxl_photo_common.py` next to them
 

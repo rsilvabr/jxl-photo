@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.30.0_beta1** (2026-11-13, pre-release; last stable: [v2.29.1](docs/version_history.md#v2291)) · [What's new](#whats-new-in-v2300_beta1) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.30.0** (2026-11-15) · [What's new](#whats-new-in-v2300) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 **Windows program, no Python needed:** [jxl-photo-exe](https://github.com/rsilvabr/jxl-photo-exe/releases/latest) — unzip and double-click; cjxl/djxl, ExifTool, ImageMagick and jxl-thumb included.
 
@@ -201,17 +201,17 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## What's new in v2.30.0_beta1
+## What's new in v2.30.0
 
-2026-11-13, pre-release; the last stable release is [v2.29.1](docs/version_history.md#v2291).
+2026-11-15. The first stable release since v2.29.1; it includes the v2.30.0_beta1 pre-release.
 
 - **Faster**: each file's metadata is written by one ExifTool process instead of several, and archiving a TIFF takes about half the time it did (decoding one back, 10–25% less).
 - **Flags must be written in full**: a shortened flag such as `--work 4` is refused before anything runs. The wizard writes them in full; check your own `.bat` files ([upgrading](docs/upgrading.md)).
 - **Each output's history names the libjxl version that made it** (`… with libjxl 0.12.0`), next to the toolkit's version.
-- A PNG saved with a `.jpg` name is no longer turned into a lossy JXL by the lossless JPEG transcode: it is an error, and the file stays.
-- `python jxl_photo.py encode|decode|recompress|transcode …` runs a script directly, with the names of the Windows program.
+- The decoder and the JPEG transcoder, in modes 6/7 with an output folder, put their outputs next to the library's own export folder even when a folder like `Lightroom_Export` sits above it ([upgrading](docs/upgrading.md)).
+- Closes edge cases: a PNG named `.jpg` is refused by the lossless JPEG transcode; the wizard's delete preview and manifest check give the scripts' own answers; `--help` written to a file. `python jxl_photo.py encode|decode|recompress|transcode …` runs a script directly.
 
-[Technical notes](docs/version_history.md#v2300_beta1) · [earlier releases, in short](docs/whats_new.md) · [every release](docs/version_history.md#release-history)
+[Technical notes](docs/version_history.md#v2300) · [earlier releases, in short](docs/whats_new.md) · [every release](docs/version_history.md#release-history)
 
 ---
 
