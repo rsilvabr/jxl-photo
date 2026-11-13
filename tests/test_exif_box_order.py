@@ -4,7 +4,7 @@
 reorder_jxl_boxes moves the metadata boxes before the codestream (IrfanView
 stops reading there) but kept their relative order. Since v2.17.0 the
 encoder writes the source's XMP block in its own exiftool call BEFORE the
-EXIF (_preload_xmp_block, for the scanners' XMP), so every master from
+EXIF (_xmp_block_preload_args, for the scanners' XMP), so every master from
 v2.17.0 to v2.19.0 came out xml -> Exif, and IrfanView showed no EXIF for
 them (the owner checked three copies of one master: only the one with the
 Exif box moved first showed it). The reorder now puts Exif first in all

@@ -2644,8 +2644,8 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
     Args:
         strip_metadata: If True, strip all metadata (no EXIF/XMP preservation)
         xmp_preloaded: the source's XMP was already written into write_path
-            as a BLOCK (_preload_xmp_block), so this call must not copy
-            -xmp:all again — see _preload_xmp_block.
+            as a BLOCK (_xmp_block_preload_args), so this command must not
+            copy -xmp:all again — see _xmp_block_preload_args.
         distance: the distance this file was encoded at, for the encode record
             (None = CJXL_DISTANCE; a film scan can differ, see SCAN_DISTANCE).
 

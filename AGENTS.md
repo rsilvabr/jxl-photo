@@ -251,8 +251,9 @@
   bytes.
 - **The Exif box goes before the XMP box (#561)**, or IrfanView shows no
   EXIF. `reorder_jxl_boxes` (all three backends) sorts it first with
-  `_exif_box_rank` (parity-pinned); the encoder's `_preload_xmp_block`
-  writes the XMP before the EXIF, so without that sort every master comes
+  `_exif_box_rank` (parity-pinned); the encoder's XMP-block command
+  (`_xmp_block_preload_args`, first of its metadata writes) writes the XMP
+  before the EXIF, so without that sort every master comes
   out XMP → Exif (v2.17.0–v2.19.0 did). `--refresh-explorer-thumbnails`
   repairs existing files in place (`_move_exif_first`, status `REORDERED`).
   Any new path that writes boxes must keep that order. The Exif box must
