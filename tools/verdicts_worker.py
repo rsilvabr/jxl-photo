@@ -6,21 +6,30 @@ Imports jxl_photo.py from <code folder> and answers, for every count input
 (the trees and a few single files), direction, conversion type, mode and
 exclusion: _count_origin_files; and for every manifest the collisions and the
 cross_sink of _manifest_output_collisions."""
+import atexit
 import json
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
 
 code, trees, out = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
 sys.path.insert(0, str(code))
+# One scratch folder for the logs, the working directory and the config,
+# removed at exit (after leaving it as the working directory).
+_scratch = Path(tempfile.mkdtemp(prefix="f8_worker_"))
+atexit.register(shutil.rmtree, str(_scratch), True)
+atexit.register(os.chdir, str(Path(tempfile.gettempdir())))
+for _sub in ("logs", "cwd", "cfg"):
+    (_scratch / _sub).mkdir()
 os.environ["JXLPHOTO_SETTINGS"] = ""
 os.environ["JXLPHOTO_JXL_THUMB"] = "0"
-os.environ.setdefault("JXLPHOTO_LOG_DIR", tempfile.mkdtemp(prefix="f8_logs_"))
-os.chdir(tempfile.mkdtemp(prefix="f8_cwd_"))
+os.environ.setdefault("JXLPHOTO_LOG_DIR", str(_scratch / "logs"))
+os.chdir(_scratch / "cwd")
 import jxl_photo as wp  # noqa: E402
 
-cfg_path = Path(tempfile.mkdtemp(prefix="f8_cfg_")) / ".jxl_tools_config.json"
+cfg_path = _scratch / "cfg" / ".jxl_tools_config.json"
 wp.ConfigManager._get_config_path = lambda self: cfg_path
 cfg = wp.ConfigManager()
 menu = wp.InteractiveMenu(cfg, wp.DependencyChecker(cfg))
