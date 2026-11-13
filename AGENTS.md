@@ -152,14 +152,21 @@
   It sits next to the five scripts and ships with them: the exe's
   `scripts\`, `jxl-photo_LOCAL`, `tools/ui_tour.py`'s app folder.
 - What stays per script ON PURPOSE: each script's own logic (`main`,
-  `build_parser`, `process_group`, `convert_one`, `resolve_output`,
-  `setup_logger`, the finders, ...); `_derivative_metadata_args` (only the
-  recompressor rewrites the CreatorTool ICC for `--output-icc`),
+  `build_parser`, `process_group`, `convert_one`, `resolve_output`, the
+  encoder's and the transcoder's finders, ...); `_derivative_metadata_args`
+  (only the recompressor rewrites the CreatorTool ICC for `--output-icc`),
   `_cjxl_buffering_flag` (the transcoder's differs), `_would_skip`
-  (encoder-only since #638); `_abort_on_duplicate_outputs` (the transcoder's
-  copy differs in shape: `tests/test_helper_parity.py` pins the variants);
-  and `_import_common`, which loads the module. A helper that becomes
-  identical in two scripts goes to the common module, never into both.
+  (encoder-only since #638); and `_import_common`, which loads the module. A
+  helper that becomes identical in two scripts goes to the common module,
+  never into both. `setup_logger` is common (each script names its logger in
+  `_LOGGER_NAME`; the transcoder's last line says `Log:`,
+  `_LOG_SAVED_LABEL`), and so are the decoder's and the recompressor's JXL
+  finders (`_iter_jxls`, `find_jxls_mode6/7`: the `EXCLUDE_FOLDERS` filter
+  runs where the script has that setting) and `_abort_on_duplicate_outputs`.
+- The prose that explains a name the common module defines sits over its
+  definition THERE, once; a script keeps the bare binding (and its section
+  header). Prose about a setting or state that stays in the script stays
+  with it.
 - Each script loads the copy in ITS OWN folder (`_import_common`, the one
   helper every script keeps, parity-pinned) — never another copy found on
   `sys.path`: a test or a pre-fix proof loads scripts from another folder,

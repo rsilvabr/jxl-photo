@@ -653,6 +653,43 @@ _COLLAPSING_MODES = frozenset({2, 4, 5, 6, 7})
 _LONG_PATH_THRESHOLD = 240
 
 
+def _abort_on_duplicate_outputs(g, pairs):
+    """Abort the run if two outputs map to the same destination file.
+
+    Modes 6/7 drop the first subfolder level under EXPORT_MARKER, so same-named
+    files in different recipe subfolders would silently overwrite each other
+    (and with mode 8 + delete, a single validated output could justify deleting
+    several distinct sources). Better to stop loudly than to lose data.
+
+    pairs: list of (source_path, dest_path) tuples. Each child sees only its own
+    run: a clash between two manifest entries is the wrapper's to catch.
+    """
+    from collections import Counter, defaultdict
+    norm = {}
+    by_dest = defaultdict(list)
+    for src, dst in pairs:
+        norm.setdefault(os.path.normcase(str(dst)), str(dst))
+        by_dest[os.path.normcase(str(dst))].append(str(src))
+    counts = Counter(os.path.normcase(str(d)) for _, d in pairs)
+    dupes = sorted(norm[d] for d, c in counts.items() if c > 1)
+    if dupes:
+        for d in dupes[:10]:
+            srcs = by_dest[os.path.normcase(d)]
+            g.logger.error(f"Duplicate output destination: {d}")
+            for s in srcs[:4]:
+                g.logger.error(f"    <- from: {s}")
+            if len(srcs) > 4:
+                g.logger.error(f"    <- ... and {len(srcs) - 4} more source(s)")
+        if len(dupes) > 10:
+            g.logger.error(f"... and {len(dupes) - 10} more")
+        g.logger.error("Aborting: multiple inputs map to the same output file. "
+                       "Rename inputs, pick another mode/folder, or split the run to avoid silent overwrites.")
+        g.logger.error("  Hint: marker-anchored modes (6/7) drop ONE folder level under the marker, "
+                       "so nested marker folders (X/X/photo.tif and X/photo.tif) and same-named files "
+                       "in sibling recipe folders both collapse onto the same .jxl name.")
+        sys.exit(2)
+
+
 def _long_codec_paths(cmd):
     """`cmd` with every long absolute path argument of cjxl/djxl/jxlinfo given the
     Windows extended-length prefix (Windows only; otherwise unchanged)."""

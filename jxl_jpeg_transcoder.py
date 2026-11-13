@@ -767,40 +767,7 @@ _ORPHAN_TEMP_RE = re.compile(r"^(?:[0-9a-f]{32}_)+(?:repair_)?(.+?)(?:\.tmp)+$")
 def _sweep_orphan_temps(*a, **k): return _common._sweep_orphan_temps(_G, *a, **k)
 
 
-def _abort_on_duplicate_outputs(pairs):
-    """Abort the run if two outputs map to the same destination file.
-
-    Modes 6/7 drop the first subfolder level under EXPORT_MARKER, so same-named
-    files in different recipe subfolders would silently overwrite each other
-    (and with mode 8 + delete, a single validated output could justify deleting
-    several distinct sources). Better to stop loudly than to lose data.
-
-    pairs: list of (source_path, dest_path) tuples.
-    """
-    from collections import Counter, defaultdict
-    norm = {}
-    by_dest = defaultdict(list)
-    for src, dst in pairs:
-        norm.setdefault(os.path.normcase(str(dst)), str(dst))
-        by_dest[os.path.normcase(str(dst))].append(str(src))
-    counts = Counter(os.path.normcase(str(out)) for _, out in pairs)
-    dupes = sorted(norm[d] for d, c in counts.items() if c > 1)
-    if dupes:
-        for d in dupes[:10]:
-            srcs = by_dest[os.path.normcase(d)]
-            logger.error(f"Duplicate output destination: {d}")
-            for s in srcs[:4]:
-                logger.error(f"    <- from: {s}")
-            if len(srcs) > 4:
-                logger.error(f"    <- ... and {len(srcs) - 4} more source(s)")
-        if len(dupes) > 10:
-            logger.error(f"... and {len(dupes) - 10} more")
-        logger.error("Aborting: multiple inputs map to the same output file. "
-                     "Rename inputs, pick another mode/folder, or split the run to avoid silent overwrites.")
-        logger.error("  Hint: marker-anchored modes (6/7) drop ONE folder level under the marker, "
-                     "so nested marker folders (X/X/photo.tif and X/photo.tif) and same-named files "
-                     "in sibling recipe folders both collapse onto the same .jxl name.")
-        sys.exit(2)
+def _abort_on_duplicate_outputs(*a, **k): return _common._abort_on_duplicate_outputs(_G, *a, **k)
 
 _argfile_safe = _common._argfile_safe
 

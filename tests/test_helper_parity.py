@@ -1,9 +1,8 @@
 """The helpers the scripts share live ONCE, in jxl_photo_common.py (see
 AGENTS.md, "The common module"; tests/test_common_module.py guards that). What
 is left here is what still exists in more than one script on purpose:
-`_import_common`, which loads the common module and so cannot live in it, and
-the variants of a few helpers whose copies differ in shape but not in what
-they do. A bug fixed in one copy has to be fixed in all of them.
+`_import_common`, which loads the common module and so cannot live in it —
+nothing else. A bug fixed in one copy has to be fixed in all of them.
 
 This test enforces it. Each helper is compared across every script that defines
 it, on normalised AST — docstrings dropped, comments and formatting invisible to
@@ -40,8 +39,6 @@ SHARED_HELPERS = [
     # The one helper that cannot live in jxl_photo_common.py: it LOADS it (the
     # copy next to the script, refused when its version differs).
     "_import_common",
-    # Pinned by shape below (PINNED_VARIANTS): the transcoder's copy differs.
-    "_abort_on_duplicate_outputs",
 ]
 
 # DELIBERATE divergences — do NOT add these to SHARED_HELPERS:
@@ -59,24 +56,9 @@ SHARED_HELPERS = [
 #                              transcoder :2773 AND :4516). Pinning by name is
 #                              ambiguous; hoisting would be needed first.
 #
-# Two helpers are semantically equivalent across their copies but structurally
-# different, so normalisation cannot fold them together:
-#
-#   _abort_on_duplicate_outputs the encoder/decoder reuse one loop name where
-#                               the transcoder uses two.
-#
-# Semantic equivalence is undecidable in general, so instead of asserting these
-# agree, their current normalised forms are pinned. Any edit to any copy flips a
-# hash and fails the test — which is the point: you then re-check by hand that
-# the copies still behave alike and update the baseline in the same commit.
-PINNED_VARIANTS: dict[str, dict[str, str]] = {
-    "_abort_on_duplicate_outputs": {
-        "jxl_tiff_encoder.py": "a80bdc7535cacaad",
-        "jxl_tiff_decoder.py": "a80bdc7535cacaad",
-        "jxl_jpeg_transcoder.py": "2125e8023e27b0bf",
-        "jxl_recompressor.py": "a80bdc7535cacaad",
-    },
-}
+# A helper whose copies are equivalent but structurally different (one loop
+# name more) cannot be compared here: it goes to jxl_photo_common.py, one copy
+# (_abort_on_duplicate_outputs did in the python-refactor work, F4.4).
 
 
 def _bound_names(fn: ast.FunctionDef) -> set[str]:
@@ -190,28 +172,7 @@ def _collect() -> dict[str, dict[str, str]]:
 COPIES = _collect()
 
 
-@pytest.mark.parametrize("helper", sorted(PINNED_VARIANTS))
-def test_known_equivalent_variants_are_unchanged(helper: str) -> None:
-    """These copies are equivalent but not structurally identical, so their
-    shapes are pinned instead of compared. A flipped hash means someone edited
-    one copy: re-check the others by hand, then update PINNED_VARIANTS."""
-    expected = PINNED_VARIANTS[helper]
-    actual = {
-        script: hashlib.sha256(norm.encode()).hexdigest()[:16]
-        for script, norm in COPIES[helper].items()
-    }
-    assert actual == expected, (
-        f"{helper}() changed in a pinned copy.\n"
-        f"  expected: {expected}\n"
-        f"  actual:   {actual}\n"
-        f"Confirm every copy still behaves the same, then update "
-        f"PINNED_VARIANTS in this file."
-    )
-
-
-@pytest.mark.parametrize(
-    "helper", [h for h in SHARED_HELPERS if h not in PINNED_VARIANTS]
-)
+@pytest.mark.parametrize("helper", SHARED_HELPERS)
 def test_duplicated_helper_copies_agree(helper: str) -> None:
     copies = COPIES[helper]
     assert len(copies) >= 2, (
