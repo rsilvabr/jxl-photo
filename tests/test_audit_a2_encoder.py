@@ -179,6 +179,33 @@ def test_eb_cap_counts_python_buffers(tmp_path, monkeypatch):
 
 
 @real
+def test_eb_cap_budgets_a_four_channel_page_higher(tmp_path, monkeypatch):
+    """Review V5 of the refactor: with the PNG at zlib level 0, a 16-bit page
+    of 4 channels (an RGB+IR scan) holds ~24 B/px in Python, above the
+    3-channel budget; the cap gets the per-channel figure."""
+    src = tmp_path / HOSTILE / "SCAN (2)"
+    src.mkdir(parents=True)
+    rgbi = np.concatenate([_gradient(), _gradient()[..., :1]], axis=-1)
+    tifffile.imwrite(str(src / "scan [ir].tif"), rgbi, photometric="rgb", extrasamples=[0])
+    seen = {}
+    real_cap = enc._memory_capped_workers
+
+    def spy(*a, **k):
+        seen.update(k)
+        return real_cap(*a, **k)
+    monkeypatch.setattr(enc, "_memory_capped_workers", spy)
+    monkeypatch.setattr(sys, "argv", ["jxl_tiff_encoder.py", str(src),
+                                      str(tmp_path / HOSTILE / "16B_JXL"), "--mode", "0",
+                                      "--distance", "0", "--effort", "3", "--no-preflight"])
+    try:
+        enc.main()
+    except SystemExit:
+        pass
+    assert enc._python_bytes_per_pixel(3) == enc._PYTHON_BYTES_PER_PIXEL
+    assert seen.get("extra_bytes_per_pixel") == enc._python_bytes_per_pixel(4) == 26, seen
+
+
+@real
 def test_eb_uint16_page_not_copied(tmp_path, monkeypatch):
     """A 16-bit page reaches the PNG writer without a uint16 -> uint16 copy."""
     src = tmp_path / HOSTILE / "TIFF16 (2)"

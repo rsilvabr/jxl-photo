@@ -346,6 +346,15 @@ _UNKNOWN_IMAGE_PIXELS = 60_000_000
 _PYTHON_BYTES_PER_PIXEL = 19
 
 
+def _python_bytes_per_pixel(channels: int) -> int:
+    """What each worker holds in Python per pixel for a page of `channels`
+    samples: _PYTHON_BYTES_PER_PIXEL was measured on 3-channel pages, and
+    the page array and the PNG for cjxl both grow with the channels. With
+    the PNG at zlib level 0 (refactor B2) a 16-bit page of 4 channels (RGB+IR
+    or RGBA) peaks at ~24.1 B/px, above the 3-channel 19 (review V5)."""
+    return math.ceil(_PYTHON_BYTES_PER_PIXEL * max(1, int(channels or 3)) / 3)
+
+
 _cjxl_whole_image = _common._cjxl_whole_image
 
 
@@ -2643,9 +2652,11 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
 
     Args:
         strip_metadata: If True, strip all metadata (no EXIF/XMP preservation)
-        xmp_preloaded: the source's XMP was already written into write_path
-            as a BLOCK (_xmp_block_preload_args), so this command must not
-            copy -xmp:all again — see _xmp_block_preload_args.
+        xmp_preloaded: the source's XMP is written into write_path as a BLOCK
+            (_xmp_block_preload_args) by the command that runs just before
+            this one, in the same batch, so this command must not copy
+            -xmp:all again — see _xmp_block_preload_args. Nothing here reads
+            write_path.
         distance: the distance this file was encoded at, for the encode record
             (None = CJXL_DISTANCE; a film scan can differ, see SCAN_DISTANCE).
 
@@ -2870,6 +2881,7 @@ def make_png_bytes(img, icc_bytes=None):
     # 16-bit photo data barely compresses (5.93 vs 6.00 bytes per pixel on a
     # 43 MP Z8 export) while level 1 cost 6.55 s of Python per file against
     # 0.40 s; peak memory 11.97 vs 12.12 B/px, inside _PYTHON_BYTES_PER_PIXEL
+    # (a page of 4 channels peaks higher: _python_bytes_per_pixel)
     # (refactor B2, measured 2026-11-13).
     comp = zlib.compressobj(0)
     idat = []
@@ -3232,6 +3244,9 @@ def _log_eight_bit_at_other_distance(paths, done: bool) -> None:
 # (normcase(tiff path), page index) -> width*height, filled by
 # _analyze_tiff_pages for the worker memory cap (process_group).
 _PAGE_PIXELS = {}
+# The same key -> samples per pixel, for the Python side of that cap
+# (_python_bytes_per_pixel).
+_PAGE_CHANNELS = {}
 _PAGE_PIXELS_LOCK = threading.Lock()
 
 
@@ -3317,6 +3332,8 @@ def _analyze_tiff_pages(tiff_path: Path):
                 _px = 0
             with _PAGE_PIXELS_LOCK:
                 _PAGE_PIXELS[(os.path.normcase(str(tiff_path)), i)] = _px
+                _PAGE_CHANNELS[(os.path.normcase(str(tiff_path)), i)] = int(
+                    page.samplesperpixel or 3)
             if _is_thumbnail_page(page):
                 thumb_pages.append(i)
             else:
@@ -4920,6 +4937,7 @@ def convert_multipage(tiff_path: Path, output_dir: Path, mode: int = 0) -> list:
                     _px = 0
                 with _PAGE_PIXELS_LOCK:
                     _PAGE_PIXELS[(os.path.normcase(str(tiff_path)), 0)] = _px
+                    _PAGE_CHANNELS[(os.path.normcase(str(tiff_path)), 0)] = samples
                 # Counting the IFD chain only follows offsets (no pixel decode),
                 # and this is the ONLY place that can tell the user pages are
                 # being dropped: "ignore" encodes page 0 and discards the rest,
@@ -5446,7 +5464,9 @@ def process_group(group_items: list, workers: int, mode: int = 0):
                 for t in tasks),
             _budget_d, CJXL_EFFORT, CJXL_BUFFERING,
             modular=bool(CJXL_MODULAR),
-            extra_bytes_per_pixel=_PYTHON_BYTES_PER_PIXEL)
+            extra_bytes_per_pixel=_python_bytes_per_pixel(max(
+                _PAGE_CHANNELS.get((os.path.normcase(str(t[0])), t[3]), 3)
+                for t in tasks)))
     for _t in tasks:
         _record_source_identity(_t[0])      # X2: before anything reads it
     with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -6739,6 +6759,7 @@ def main():
     for _gname, _gvalue in _RUN_DEFAULTS.items():
         globals()[_gname] = _gvalue
     _PAGE_PIXELS.clear()
+    _PAGE_CHANNELS.clear()
 
     # ICC cache override and clearing must be processed before any logging or conversion.
     if args.icc_cache_dir is not None:

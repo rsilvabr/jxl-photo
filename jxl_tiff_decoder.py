@@ -4861,11 +4861,14 @@ def _find_sources(args):
 
 
 def _planned_sources(args, read_markers=True) -> list:
-    """The JXLs a run with these arguments takes (_find_sources): what the
-    wrapper counts and scans before a run, asking this script instead of
-    copying its rules (refactor C1). Needs args.input, args.output and
-    args.mode; the marker and folder settings are this module's globals.
-    read_markers: the recompressor's switch; this list reads no marker."""
+    """The JXLs this script's finders give for these arguments (_find_sources):
+    what the wrapper counts and scans before a run, asking this script
+    instead of copying its rules (refactor C1). The run leaves out the
+    derivatives of modes 6/7 later, by their markers (#602); this list still
+    holds them, as the wrapper's count always did. Needs args.input,
+    args.output and args.mode; the marker and folder settings are this
+    module's globals. read_markers: the recompressor's switch; this list
+    reads no marker."""
     return list(_find_sources(args)[1])
 
 

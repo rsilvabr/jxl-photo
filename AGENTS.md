@@ -365,8 +365,8 @@
   `strict=True` when a non-zero exit with output still counts as unread;
   `progress=False` for a reader with its own progress lines). A new batch
   reader uses it: `tests/test_batch_stall.py` fails on one that loops on
-  its own. `AI_tools/python-refactor_proofs/f7/batch_equivalence.py` runs
-  every reader old against new on the same fake exiftool answers.
+  its own. `python tools/batch_equivalence.py <old rev> <new rev|WORKTREE>`
+  runs every reader old against new on the same fake exiftool answers.
 - **Per-file exiftool calls use `EXIFTOOL_TIMEOUT`** (each script defines it
   as its codec timeout), never a literal: a 60/120 s limit turned twelve good
   45 MP files into errors under a 17-worker load on 2026-10-06. Only the
@@ -391,7 +391,10 @@
   block before the edits, `-wm cg`, a clear before a `+=`) stays a separate
   COMMAND, which no longer costs a process. The encoder's PNG for cjxl is
   zlib level 0 (B2: 16-bit photo data barely compresses; 6.55 s → 0.40 s of
-  Python per 43 MP file, same peak memory).
+  Python per 43 MP file). Peak Python memory per pixel is the same for an
+  RGB page and ~1.3–2.9 B/px higher for a 16-bit page of 4 channels (RGB+IR,
+  RGBA), where the level-1 PNG used to shrink; `_PYTHON_BYTES_PER_PIXEL`
+  budgets per channel (review V5).
 - **Worker memory cap**: the encoder caps `--workers`
   (`_memory_capped_workers`, parity-pinned with the recompressor's unused
   copy). The recompressor caps the full-size cjxl instead
@@ -455,8 +458,9 @@
   change there needs the matching child rule): WHERE an output goes in modes
   0/1/2/8 with the rename and the jbrd-keeps-its-name rule, a file Source row,
   and the transcoder's whole walk (it has no `_planned_sources` yet).
-  `AI_tools/python-refactor_proofs/f8/verdicts.py` compares the wrapper's
-  counts and collisions of two versions on hostile trees.
+  `python tools/verdicts.py <old rev> <new rev|WORKTREE>` compares the
+  wrapper's counts and collisions of two versions on hostile trees (each
+  version in its own process, `tools/verdicts_worker.py`).
 - **The modes 6/7 anchor** is `_marker_anchor_index` (#601, parity-pinned in
   the four backends, used by the wrapper's collision walk): the first marker
   match at or below the input root, else the closest one above; a path not
@@ -591,7 +595,8 @@
   (`_child_flags`): every caller of `_flags_request_delete` /
   `_flags_set_mode` / `_append_expert_flags` passes the direction
   (`tests/test_flags_ask_the_child.py`), and reading the tokens is only the
-  fallback when the child cannot be imported — it errs towards "deletes".
+  fallback when the child cannot be imported — it reads the exact spellings
+  (since v2.30.0 every child refuses an abbreviation).
   Never re-implement argparse's rules (abbreviations, spellings) in the
   wrapper again: six bugs came from that copy.
 - **The UI layer** (`UI`, `PlainUI`, `RichUI`, `ScriptedUI`) asks by

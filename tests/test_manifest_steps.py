@@ -4,9 +4,13 @@ _execute_manifest_workflow refuses or asks before the first child for six
 reasons that only a whole manifest shows: a bit-exact JPEG recovery asked to
 resize or rename (a _GATE_RULES rule), a mode-7 row whose subfolder cannot be
 told, a bad output folder name, two Sources that overlap, two rows writing
-the same output, and one row's output being another row's Source. Each one
-is pinned here: what it refuses unattended, what an attended "no" does, and
-which message comes first when a manifest has two problems.
+the same output, and one row's output being another row's Source. Pinned
+here: the recovery rule, the mode-7 subfolder, the Source overlap and the
+output-feeds-Source step (what each refuses unattended, what an attended
+"no" does) and two orders (the recovery rule before the overlap, the overlap
+before the chain). The output folder name and the collision steps are pinned
+by their older tests (tests/test_round33_lows.py,
+tests/test_audit_rounds_19_20.py).
 
 Every folder is hostile (Japanese, brackets, a space, %): these steps compare
 paths.

@@ -6,7 +6,8 @@ _flags_request_delete and _flags_set_mode used to imitate argparse by hand
 tracker were that copy drifting from the real thing (#210, #263, #457, #518,
 #603, #604). With the direction known they now read the child's build_parser()
 parse (_child_flags); the token reading stays only as the fallback when the
-child cannot be imported, where it errs towards "this deletes".
+child cannot be imported, where it reads the exact spellings (since v2.30.0
+every child refuses an abbreviation, so neither can delete anything).
 
 One table, both implementations: CHILD is what the child's argparse does,
 TOKENS what the fallback answers. Since v2.30.0 (allow_abbrev=False) they
