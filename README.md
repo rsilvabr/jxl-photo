@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.30.0** (2026-11-15) · [What's new](#whats-new-in-v2300) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.30.0** (2026-11-13) · [What's new](#whats-new-in-v2300) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 **Windows program, no Python needed:** [jxl-photo-exe](https://github.com/rsilvabr/jxl-photo-exe/releases/latest) — unzip and double-click; cjxl/djxl, ExifTool, ImageMagick and jxl-thumb included.
 
@@ -203,7 +203,7 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ## What's new in v2.30.0
 
-2026-11-15. The first stable release since v2.29.1; it includes the v2.30.0_beta1 pre-release.
+2026-11-13. The first stable release since v2.29.1; it includes the v2.30.0_beta1 pre-release.
 
 - **Faster**: each file's metadata is written by one ExifTool process instead of several, and archiving a TIFF takes about half the time it did (decoding one back, 10–25% less).
 - **Flags must be written in full**: a shortened flag such as `--work 4` is refused before anything runs. The wizard writes them in full; check your own `.bat` files ([upgrading](docs/upgrading.md)).

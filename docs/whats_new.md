@@ -10,7 +10,7 @@ as [GitHub Releases](https://github.com/rsilvabr/jxl-photo/releases).
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.30.0](version_history.md#v2300)** | 2026-11-15 | Faster metadata writing; flags must be written in full; the history names the libjxl version; modes 6/7 of the decoder and the transcoder with an output folder land next to the library's own export folder |
+| **[v2.30.0](version_history.md#v2300)** | 2026-11-13 | Faster metadata writing; flags must be written in full; the history names the libjxl version; modes 6/7 of the decoder and the transcoder with an output folder land next to the library's own export folder |
 | [v2.30.0_beta1](version_history.md#v2300_beta1) | 2026-11-13 | Pre-release. Faster metadata writing; flags must be written in full; the history names the libjxl version; a PNG named `.jpg` is refused by the lossless JPEG transcode |
 | [v2.29.1](version_history.md#v2291) | 2026-11-13 | A release is six files that go together; yes/no answers read the same way on both wizard screens; the scripts' detail lines reach the log file |
 | [v2.29.0_beta1](version_history.md#v2290_beta1) | 2026-11-12 | Pre-release. A release is six files that go together: the five scripts and `jxl_photo_common.py`, the code they share; nothing changes in what they do |
@@ -38,7 +38,7 @@ Every release since v1.0: [version_history.md](version_history.md#release-histor
 
 ## v2.30.0
 
-2026-11-15. The first stable release since v2.29.1; it includes the v2.30.0_beta1 pre-release.
+2026-11-13. The first stable release since v2.29.1; it includes the v2.30.0_beta1 pre-release.
 
 - **Faster**: each file's metadata is written by one ExifTool process instead of several, and archiving a TIFF takes about half the time it did (decoding one back, 10–25% less).
 - **Flags must be written in full**: a shortened flag such as `--work 4` is refused before anything runs. The wizard writes them in full; check your own `.bat` files ([upgrading](upgrading.md)).

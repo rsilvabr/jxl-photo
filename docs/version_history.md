@@ -14,7 +14,7 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.30.0](#v2300)** | 2026-11-15 | Everything in v2.30.0_beta1 (faster metadata writing, flags written in full, the libjxl version in the history); the wizard asks the scripts where each output goes; modes 6/7 of the decoder and the transcoder with an output folder land next to the library's own export folder; `--help` with its output in a file (round 83, 8 fixes) |
+| **[v2.30.0](#v2300)** | 2026-11-13 | Everything in v2.30.0_beta1 (faster metadata writing, flags written in full, the libjxl version in the history); the wizard asks the scripts where each output goes; modes 6/7 of the decoder and the transcoder with an output folder land next to the library's own export folder; `--help` with its output in a file (round 83, 8 fixes) |
 | [v2.30.0_beta1](#v2300_beta1) | 2026-11-13 | Pre-release. A file's metadata written by one ExifTool process (archiving about twice as fast); flags must be written in full; the History names the libjxl version; a PNG named `.jpg` refused by the lossless JPEG transcode |
 | [v2.29.1](#v2291) | 2026-11-13 | The code the scripts share lives in one file, `jxl_photo_common.py` (a release is six files); yes/no answers read the same way on both wizard screens; the scripts' detail lines reach the log file; the delete gates' code reorganized and tested directly |
 | [v2.29.0_beta1](#v2290_beta1) | 2026-11-12 | Pre-release. The code the scripts share lives in one file, `jxl_photo_common.py`, which ships next to them: a release is six files that go together. No change in behaviour |
@@ -106,7 +106,7 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ## v2.30.0
 
-**Released 2026-11-15.** Supersedes v2.30.0_beta1; the last stable release
+**Released 2026-11-13.** Supersedes v2.30.0_beta1; the last stable release
 before it is v2.29.1, and everything in [v2.30.0_beta1](#v2300_beta1) is in it.
 Since the beta: the wizard asks the scripts where each output goes, and eight
 fixes for unusual setups (round 83, #655–#662), most found by comparing the
