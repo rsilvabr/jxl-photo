@@ -1997,6 +1997,175 @@ def find_jxls_mode7(g, input_path):
     return sorted(filtered)
 
 
+# === Several exiftool commands in one process ===
+
+
+def _split_by_marker(text, tag, n):
+    """[(status, text)] of `n` commands from one stream of
+    _exiftool_one_process: what a command printed is what came before its
+    marker and after the previous one. A command without its marker keeps
+    (-1, "")."""
+    parts = [(-1, "") for _ in range(n)]
+    rx = re.compile(re.escape(tag) + r" (\d+) (-?\d+)\}")
+    pending = []
+    for line in (text or "").split("\n"):
+        m = rx.fullmatch(line.strip())
+        if m and int(m.group(1)) < n:
+            parts[int(m.group(1))] = (int(m.group(2)), "".join(pending))
+            pending = []
+        else:
+            pending.append(line + "\n")
+    return parts
+
+
+def _argfile_command(g, path):
+    """The argument lines of an argfile written for one exiftool call (the
+    charset lines it starts with are added again per command)."""
+    text = Path(path).read_text(encoding="utf-8")
+    if text.startswith(g._ARGFILE_CHARSET):
+        text = text[len(g._ARGFILE_CHARSET):]
+    return [ln for ln in text.split("\n") if ln != ""]
+
+
+def _exiftool_one_process(g, commands, timeout):
+    """Run the commands in ONE exiftool process (`-execute` between them):
+    [CompletedProcess] in command order, each with its own exit status
+    (`-echo3`/`-echo4` markers carrying `${status}`, exiftool 12.15 or later),
+    stdout and stderr. FAIL-CLOSED: a command whose marker is missing or
+    carries no number has status -1. Each command starts with the charset
+    lines (and -m where the script has EXIFTOOL_IGNORE_MINOR on), like a
+    _run_exiftool_argfile call of its own."""
+    tag = "{jxlphoto" + uuid.uuid4().hex[:12]
+    head = g._ARGFILE_CHARSET.rstrip("\n").split("\n")
+    if _script_get(g, "EXIFTOOL_IGNORE_MINOR"):
+        head = head + ["-m"]
+    lines = []
+    for i, cmd in enumerate(commands):
+        if i:
+            lines.append("-execute")
+        marker = f"{tag} {i} " + "${status}}"
+        lines += head + [str(a) for a in cmd] + ["-echo3", marker, "-echo4", marker]
+    argfile = None
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
+                                         dir=g.TEMP_DIR, encoding="utf-8", newline="\n") as af:
+            argfile = af.name
+            af.write("\n".join(lines) + "\n")
+        r = g._run_captured([g._get_exiftool_cmd(), "-@", argfile], timeout, text=True)
+    finally:
+        if argfile:
+            try:
+                os.unlink(argfile)
+            except OSError:
+                pass
+    outs = _split_by_marker(r.stdout, tag, len(commands))
+    errs = _split_by_marker(r.stderr, tag, len(commands))
+    results = []
+    for cmd, (s_out, t_out), (s_err, t_err) in zip(commands, outs, errs):
+        status = s_out if s_out == s_err else -1
+        results.append(subprocess.CompletedProcess(cmd, status, t_out, t_err))
+    return results
+
+
+def _exiftool_batch_ok(g) -> bool:
+    """True when several exiftool commands may share one process: the
+    script's own runners are in place (a test that replaces
+    _run_exiftool_argfile or _run_captured sees every command on its own,
+    as before) and this exiftool reports the status of each command
+    (`${status}`, 12.15 or later). Asked once per run and per exiftool:
+    one start, in g._EXIFTOOL_BATCH."""
+    own = _script_get(g, "__name__")
+    for name in ("_run_exiftool_argfile", "_run_captured"):
+        if getattr(_script_get(g, name), "__module__", None) != own:
+            return False
+    state = _script_get(g, "_EXIFTOOL_BATCH")
+    if state is None:
+        return False
+    exe = g._get_exiftool_cmd()
+    if exe not in state:
+        try:
+            r = _exiftool_one_process(g, [["-ver"]], 60)[0]
+            state[exe] = r.returncode == 0 and bool(r.stdout.strip())
+        except Exception:
+            state[exe] = False
+    return state[exe]
+
+
+def _exiftool_commands(g, commands, timeout=60, stop_at_failure=True):
+    """Run exiftool commands in order: [CompletedProcess], each with its own
+    exit status, stdout and stderr. A command is a list of argument lines
+    (run like _run_exiftool_argfile) or the Path of an argfile written for
+    one call (run like `exiftool -@ <file>`).
+
+    ONE process when _exiftool_batch_ok: every command runs, even after one
+    that failed (a caller that raises at the first failure drops the file,
+    so what the later ones did is never kept). Otherwise one process per
+    command, exactly as before: stopping at the first that fails, or
+    running them all with stop_at_failure=False (a caller whose old calls
+    never stopped, the decoder's copy_metadata)."""
+    if len(commands) > 1 and _exiftool_batch_ok(g):
+        lines = [_argfile_command(g, c) if isinstance(c, Path) else list(c) for c in commands]
+        return _exiftool_one_process(g, lines, timeout * len(commands))
+    results = []
+    for cmd in commands:
+        if isinstance(cmd, Path):
+            r = g._run_captured([g._get_exiftool_cmd(), "-@", str(cmd)], timeout, text=True)
+        else:
+            r = g._run_exiftool_argfile(cmd, timeout=timeout)
+        results.append(r)
+        if r.returncode != 0 and stop_at_failure:
+            break
+    return results
+
+
+def _prefetched_result(g, args_lines):
+    """The kept result of exactly this command for this thread (used once),
+    or None."""
+    local = _script_get(g, "_EXIFTOOL_PREFETCH")
+    kept = getattr(local, "results", None)
+    if not kept:
+        return None
+    return kept.pop(tuple(str(a) for a in args_lines), None)
+
+
+def _prefetch_exiftool_reads(g, commands, timeout):
+    """Run READ-ONLY exiftool commands now, in one process (when
+    _exiftool_batch_ok), and keep their results for this thread: each
+    reader's own _run_exiftool_argfile call with the same arguments is then
+    answered without starting exiftool. A reader whose arguments differ runs
+    as before, so this can only change the speed. Never a command that
+    writes (an `-o` extraction run twice fails); the files read must not
+    change before the readers run. _clear_exiftool_prefetch drops what is
+    left."""
+    local = _script_get(g, "_EXIFTOOL_PREFETCH")
+    if local is None:
+        return
+    local.results = {}
+    if len(commands) < 2 or not _exiftool_batch_ok(g):
+        return
+    results = _exiftool_one_process(g, [list(c) for c in commands],
+                                    timeout * len(commands))
+    local.results = {tuple(str(a) for a in c): r for c, r in zip(commands, results)}
+
+
+def _clear_exiftool_prefetch(g):
+    """Drop this thread's kept results (_prefetch_exiftool_reads)."""
+    local = _script_get(g, "_EXIFTOOL_PREFETCH")
+    if local is not None:
+        local.results = {}
+
+
+def _run_exiftool_writes(g, writes, timeout):
+    """Run the writes, (command, what its failure says, how many characters
+    of the output it quotes), in order (_exiftool_commands), and raise
+    RuntimeError at the first that failed with the message its own call
+    always raised."""
+    results = _exiftool_commands(g, [w[0] for w in writes], timeout)
+    for (_cmd, prefix, n), r in zip(writes, results):
+        if r.returncode != 0:
+            raise RuntimeError(f"{prefix}{(r.stderr or r.stdout or 'no output')[:n].strip()}")
+
+
 # === Settings overlay ===
 
 
@@ -2724,14 +2893,19 @@ def _xmp_block_args(g, path, tmp_dir) -> list:
     return [f"-XMP<={xmp}"]
 
 
+def _origin_read_args(path):
+    """The exiftool command _read_origin_inputs runs (and a prefetch may run
+    for it)."""
+    return ["-j", "-XMP-dc:Relation", "-XMP-dc:Description", "-EXIF:Software",
+            "-XMP-xmpMM:HistoryParameters", str(path)]
+
+
 def _read_origin_inputs(g, path):
     """(dc:Relation tokens, has_record) of an INPUT file, for
     _origin_for_output. tokens is None when exiftool could not read the file:
     the caller then writes no origin (unknown is never guessed)."""
     try:
-        r = g._run_exiftool_argfile(
-            ["-j", "-XMP-dc:Relation", "-XMP-dc:Description", "-EXIF:Software",
-             "-XMP-xmpMM:HistoryParameters", str(path)], timeout=g.EXIFTOOL_TIMEOUT)
+        r = g._run_exiftool_argfile(_origin_read_args(path), timeout=g.EXIFTOOL_TIMEOUT)
         if r.returncode != 0 or not r.stdout:
             return None, False
         data = json.loads(r.stdout)
@@ -3287,7 +3461,9 @@ def _get_cjxl_cmd(g):
 
 
 def _run_exiftool_argfile(g, args_lines, timeout=60):
-    """Run exiftool with an argfile (UTF-8 + FileName charset).
+    """Run exiftool with an argfile (UTF-8 + FileName charset). A read this
+    thread prefetched with exactly these arguments (_prefetch_exiftool_reads)
+    is answered from there, without starting exiftool.
 
     Using an argfile instead of raw argv avoids two Windows pitfalls:
     paths containing [ ] being treated as wildcards, and non-ASCII paths
@@ -3295,6 +3471,9 @@ def _run_exiftool_argfile(g, args_lines, timeout=60):
     Returns the CompletedProcess (stdout/stderr decoded as UTF-8, captured
     through temp files — see _run_captured).
     """
+    kept = _prefetched_result(g, args_lines)
+    if kept is not None:
+        return kept
     argfile = None
     try:
         with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,

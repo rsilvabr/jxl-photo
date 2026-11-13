@@ -309,6 +309,9 @@ def _guard_refusal_hint(*a, **k): return _common._guard_refusal_hint(_G, *a, **k
 # - UTF8: tag VALUES read/written are UTF-8, so non-ASCII metadata (captions,
 #   CreatorTool, Relation items) round-trips without codepage corruption.
 _ARGFILE_CHARSET = "-charset\nFileName=UTF8\n-charset\nUTF8\n"
+# Does this exiftool run several commands in one process with a status
+# each? {exiftool command: bool}, asked once (_exiftool_batch_ok).
+_EXIFTOOL_BATCH = {}
 
 
 # Captured at import: some tests replace this module's `subprocess` with a stub.
@@ -347,6 +350,9 @@ def _xmp_block_args(*a, **k): return _common._xmp_block_args(_G, *a, **k)
 
 
 def _run_exiftool_argfile(*a, **k): return _common._run_exiftool_argfile(_G, *a, **k)
+
+
+def _exiftool_commands(*a, **k): return _common._exiftool_commands(_G, *a, **k)
 
 
 def _check_external_tools(dry_run: bool = False) -> None:
@@ -1825,67 +1831,63 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
         # A '%' in the JXL's name would be expanded by -tagsfromfile and
         # the TIFF would get no metadata at all (#550).
         _src = _exiftool_source(jxl_path, tmp_dir)
-        # #623: a codestream orientation is already applied to the decoded
-        # pixels: the EXIF Orientation copied from the Exif box is reset to 1.
-        r_exif = _run_exiftool_argfile(
+        # Two exiftool processes per TIFF (refactor F6): first the copies, the
+        # IFD1 clean-ups and the three reads the clean-ups below decide from
+        # (they read tags no clean-up touches, so reading them before the
+        # clean-ups gives the same answers); then those clean-ups. Each
+        # command keeps its own verdict, and a failed one never stops the
+        # next — as when each was a call of its own.
+        first = [
+            # #623: a codestream orientation is already applied to the decoded
+            # pixels: the EXIF Orientation copied from the Exif box is reset to 1.
             ["-overwrite_original", "-tagsfromfile", _src, "-exif:all"]
             + _orientation_reset_args(jxl_path) + [str(tiff_path)],
-            timeout=EXIFTOOL_TIMEOUT
-        )
-        # The XMP as a BLOCK (-XMP), not field by field (-xmp:all): the field
-        # copy carries only what exiftool can WRITE and dropped a namespace it
-        # can merely read — SilverFast's IR/iSRD settings, without which the
-        # decoded scan is not recognised as having an IR channel. Nothing in
-        # this call edits an XMP field (a block plus edits in one call ignores
-        # the edits); the marker clean-up below runs in calls of its own.
-        r_xmp = _run_exiftool_argfile(
+            # The XMP as a BLOCK (-XMP), not field by field (-xmp:all): the field
+            # copy carries only what exiftool can WRITE and dropped a namespace it
+            # can merely read — SilverFast's IR/iSRD settings, without which the
+            # decoded scan is not recognised as having an IR channel. Nothing in
+            # this command edits an XMP field (a block plus edits in one command
+            # ignores the edits); the marker clean-up below runs in commands of
+            # its own.
             ["-overwrite_original"] + _xmp_block_args(jxl_path, tmp_dir)
             + ["-tagsfromfile", _src, "-iptc:all", str(tiff_path)],
-            timeout=EXIFTOOL_TIMEOUT
-        )
-        copied = True
-        for r in (r_exif, r_xmp):
-            _note_minor_metadata(r, tiff_path)
-            if r.returncode != 0:
-                copied = False
-                logger.error(f"  METADATA COPY FAILED (exiftool rc={r.returncode}) | "
-                             f"{tiff_path.name} | {(r.stderr or '').strip()}")
+        ]
         # Fix Software and ImageDescription tags that tifffile may have written
         # on IFD0 or IFD1. For single-page TIFFs with a JPEG preview, only the
         # preview page (IFD1) needs these defaults cleared; the main image keeps
         # its metadata from the JXL. For multi-page TIFFs, IFD1 is a real page
         # and must keep its metadata, so we only clear on single-page files.
         if not is_multipage:
-            _run_exiftool_argfile(
-                ["-overwrite_original", "-ifd1:Software=", str(tiff_path)], timeout=EXIFTOOL_TIMEOUT
-            )
-            _run_exiftool_argfile(
-                ["-overwrite_original", "-ifd1:ImageDescription=", str(tiff_path)], timeout=EXIFTOOL_TIMEOUT
-            )
+            first += [["-overwrite_original", "-ifd1:Software=", str(tiff_path)],
+                      ["-overwrite_original", "-ifd1:ImageDescription=", str(tiff_path)]]
+        first += [["-s", "-s", "-s", "-IFD0:Software", str(tiff_path)],
+                  ["-ImageDescription", str(tiff_path)],
+                  ["-j", "-XMP-dc:Relation", str(tiff_path)]]
+        res = _exiftool_commands(first, EXIFTOOL_TIMEOUT, stop_at_failure=False)
+        r_exif, r_xmp = res[0], res[1]
+        r_sw, r, rr = res[-3], res[-2], res[-1]
+        copied = True
+        for r_copy in (r_exif, r_xmp):
+            _note_minor_metadata(r_copy, tiff_path)
+            if r_copy.returncode != 0:
+                copied = False
+                logger.error(f"  METADATA COPY FAILED (exiftool rc={r_copy.returncode}) | "
+                             f"{tiff_path.name} | {(r_copy.stderr or '').strip()}")
+        second = []        # the clean-ups, in the order they always ran
         # Clear the page-0 Software tag if it still holds tifffile's default.
         # The main image is IFD0 (a JPEG preview, when present, is IFD1);
         # tifffile's default Software string can survive on IFD0, so only clear
         # it when the JXL didn't supply its own (i.e. it still reads "tifffile").
-        r_sw = _run_exiftool_argfile(
-            ["-s", "-s", "-s", "-IFD0:Software", str(tiff_path)], timeout=EXIFTOOL_TIMEOUT
-        )
         if r_sw.returncode == 0 and r_sw.stdout and 'tifffile' in r_sw.stdout:
-            _run_exiftool_argfile(
-                ["-overwrite_original", "-IFD0:Software=", str(tiff_path)], timeout=EXIFTOOL_TIMEOUT
-            )
+            second.append(["-overwrite_original", "-IFD0:Software=", str(tiff_path)])
         # Also fix ImageDescription if it holds tifffile's shaped-JSON metadata.
         # Match the actual tifffile pattern (JSON starting with "shape") — a
         # substring check would wipe legitimate user captions like "Beautiful
         # shapes at dawn".
-        r = _run_exiftool_argfile(
-            ["-ImageDescription", str(tiff_path)], timeout=EXIFTOOL_TIMEOUT
-        )
         if r.returncode == 0 and r.stdout:
             _desc_value = r.stdout.split(":", 1)[1].strip() if ":" in r.stdout else r.stdout.strip()
             if _desc_value.startswith('{"shape"') or _desc_value.startswith("{'shape'"):
-                _run_exiftool_argfile(
-                    ["-overwrite_original", "-ImageDescription=", str(tiff_path)], timeout=EXIFTOOL_TIMEOUT
-                )
+                second.append(["-overwrite_original", "-ImageDescription=", str(tiff_path)])
 
         # Strip the internal multi-page marker from dc:Relation but keep any
         # Relation values the user had. We rewrite the bag with only the
@@ -1894,9 +1896,6 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
         # on commas/semicolons would corrupt legitimate user values
         # (e.g. "Smith, John").
         try:
-            rr = _run_exiftool_argfile(
-                ["-j", "-XMP-dc:Relation", str(tiff_path)], timeout=EXIFTOOL_TIMEOUT
-            )
             kept = []
             # #582: a read that fails cannot tell which internal markers were
             # copied from the JXL, so they would stay in the TIFF.
@@ -1953,10 +1952,10 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
                     has_internal = False
             else:
                 has_internal = False
-            # The CLEAR has to be its own invocation: `-XMP-dc:Relation=` and
-            # `-XMP-dc:Relation+=` in the same exiftool call do not sequence as
-            # clear-then-append for a list tag, and the stale internal markers
-            # copied from the JXL survive (caught by
+            # The CLEAR has to be its own command: `-XMP-dc:Relation=` and
+            # `-XMP-dc:Relation+=` in the same exiftool command do not sequence
+            # as clear-then-append for a list tag, and the stale internal
+            # markers copied from the JXL survive (caught by
             # test_decoder_markers_do_not_leak_into_the_tiff).
             if not _relation_read_ok:
                 # Same verdict as any other failed metadata step (#582): the
@@ -1965,21 +1964,12 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
                 logger.warning(
                     f"  RELATION READ FAILED (exiftool rc={rr.returncode}) | "
                     f"{tiff_path.name} — the JXL's internal markers may stay in the TIFF")
+            i_clear = i_rel = None
             if has_internal:
-                r_clear = _run_exiftool_argfile(
-                    ["-overwrite_original", "-XMP-dc:Relation=", str(tiff_path)], timeout=EXIFTOOL_TIMEOUT
-                )
-                if r_clear.returncode != 0:
-                    copied = False
-                    logger.warning(
-                        f"  RELATION CLEAR FAILED (exiftool rc={r_clear.returncode}) | "
-                        f"{tiff_path.name} | "
-                        f"{(r_clear.stderr or r_clear.stdout or 'no output').strip()[:200]}")
-            # ...but everything that gets ADDED fits in one call: the user's own
-            # Relation values and the provenance markers together. Two calls
-            # instead of three, and one instead of two when there was nothing to
-            # clear — this runs per output, and on a five-figure library each
-            # process spawn is minutes of pure overhead.
+                i_clear = len(second)
+                second.append(["-overwrite_original", "-XMP-dc:Relation=", str(tiff_path)])
+            # ...but everything that gets ADDED fits in one command: the user's
+            # own Relation values and the provenance markers together.
             add_lines = ["-overwrite_original"]
             if has_internal:
                 add_lines += [f"-XMP-dc:Relation+={_argfile_safe(v)}" for v in kept]
@@ -1991,16 +1981,28 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
                 if pixel_sum:
                     add_lines.append("-XMP-dc:Relation+=" + PIXSUM_PREFIX + pixel_sum)
             # Which toolkit version wrote this TIFF (write-only; see
-            # _history_args). Rides on the call that already writes the
-            # provenance markers — no extra exiftool spawn per output.
+            # _history_args). Rides on the command that already writes the
+            # provenance markers — no extra command per output.
             add_lines += _history_args("converted", jxl_path, tiff_path)
-            # #634: the XMP block was copied after the EXIF call above, so the
-            # mirror of a reset Orientation (XMP tiff:Orientation) is removed
-            # here, in the call that runs last.
+            # #634: the XMP block was copied before, so the mirror of a reset
+            # Orientation (XMP tiff:Orientation) is removed here, in the
+            # command that runs last.
             add_lines += _orientation_reset_args(jxl_path)
             if len(add_lines) > 1:
                 add_lines.append(str(tiff_path))
-                r_rel = _run_exiftool_argfile(add_lines, timeout=EXIFTOOL_TIMEOUT)
+                i_rel = len(second)
+                second.append(add_lines)
+            res2 = _exiftool_commands(second, EXIFTOOL_TIMEOUT, stop_at_failure=False)
+            if i_clear is not None:
+                r_clear = res2[i_clear]
+                if r_clear.returncode != 0:
+                    copied = False
+                    logger.warning(
+                        f"  RELATION CLEAR FAILED (exiftool rc={r_clear.returncode}) | "
+                        f"{tiff_path.name} | "
+                        f"{(r_clear.stderr or r_clear.stdout or 'no output').strip()[:200]}")
+            if i_rel is not None:
+                r_rel = res2[i_rel]
                 _note_minor_metadata(r_rel, tiff_path)
                 if r_rel.returncode != 0:
                     # The provenance marker is what a LATER run uses to tell

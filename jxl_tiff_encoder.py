@@ -1665,6 +1665,12 @@ def _guard_refusal_hint(*a, **k): return _common._guard_refusal_hint(_G, *a, **k
 #   system codepage, so non-ASCII paths would not be found).
 # - UTF8: tag VALUES read/written are UTF-8, so non-ASCII metadata round-trips.
 _ARGFILE_CHARSET = "-charset\nFileName=UTF8\n-charset\nUTF8\n"
+# Does this exiftool run several commands in one process with a status
+# each? {exiftool command: bool}, asked once (_exiftool_batch_ok).
+_EXIFTOOL_BATCH = {}
+# Read-only exiftool results run ahead in one process, per thread
+# (_prefetch_exiftool_reads), each used once by the read that asks for it.
+_EXIFTOOL_PREFETCH = threading.local()
 
 
 # Captured at import: some tests replace this module's `subprocess` with a stub.
@@ -1694,6 +1700,18 @@ def _exiftool_source(*a, **k): return _common._exiftool_source(_G, *a, **k)
 
 
 def _run_exiftool_argfile(*a, **k): return _common._run_exiftool_argfile(_G, *a, **k)
+
+
+def _run_exiftool_writes(*a, **k): return _common._run_exiftool_writes(_G, *a, **k)
+
+
+def _prefetch_exiftool_reads(*a, **k): return _common._prefetch_exiftool_reads(_G, *a, **k)
+
+
+def _clear_exiftool_prefetch(*a, **k): return _common._clear_exiftool_prefetch(_G, *a, **k)
+
+
+_origin_read_args = _common._origin_read_args
 
 
 def _tiff_byte_order(tiff_path) -> str:
@@ -2343,18 +2361,19 @@ def _iptc_only_source(tiff_path, tmp_dir) -> str:
     return out
 
 
-def _fill_xmp_from_iptc(tiff_path, write_path, tmp_dir) -> None:
-    """Copy the TIFF's IPTC fields into the master's XMP — only the ones the
-    XMP does not hold yet (IPTC_TO_XMP_FILL).
+def _fill_xmp_from_iptc(tiff_path, write_path, tmp_dir) -> list:
+    """The exiftool command that copies the TIFF's IPTC fields into the
+    master's XMP — only the ones the XMP does not hold yet
+    (IPTC_TO_XMP_FILL); convert_one runs it with the other writes.
 
-    ONE exiftool call, a call of its own: `-wm cg` (create tags and groups,
+    ONE exiftool command, a command of its own: `-wm cg` (create tags and groups,
     never overwrite one that exists; measured 2026-11-11 on single fields and
     on lists such as dc:Subject) is global to the call and would break the
     `=` assignments of the others. The XMP the master already carries always
     wins; nothing goes into the EXIF (the IPTC has a date, not a time, and an
     invented hour would be a guess). The charset is the IIM's own
     (CodedCharacterSet); an IIM without one is read as exiftool reads it,
-    never "fixed" here. A failed call raises: the file is an error and
+    never "fixed" here. A failed command raises: the file is an error and
     --delete-source keeps the TIFF (#571).
 
     A source whose name has a '%' cannot be the -tagsFromFile operand as it is
@@ -2370,38 +2389,30 @@ def _fill_xmp_from_iptc(tiff_path, write_path, tmp_dir) -> None:
     args = ["-overwrite_original", "-wm", "cg", "-tagsfromfile", source]
     args += [f"-{xmp}<IPTC:{iptc}" for iptc, xmp in IPTC_TO_XMP_FILL]
     args.append(str(write_path))
-    r = _run_exiftool_argfile(args, timeout=EXIFTOOL_TIMEOUT)
-    if r.returncode != 0:
-        raise RuntimeError(
-            f"exiftool IPTC copy failed: {(r.stderr or r.stdout or 'no output')[:200].strip()}")
+    return args
 
 
 _collapse_list_reset = _common._collapse_list_reset
 
 
-def _preload_xmp_block(xmp_file, write_path) -> bool:
-    """Write the source's XMP into write_path as one BLOCK, before the
-    metadata call edits it. True when it was written.
+def _xmp_block_preload_args(xmp_file, write_path):
+    """The exiftool command that writes the source's XMP into write_path as
+    one BLOCK, before the metadata command edits it; None when there is no
+    XMP. convert_one runs it first among the writes.
 
     A field-by-field copy (-tagsfromfile -xmp:all) carries only what exiftool
     can WRITE, and drops a namespace it can merely read: SilverFast keeps its
     IR/iSRD settings in one (`LSI/`), and a scan decoded without it is no
     longer recognised as having an IR channel. The block keeps every byte.
-    It must be a call of its own: in the same call as the encode record and
-    marker edits, exiftool writes the block and IGNORES those edits; and the
-    edit call that follows must not copy -xmp:all again, or every list it
-    appends to (+=) is written twice (#531). The recompressor and the decoder
-    copy the block the same way (-tagsfromfile <jxl> -XMP).
+    It must be a command of its own: in the same command as the encode record
+    and marker edits, exiftool writes the block and IGNORES those edits; and
+    the edit command that follows must not copy -xmp:all again, or every list
+    it appends to (+=) is written twice (#531). The recompressor and the
+    decoder copy the block the same way (-tagsfromfile <jxl> -XMP).
     """
     if not xmp_file:
-        return False
-    r = _run_exiftool_argfile(
-        ["-overwrite_original", "-api", "Compress=0", f"-XMP<={xmp_file}", str(write_path)],
-        timeout=EXIFTOOL_TIMEOUT)
-    if r.returncode != 0:
-        raise RuntimeError(
-            f"exiftool XMP copy failed: {(r.stderr or r.stdout or 'no output')[:200].strip()}")
-    return True
+        return None
+    return ["-overwrite_original", "-api", "Compress=0", f"-XMP<={xmp_file}", str(write_path)]
 
 
 def extract_xmp_original(tiff_path, tmp_dir):
@@ -2474,16 +2485,34 @@ def _encode_tag_mode(*a, **k): return _common._encode_tag_mode(_G, *a, **k)
 def _visible_record_args(*a, **k): return _common._visible_record_args(_G, *a, **k)
 
 
+def _record_fields_read_args(tiff_path):
+    """The exiftool command _read_record_fields runs."""
+    return ["-j", "-Software", "-XMP-exif:UserComment", "-XMP-xmpMM:HistoryParameters",
+            str(tiff_path)]
+
+
+def _description_read_args(xmp_path):
+    """The exiftool command read_existing_description runs."""
+    return ["-s3", "-XMP-dc:Description", str(xmp_path)]
+
+
+def _relation_read_args(xmp_path):
+    """The exiftool command read_existing_relation runs."""
+    return ["-j", "-XMP-dc:Relation", str(xmp_path)]
+
+
+def _creator_tool_read_args(xmp_path):
+    """The exiftool command read_existing_creator_tool runs."""
+    return ["-s", "-XMP-xmp:CreatorTool", str(xmp_path)]
+
+
 def _read_record_fields(tiff_path, tmp_dir):
     """(Software, XMP exif:UserComment, xmpMM:History record) of a source TIFF,
     in one exiftool call. Raises when exiftool fails: an unread field cannot
     tell a stale record from none, and -tagsfromfile would carry the stale one
     into the JXL — fail CLOSED on the file, as the Software read always did.
     Empty output with rc=0 is the normal state of a TIFF with none of them."""
-    arg = tmp_dir / "rec_read.args"
-    arg.write_text(f"{_ARGFILE_CHARSET}-j\n-Software\n-XMP-exif:UserComment\n"
-                   f"-XMP-xmpMM:HistoryParameters\n{tiff_path}\n", encoding="utf-8")
-    r = _run_captured([_get_exiftool_cmd(), "-@", str(arg)], EXIFTOOL_TIMEOUT, text=True)
+    r = _run_exiftool_argfile(_record_fields_read_args(tiff_path), timeout=EXIFTOOL_TIMEOUT)
     if r.returncode != 0:
         _err = (r.stderr or r.stdout or "no output")[:200]
         raise RuntimeError(f"exiftool could not read Software from {tiff_path.name} "
@@ -2508,9 +2537,8 @@ def read_existing_description(xmp_path):
         # -s3 (NOT -s): only -s3 prints the bare VALUE. Plain -s prints
         # "Description                     : value", and returning that line
         # verbatim seeded the tag name into the new dc:Description (round 43).
-        r = _run_exiftool_argfile(
-            ["-s3", "-XMP-dc:Description", str(xmp_path)], timeout=EXIFTOOL_TIMEOUT
-        )
+        r = _run_exiftool_argfile(_description_read_args(xmp_path),
+                                  timeout=EXIFTOOL_TIMEOUT)
         if r.returncode == 0 and r.stdout:
             stdout = r.stdout.strip()
             # The value is used UNFILTERED: exiftool's own warnings go to
@@ -2561,9 +2589,7 @@ def read_existing_relation(xmp_path):
     if not xmp_path or not Path(xmp_path).exists():
         return []
     try:
-        r = _run_exiftool_argfile(
-            ["-j", "-XMP-dc:Relation", str(xmp_path)], timeout=EXIFTOOL_TIMEOUT
-        )
+        r = _run_exiftool_argfile(_relation_read_args(xmp_path), timeout=EXIFTOOL_TIMEOUT)
         if r.returncode != 0 or not r.stdout:
             return []
         data = json.loads(r.stdout)
@@ -2589,9 +2615,8 @@ def read_existing_creator_tool(xmp_path):
     if not xmp_path or not xmp_path.exists():
         return ""
     try:
-        r = _run_exiftool_argfile(
-            ["-s", "-XMP-xmp:CreatorTool", str(xmp_path)], timeout=EXIFTOOL_TIMEOUT
-        )
+        r = _run_exiftool_argfile(_creator_tool_read_args(xmp_path),
+                                  timeout=EXIFTOOL_TIMEOUT)
         if r.returncode == 0 and r.stdout:
             stdout = r.stdout.strip()
             if " : " in stdout:
@@ -2661,6 +2686,15 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
     args_lines.append("-exif:all")
     if not xmp_preloaded:
         args_lines.append("-xmp:all")
+
+    # The reads below (the source's record fields and origin, the extracted
+    # XMP's Relation, Description and CreatorTool) in ONE exiftool process:
+    # each reader's own call then finds its answer kept for it.
+    _reads = [_record_fields_read_args(tiff_path), _origin_read_args(tiff_path)]
+    if xmp_original:
+        _reads += [_relation_read_args(xmp_original), _description_read_args(xmp_original),
+                   _creator_tool_read_args(xmp_original)]
+    _prefetch_exiftool_reads(_reads, EXIFTOOL_TIMEOUT)
 
     # 2b. The copied XMP may carry STALE internal round-trip markers
     # (jxlphoto-mpg/depth/grayscale/...) from a previous encode. Clear
@@ -2752,6 +2786,8 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
             existing_creator = re.sub(r'\s*\|\s*\|\s*', ' | ', existing_creator)
             args_lines.append(f"-xmp-xmp:CreatorTool={_argfile_safe(existing_creator)}")
 
+    _clear_exiftool_prefetch()
+
     # 5. Cleanup legacy ICC markers from XMP if requested
     if CLEANUP_XMP_ICC_MARKER:
         # Remove common legacy ICC marker tags that might conflict
@@ -2819,12 +2855,17 @@ def make_png_bytes(img, icc_bytes=None):
     # Streamed (#569): rows go through ONE zlib stream block by block, so
     # neither the big-endian copy of the image nor the raw filtered buffer
     # ever exists whole, and the file is assembled with a single join. The
-    # bytes are identical to zlib.compress(raw, 1) over the whole buffer —
+    # bytes are identical to zlib.compress(raw, 0) over the whole buffer —
     # 45 MP used to cost ~1-1.4 GB of transient Python memory per worker.
     # One compress() call per block, the filter byte (0) and the big-endian
     # samples laid out by numpy: a Python loop per row held the GIL and made
     # four parallel workers 2.5x slower than one (measured on 45 MP).
-    comp = zlib.compressobj(1)
+    # Level 0 (stored), not 1: the PNG only carries the pixels to cjxl, and
+    # 16-bit photo data barely compresses (5.93 vs 6.00 bytes per pixel on a
+    # 43 MP Z8 export) while level 1 cost 6.55 s of Python per file against
+    # 0.40 s; peak memory 11.97 vs 12.12 B/px, inside _PYTHON_BYTES_PER_PIXEL
+    # (refactor B2, measured 2026-11-13).
+    comp = zlib.compressobj(0)
     idat = []
     row_bytes = w * c * (2 if bit_depth == 16 else 1)
     for y in range(0, h, _PNG_BLOCK_ROWS):
@@ -4442,8 +4483,17 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             # 6. Build and execute unified metadata injection (CORRECTED - replaces old steps 5+7)
             # This preserves original XMP, adds encoding tags, and embeds ICC if configured
             # Uses icc_original (unmodified) for round-trip preservation
-            _xmp_preloaded = (not STRIP_METADATA
-                              and _preload_xmp_block(xmp_original, write_path))
+            # The metadata writes, in the order they always ran, each a command
+            # of its own (the XMP block before the edits, the edits, the -wm cg
+            # IPTC fill, the page markers): _run_exiftool_writes runs them in
+            # ONE exiftool process where it can, and a failure raises the
+            # message of its own command. Uses icc_original (unmodified) for
+            # round-trip preservation.
+            _xmp_preloaded = not STRIP_METADATA and bool(xmp_original)
+            writes = []        # (command, what its failure says, output quoted)
+            if _xmp_preloaded:
+                writes.append((_xmp_block_preload_args(xmp_original, write_path),
+                               "exiftool XMP copy failed: ", 200))
             inject_args = build_metadata_injection_args(
                 tiff_path, write_path, tmp_dir, exif_bin, icc_original, xmp_original,
                 original_depth=original_depth,
@@ -4451,17 +4501,13 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 src_path_id=_src_path_id, src_content_id=_src_content_id,
                 xmp_preloaded=_xmp_preloaded, distance=_dist
             )
-            
-            r2 = _run_captured([_get_exiftool_cmd(), "-@", str(inject_args)],
-                              EXIFTOOL_TIMEOUT, text=True)
-            if r2.returncode != 0:
-                err_msg = (r2.stderr or r2.stdout or "no output")[:300].strip()
-                raise RuntimeError(f"exiftool failed: {err_msg}")
+            writes.append((Path(inject_args), "exiftool failed: ", 300))
 
             # IPTC fields the XMP lacks (the capture date of a SilverFast scan
-            # lives only there): own call, before reorder_jxl_boxes.
+            # lives only there): a command of its own, before reorder_jxl_boxes.
             if _iptc_fill:
-                _fill_xmp_from_iptc(tiff_path, write_path, tmp_dir)
+                writes.append((_fill_xmp_from_iptc(tiff_path, write_path, tmp_dir),
+                               "exiftool IPTC copy failed: ", 200))
 
             # Multi-page group marker: tag split pages so the decoder reconstructs
             # only genuinely-split files. Stored as an ADDITIONAL value in the
@@ -4469,38 +4515,28 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             # preserved — unlike a scalar field, appending never overwrites.
             # Absence of the marker means "standalone file" even if the name has _pageN.
             # Skipped entirely under --strip (no metadata = no reconstruction markers).
+            # A failed marker write must not be silent: without the marker the
+            # decoder can never reconstruct this multi-page TIFF.
             if multipage_group and not STRIP_METADATA:
-                try:
-                    relation_args = [
-                        "-XMP-dc:Relation+=" + MULTIPAGE_XMP_MARKER + multipage_group,
-                        # Page index and thumbnail role are stored as markers,
-                        # not inferred from the filename: a source TIFF named
-                        # *_page<N> or *_thumbnail would otherwise corrupt the
-                        # reconstruction order/naming.
-                        "-XMP-dc:Relation+=" + PAGE_XMP_PREFIX + str(page_idx),
-                    ]
-                    if multipage_total:
-                        relation_args.append(
-                            "-XMP-dc:Relation+=" + PAGES_XMP_PREFIX + str(multipage_total))
-                    if is_thumbnail:
-                        relation_args.append("-XMP-dc:Relation+=" + THUMB_XMP_FLAG)
-                    if icc_inherited and page_idx > 0:
-                        relation_args.append("-XMP-dc:Relation+=" + ICC_INHERITED_XMP_FLAG)
-                    if subfiletype != 0:
-                        relation_args.append("-XMP-dc:Relation+=" + SUBFILETYPE_XMP_PREFIX + str(subfiletype))
-                    r_mark = _run_exiftool_argfile(
-                        ["-overwrite_original"] + relation_args + [str(write_path)],
-                        timeout=EXIFTOOL_TIMEOUT
-                    )
-                    # A failed marker write must not be silent: without the marker
-                    # the decoder can never reconstruct this multi-page TIFF.
-                    if r_mark.returncode != 0:
-                        err_msg = (r_mark.stderr or r_mark.stdout or "no output")[:200]
-                        raise RuntimeError(f"exiftool multipage marker write failed: {err_msg.strip()}")
-                except RuntimeError:
-                    raise
-                except Exception as e_mark:
-                    raise RuntimeError(f"multipage marker write failed: {e_mark}") from e_mark
+                relation_args = [
+                    "-XMP-dc:Relation+=" + MULTIPAGE_XMP_MARKER + multipage_group,
+                    # Page index and thumbnail role are stored as markers,
+                    # not inferred from the filename: a source TIFF named
+                    # *_page<N> or *_thumbnail would otherwise corrupt the
+                    # reconstruction order/naming.
+                    "-XMP-dc:Relation+=" + PAGE_XMP_PREFIX + str(page_idx),
+                ]
+                if multipage_total:
+                    relation_args.append(
+                        "-XMP-dc:Relation+=" + PAGES_XMP_PREFIX + str(multipage_total))
+                if is_thumbnail:
+                    relation_args.append("-XMP-dc:Relation+=" + THUMB_XMP_FLAG)
+                if icc_inherited and page_idx > 0:
+                    relation_args.append("-XMP-dc:Relation+=" + ICC_INHERITED_XMP_FLAG)
+                if subfiletype != 0:
+                    relation_args.append("-XMP-dc:Relation+=" + SUBFILETYPE_XMP_PREFIX + str(subfiletype))
+                writes.append((["-overwrite_original"] + relation_args + [str(write_path)],
+                               "exiftool multipage marker write failed: ", 200))
 
             # A split that yields exactly ONE output from a page > 0 has no
             # group marker (group ids exist only for multi-output splits), but
@@ -4519,31 +4555,20 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 # then wrote SubfileType=0 back. Thumbnails are restored as 1
                 # regardless, so a thumbnail's own 1 stays unmarked — same rule
                 # the multi-page group block already follows.
-                try:
-                    solo_args = []
-                    if page_idx > 0:
-                        solo_args.append("-XMP-dc:Relation+=" + PAGE_XMP_PREFIX + str(page_idx))
-                        if icc_inherited:
-                            solo_args.append("-XMP-dc:Relation+=" + ICC_INHERITED_XMP_FLAG)
-                    if subfiletype != (1 if is_thumbnail else 0):
-                        solo_args.append("-XMP-dc:Relation+=" + SUBFILETYPE_XMP_PREFIX + str(subfiletype))
-                    r_solo = _run_exiftool_argfile(
-                        ["-overwrite_original"] + solo_args + [str(write_path)],
-                        timeout=EXIFTOOL_TIMEOUT
-                    )
-                    if r_solo.returncode != 0:
-                        err_msg = (r_solo.stderr or r_solo.stdout or "no output")[:200]
-                        raise RuntimeError(
-                            f"exiftool page marker write failed: {err_msg.strip()}")
-                except RuntimeError:
-                    raise
-                except Exception as e_solo:
-                    raise RuntimeError(f"page marker write failed: {e_solo}") from e_solo
+                solo_args = []
+                if page_idx > 0:
+                    solo_args.append("-XMP-dc:Relation+=" + PAGE_XMP_PREFIX + str(page_idx))
+                    if icc_inherited:
+                        solo_args.append("-XMP-dc:Relation+=" + ICC_INHERITED_XMP_FLAG)
+                if subfiletype != (1 if is_thumbnail else 0):
+                    solo_args.append("-XMP-dc:Relation+=" + SUBFILETYPE_XMP_PREFIX + str(subfiletype))
+                writes.append((["-overwrite_original"] + solo_args + [str(write_path)],
+                               "exiftool page marker write failed: ", 200))
 
             # Grayscale marker: must be written for standalone files too, otherwise
             # read_png_to_numpy returns a 3-channel RGB array and the decoder cannot
             # restore the original single-channel TIFF page. The ExtraSamples
-            # marker rides in the same exiftool call (standalone files too: a
+            # marker rides in the same exiftool command (standalone files too: a
             # single-page RGB+IR scan is the case it exists for).
             page_flags = []
             if is_grayscale:
@@ -4560,18 +4585,10 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 page_flags.append(f"-XMP-dc:Relation+={TIFFTAG_XMP_PREFIX}"
                                   f"{_code}:{_dtype}:{_raw.hex()}")
             if page_flags and not STRIP_METADATA:
-                try:
-                    r_gray = _run_exiftool_argfile(
-                        ["-overwrite_original"] + page_flags + [str(write_path)],
-                        timeout=EXIFTOOL_TIMEOUT
-                    )
-                    if r_gray.returncode != 0:
-                        err_msg = (r_gray.stderr or r_gray.stdout or "no output")[:200]
-                        raise RuntimeError(f"exiftool page marker write failed: {err_msg.strip()}")
-                except RuntimeError:
-                    raise
-                except Exception as e_mark:
-                    raise RuntimeError(f"page marker write failed: {e_mark}") from e_mark
+                writes.append((["-overwrite_original"] + page_flags + [str(write_path)],
+                               "exiftool page marker write failed: ", 200))
+
+            _run_exiftool_writes(writes, EXIFTOOL_TIMEOUT)
 
             # Reorder JXL boxes so Exif/XMP come before the codestream. This must
             # run after all exiftool operations (metadata, thumbnail, markers)

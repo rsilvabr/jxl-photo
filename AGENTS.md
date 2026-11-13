@@ -364,6 +364,26 @@
   45 MP files into errors under a 17-worker load on 2026-10-06. Only the
   planning-time `*_batch` reads keep their per-batch limit.
   `tests/test_exiftool_timeouts.py` scans every call.
+- **A file's exiftool commands share ONE process (v2.30.0, refactor F6).**
+  `_exiftool_commands` (common) runs them with `-execute` in between, each
+  with its own status, stdout and stderr (`-echo3`/`-echo4 ${status}`
+  markers; a missing marker = status -1, fail closed), when
+  `_exiftool_batch_ok`: the script's OWN `_run_exiftool_argfile` and
+  `_run_captured` are in place (a test double sees every command alone, as
+  before) and exiftool reports each status (12.15+, probed once per run in
+  `_EXIFTOOL_BATCH`; conftest clears it per test). Otherwise one process per
+  command, exactly as before. The encoder's writes after cjxl go through
+  `_run_exiftool_writes` (the first failure raises its old message); its
+  reads in `build_metadata_injection_args` are prefetched
+  (`_prefetch_exiftool_reads`: answered only for the EXACT same arguments,
+  read-only commands only — never an `-o` extraction, which fails when run
+  twice); the decoder's `copy_metadata` is two processes and a failure never
+  stops the next (`stop_at_failure=False`). A new exiftool call on those
+  paths joins the list; a command that must stay apart from another (the XMP
+  block before the edits, `-wm cg`, a clear before a `+=`) stays a separate
+  COMMAND, which no longer costs a process. The encoder's PNG for cjxl is
+  zlib level 0 (B2: 16-bit photo data barely compresses; 6.55 s → 0.40 s of
+  Python per 43 MP file, same peak memory).
 - **Worker memory cap**: the encoder caps `--workers`
   (`_memory_capped_workers`, parity-pinned with the recompressor's unused
   copy). The recompressor caps the full-size cjxl instead

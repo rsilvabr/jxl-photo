@@ -145,6 +145,16 @@ def _isolate_run_globals():
         transcoder._tool_version.cache_clear()
     if transcoder is not None and hasattr(transcoder, "_planned_outputs"):
         transcoder._planned_outputs.clear()
+    # "Can exiftool run several commands in one process?" is asked once per
+    # run (_exiftool_batch_ok) and kept: a test asks again under its own
+    # doubles, never inheriting another test's answer (refactor F6). The
+    # prefetched reads are per thread and per file; none survives a test.
+    for name in _CHILD_MODULES:
+        mod = sys.modules.get(name)
+        if mod is not None and isinstance(getattr(mod, "_EXIFTOOL_BATCH", None), dict):
+            mod._EXIFTOOL_BATCH.clear()
+        if mod is not None and hasattr(mod, "_EXIFTOOL_PREFETCH"):
+            mod._EXIFTOOL_PREFETCH.results = {}
 
     saved = {name: _snapshot(sys.modules[name])
              for name in _CHILD_MODULES if name in sys.modules}

@@ -88,9 +88,30 @@ def _old_make_png_bytes(img, icc_bytes=None):
     out += chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, bit_depth, color_type, 0, 0, 0))
     if icc_bytes:
         out += chunk(b"iCCP", b"ICC Profile\x00\x00" + zlib.compress(icc_bytes))
-    out += chunk(b"IDAT", zlib.compress(raw, 1))
+    # zlib level 0 since refactor B2 (the streamed writer's level, 2026-11-13)
+    out += chunk(b"IDAT", zlib.compress(raw, 0))
     out += chunk(b"IEND", b"")
     return out
+
+
+def _png_content(png: bytes):
+    """(the chunks other than IDAT, the decompressed IDAT): what a PNG reader
+    sees. With zlib level 0 (refactor B2) the stored-block layout depends on
+    how the input was fed to zlib, so the BYTES of a streamed and a one-shot
+    writer may differ while their content cannot."""
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+    pos, chunks, idat = 8, [], b""
+    while pos < len(png):
+        n = struct.unpack(">I", png[pos:pos + 4])[0]
+        name, data = png[pos + 4:pos + 8], png[pos + 8:pos + 8 + n]
+        assert struct.unpack(">I", png[pos + 8 + n:pos + 12 + n])[0] == \
+            zlib.crc32(name + data) & 0xFFFFFFFF, f"bad CRC in {name}"
+        if name == b"IDAT":
+            idat += data
+        else:
+            chunks.append((name, data))
+        pos += 12 + n
+    return chunks, zlib.decompress(idat)
 
 
 @pytest.mark.parametrize("dtype", [np.uint8, np.uint16])
@@ -98,8 +119,9 @@ def _old_make_png_bytes(img, icc_bytes=None):
 @pytest.mark.parametrize("icc", [None, b"x" * 300], ids=["no-icc", "icc"])
 def test_eb_png_bytes_identical_to_the_old_writer(dtype, channels, icc):
     """Equivalence pin (no pre-fix proof): the streamed writer must produce
-    the very bytes the old one did, on noise and on a smooth gradient, with
-    a height that is not a multiple of the row block."""
+    what the old one did — the same chunks and the same image data once
+    decompressed — on noise and on a smooth gradient, with a height that is
+    not a multiple of the row block."""
     rng = np.random.default_rng(channels)
     hi = 255 if dtype == np.uint8 else 65535
     for img in (rng.integers(0, hi, (131, 77, channels)).astype(dtype),
@@ -107,21 +129,27 @@ def test_eb_png_bytes_identical_to_the_old_writer(dtype, channels, icc):
                  .reshape(131, 77, channels)).astype(dtype)):
         if channels == 1:
             img2d = img[:, :, 0]
-            assert enc.make_png_bytes(img2d, icc) == _old_make_png_bytes(img2d, icc)
-        assert enc.make_png_bytes(img, icc) == _old_make_png_bytes(img, icc)
+            assert (_png_content(enc.make_png_bytes(img2d, icc))
+                    == _png_content(_old_make_png_bytes(img2d, icc)))
+        assert (_png_content(enc.make_png_bytes(img, icc))
+                == _png_content(_old_make_png_bytes(img, icc)))
 
 
 def test_eb_png_writer_holds_no_whole_image_copy():
     """A smooth 16-bit page: the old writer held a big-endian copy AND the raw
-    filtered buffer (2x the page) at once."""
+    filtered buffer (2x the page) at once, on top of its output. Since zlib
+    level 0 (refactor B2) the output itself is page-sized, and joining its
+    pieces holds it twice for a moment: the bound is that, plus less than
+    half a page of row blocks — never another copy of the image."""
     img = (np.linspace(0, 65535, 1500 * 2000 * 3).reshape(1500, 2000, 3)).astype(np.uint16)
     tracemalloc.start()
     try:
-        enc.make_png_bytes(img)
+        png = enc.make_png_bytes(img)
         _cur, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
-    assert peak < img.nbytes, f"peak {peak / 2**20:.0f} MiB for a {img.nbytes / 2**20:.0f} MiB page"
+    limit = 2 * len(png) + img.nbytes // 2
+    assert peak < limit, f"peak {peak / 2**20:.0f} MiB for a {img.nbytes / 2**20:.0f} MiB page"
 
 
 @real

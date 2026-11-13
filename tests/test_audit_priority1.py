@@ -70,12 +70,18 @@ def test_read_existing_creator_tool_preserves_icc_prefix(monkeypatch, tmp_path):
 
 
 def test_stale_icc_stripped_with_real_reader(monkeypatch, tmp_path):
-    """End to end: with the real reader (only exiftool stubbed), an old
-    ICC blob in CreatorTool must be dropped, not carried forward."""
-    monkeypatch.setattr(enc, "_run_exiftool_argfile",
-                        lambda *a, **k: SimpleNamespace(
-                            returncode=0,
-                            stdout="Creator Tool : OldApp | ICC:T0xESUJD\n"))
+    """End to end: with the real reader (only exiftool's CreatorTool answer
+    stubbed), an old ICC blob in CreatorTool must be dropped, not carried
+    forward. Every other read asks the real exiftool (since refactor F6 the
+    record read goes through _run_exiftool_argfile too)."""
+    real_run = enc._run_exiftool_argfile
+
+    def run(args, *a, **k):
+        if "-XMP-xmp:CreatorTool" in [str(x) for x in args]:
+            return SimpleNamespace(returncode=0, stderr="",
+                                   stdout="Creator Tool : OldApp | ICC:T0xESUJD\n")
+        return real_run(args, *a, **k)
+    monkeypatch.setattr(enc, "_run_exiftool_argfile", run)
     xmp = tmp_path / "x.xmp"
     xmp.write_text("<x/>", encoding="utf-8")
     # Real TIFF: the Software lineage read is fail-closed now — exiftool

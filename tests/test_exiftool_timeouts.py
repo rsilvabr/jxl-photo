@@ -29,8 +29,16 @@ SCRIPTS = {
     "jxl_jpeg_transcoder": "CODEC_TIMEOUT",
     "jxl_recompressor": "CJXL_TIMEOUT",
 }
-# Not per-file: the helper itself and the planning-time batch readers.
-EXEMPT = {"_run_exiftool_argfile", "_read_mpg_markers", "_tool_version"}
+# Not per-file: the helpers that pass their caller's timeout on
+# (_run_exiftool_argfile, and the runners of several commands in one process,
+# refactor F6), the version probes and the planning-time batch readers.
+EXEMPT = {"_run_exiftool_argfile", "_read_mpg_markers", "_tool_version",
+          "_exiftool_one_process", "_exiftool_commands", "_exiftool_batch_ok",
+          "_run_exiftool_writes"}
+# Runners of several commands whose callers must give the setting too: the
+# timeout is the 2nd (_exiftool_commands, _run_exiftool_writes) or 3rd
+# (the common module's g-functions) argument, or `timeout=`.
+_COMMAND_RUNNERS = {"_exiftool_commands", "_run_exiftool_writes"}
 
 
 def _exiftool_calls(src: str):
@@ -49,12 +57,17 @@ def _exiftool_calls(src: str):
             name = (getattr(node.func, "id", None)
                     or getattr(node.func, "attr", None))
             seg = ast.get_source_segment(src, node) or ""
-            if (name == "_run_exiftool_argfile"
+            if (name == "_run_exiftool_argfile" or name in _COMMAND_RUNNERS
                     or (name == "_run_captured" and "exiftool" in seg[:200])):
                 val = next((kw.value for kw in node.keywords
                             if kw.arg == "timeout"), None)
                 if val is None and name == "_run_captured" and len(node.args) >= 2:
                     val = node.args[1]
+                if val is None and name in _COMMAND_RUNNERS:
+                    # a script's call (commands, timeout) or the common
+                    # module's own (g, commands, timeout)
+                    pos = 2 if node.args and getattr(node.args[0], "id", None) == "g" else 1
+                    val = node.args[pos] if len(node.args) > pos else None
                 rows.append((node.lineno, self.stack[-1] if self.stack else "",
                              val))
             self.generic_visit(node)
