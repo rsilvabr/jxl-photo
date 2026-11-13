@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #661.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #663.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -30,7 +30,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
-| [Round-83 — where each output goes: the wizard asks the scripts](#round-83--where-each-output-goes-the-wizard-asks-the-scripts-2026-11-13) | 2026-11-13 | v2.30.0 | #655–#660 (6) |
+| [Round-83 — where each output goes: the wizard asks the scripts](#round-83--where-each-output-goes-the-wizard-asks-the-scripts-2026-11-13) | 2026-11-13 | v2.30.0 | #655–#662 (8) |
 | [Round-82 — the review of the Python refactor](#round-82--the-review-of-the-python-refactor-2026-11-13) | 2026-11-13 | v2.30.0_beta1 | #652–#654 (3) |
 | [Round-81 — the Python refactor](#round-81--the-python-refactor-2026-11-13) | 2026-11-13 | v2.29.1 | #648–#651 (4) |
 | [Round-80 — what the sweep left to decide](#round-80--what-the-sweep-left-to-decide-2026-11-11) | 2026-11-11 | v2.28.0 | #642–#647 (6) |
@@ -107,8 +107,9 @@ destinations themselves (refactor C1): they ask each script which files a run
 takes and where each output goes. Comparing the old and the new answers on
 hostile trees (`tools/verdicts.py`, 8340 cases) found #655–#659, where the
 wizard's copy disagreed with what the scripts do — the owner chose the
-scripts' answer for all five — and #660, a bug in two scripts themselves. All
-need an unusual setup; nothing was deleted or damaged.
+scripts' answer for all five — and #660, a bug in two scripts themselves.
+#661 and #662 came from checking `--help` with its output in a file. All need
+an unusual setup; nothing was deleted or damaged.
 
 | # | Bug | Script | Status |
 |---|-----|--------|--------|
@@ -118,6 +119,8 @@ need an unusual setup; nothing was deleted or damaged.
 | 658 | **A rename left in an old preset was applied by the collision check to directions that never rename** (TIFF → JXL, JXL → TIFF, JPEG → JXL): the scripts get `--rename-from` only for JXL → JXL and the lossy JXL → JPEG/PNG of a manifest, so the check could refuse a manifest over a collision that does not exist | `jxl_photo.py` | ✅ Fixed — the check hands the script the rename only where the run gets it (`_rename_reaches_child`, the rule of `build_child_cmd`). `tests/test_where_outputs_go.py` (failed before) |
 | 659 | **A manifest row with a file of another format as its Source (a TIFF in a JXL → JXL manifest) was checked as if it wrote an output**: the recompressor refuses such a file and writes nothing, so a collision reported for it refused the manifest for nothing | `jxl_photo.py` | ✅ Fixed — the script's answer counts (the recompressor refuses the file; the transcoder routes it by its extension). `tests/test_where_outputs_go.py` (failed before) |
 | 660 | **The decoder and the transcoder anchored the export marker of modes 6/7 on the OUTPUT folder when one was given**: a manifest row with an explicit Destination (or the command line) and a folder like `Lightroom_Export` above the library sent the outputs to `Lightroom_Export/16B_TIFF/<the library's path>/...` instead of next to the library's own `_EXPORT` (#601's rule, which the encoder and the recompressor kept). With the Destination equal to the Source — what a manifest row normally has — the place was right | `jxl_tiff_decoder.py`, `jxl_jpeg_transcoder.py` | ✅ Fixed — `_planned_output` anchors modes 6/7 on the input in both. `tests/test_where_outputs_go.py` (real dry runs, hostile folder; failed before) |
+| 661 | **A script run with its output in a file or a pipe ended in a traceback when `--help`, a command-line error or one of the transcoder's early messages held a character outside the Windows code page**: until the log starts, Python writes such output in the code page (cp1252 here), and argparse and the transcoder's first checks print before that — a Japanese folder name in a setting shown by `--help`, or a missing input path with Japanese in it ("input path does not exist"), raised `UnicodeEncodeError`; the wizard reads its scripts through a pipe. The em dash of every help came out as a cp1252 byte | all four backends | ✅ Fixed — stdout and stderr are UTF-8 from the first line of `main()` (`_utf8_console`, as `setup_logger` already did for stdout). `tests/test_utf8_before_argparse.py` (output in files, `PYTHONIOENCODING` removed; failed before) |
+| 662 | **The transcoder's `--help` raised `TypeError` when the `EXPORT_JPEG_FOLDER` setting held a `%`** (a folder named like `100%off`): its help text shows the setting's value, and argparse formats help texts with `%` | `jxl_jpeg_transcoder.py` | ✅ Fixed — the value reaches the help with `%` doubled; it is the only help that shows a setting. `test_help_showing_a_setting_with_percent_does_not_crash` (failed before) |
 
 ## Round-82 — the review of the Python refactor (2026-11-13)
 

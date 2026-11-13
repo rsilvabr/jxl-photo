@@ -1344,6 +1344,9 @@ def emit_summary_json(enabled):
 def setup_logger(*a, **k): return _common.setup_logger(_G, *a, **k)
 
 
+_utf8_console = _common._utf8_console
+
+
 _rejected_log_lock = threading.Lock()
 
 
@@ -7090,11 +7093,13 @@ Examples:
     # Export marker (must match wrapper's configured marker)
     parser.add_argument("--export-marker", type=str, default=None,
                         help="Folder name marker for modes 6/7 (default: script setting EXPORT_MARKER)")
+    # The setting's value is shown: argparse formats a help with `%`, so a
+    # folder named "100%off" must reach it as "100%%off" (#661).
     parser.add_argument("--export-jpeg-folder", type=str, default=None,
                         help="[Modes 6/7, JXL -> JPEG/PNG] Output folder created under "
                              "the export marker (default: script setting "
-                             f"EXPORT_JPEG_FOLDER, '{EXPORT_JPEG_FOLDER}'). Overrides "
-                             "EXPORT_JPEG_FOLDER.")
+                             f"EXPORT_JPEG_FOLDER, '{EXPORT_JPEG_FOLDER.replace('%', '%%')}'). "
+                             "Overrides EXPORT_JPEG_FOLDER.")
 
     # Force override
     parser.add_argument("--force-transcode", action="store_true",
@@ -7532,6 +7537,7 @@ def _configure_run(parser, args):
 
 
 def main():
+    _utf8_console()      # before argparse or the early checks print anything (#661)
     parser = build_parser()
     args = parser.parse_args()
 

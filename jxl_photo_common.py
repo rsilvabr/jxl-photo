@@ -1861,6 +1861,22 @@ def _abort_if_disk_full(g, write_dir, needed):
 # === The log ===
 
 
+def _utf8_console():
+    """stdout and stderr in UTF-8 (an unencodable character becomes '?'),
+    from the first line of a script's main(): redirected to a file or read
+    through a pipe (the wizard's), they are the Windows code page, and
+    argparse's --help or error, or a message printed before setup_logger,
+    that held a character outside it — a Japanese folder name in a setting
+    or a path — ended in a UnicodeEncodeError traceback (#661). setup_logger
+    does the same for stdout."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if hasattr(stream, "reconfigure"):
+                stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
 def setup_logger(g):
     """The script's logger (named g._LOGGER_NAME): a new log file in g.LOG_DIR
     and the console. Sets g.logger and returns the log file's path; the last

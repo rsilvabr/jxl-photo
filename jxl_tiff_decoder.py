@@ -937,6 +937,9 @@ _delete_stats = {"deleted": 0, "deleted_archived": 0, "kept": 0}
 def setup_logger(*a, **k): return _common.setup_logger(_G, *a, **k)
 
 
+_utf8_console = _common._utf8_console
+
+
 # Machine-readable run summary for the jxl_photo.py wrapper.
 #
 # A manifest run spawns one child PER ENTRY, each writing its own log file, so
@@ -4904,6 +4907,7 @@ def main():
 
     _minor_metadata_failures.clear()        # per run
     _minor_metadata_unchecked.clear()
+    _utf8_console()      # before argparse prints anything (#661)
     parser = build_parser()
     args = parser.parse_args()
 

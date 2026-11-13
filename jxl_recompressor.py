@@ -1134,6 +1134,9 @@ def _abort_on_duplicate_outputs(*a, **k): return _common._abort_on_duplicate_out
 def setup_logger(*a, **k): return _common.setup_logger(_G, *a, **k)
 
 
+_utf8_console = _common._utf8_console
+
+
 # Machine-readable run summary for the jxl_photo.py wrapper.
 #
 # A manifest run spawns one child PER ENTRY, each writing its own log file, so
@@ -5154,6 +5157,7 @@ def main():
     for _gname, _gvalue in _RUN_DEFAULTS.items():
         globals()[_gname] = _gvalue
 
+    _utf8_console()      # before argparse prints anything (#661)
     parser = build_parser()
     args = parser.parse_args()
 
