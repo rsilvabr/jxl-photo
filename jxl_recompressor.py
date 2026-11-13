@@ -5034,22 +5034,75 @@ def _find_sources(args, drop_derivatives=True):
             logger.error(f"Not a JXL file: {args.input}")
             sys.exit(1)
         files = [args.input]
-        input_root = args.input.parent
     elif args.mode in (0, 1):
         files = find_files_mode0(args.input)
-        input_root = args.input
     elif args.mode == 6:
         files = keep(find_jxls_mode6(args.input))
-        input_root = args.input
     elif args.mode == 7:
         files = find_jxls_mode7(args.input)
         if not EXPORT_JXL_SUBFOLDER:
             files = keep(files)
-        input_root = args.input
     else:
         files = find_jxls_recursive(args.input)
-        input_root = args.input
-    return single_file, files, input_root
+    return single_file, files, _input_root(args, single_file)
+
+
+def _input_root(args, single_file: bool):
+    """The folder the run's sources are resolved against: the input, or a
+    single JXL's own folder."""
+    return args.input.parent if single_file else args.input
+
+
+def _output_root(args, single_file: bool):
+    """The output positional where the mode honours it (modes 0/2; a single
+    JXL in every mode but 1), else None: moved out of main() so main() and
+    _planned_output read one answer."""
+    if single_file:
+        if args.mode == 1:
+            return None
+        return args.output
+    return args.output if args.mode in (0, 2) else None
+
+
+def _renamed_output(final_path: Path, args) -> Path:
+    """--rename-from/--rename-to applied to a planned output's file name
+    (_apply_rename: the stem only, first occurrence)."""
+    if not args.rename_from:
+        return final_path
+    return final_path.with_name(_apply_rename(final_path.name, args.rename_from,
+                                              args.rename_to))
+
+
+def _planned_output(f: Path, args, rename: bool = True):
+    """Where a run with these arguments writes f's output, or None when the
+    mode leaves f out (outside the export marker or the mode-7 subfolder).
+    `rename=False` is the path before --rename-from: main() checks the
+    rename's refusals against it (in place, empty name) and then applies
+    _renamed_output, the step `rename=True` takes here. One answer for
+    main() and the wrapper's collision scan (refactor C1). Needs args.input,
+    args.output, args.mode, args.rename_from and args.rename_to; the marker
+    and folder settings are this module's globals. An invalid mode raises
+    ValueError (resolve_output)."""
+    single_file = args.input.is_file()
+    input_root = _input_root(args, single_file)
+    output_root = _output_root(args, single_file)
+    if args.mode == 0:
+        if output_root is not None:
+            final_path = output_root / f.name
+        else:
+            final_path = f                       # in place
+    elif args.mode == 1:
+        final_path = f.parent / CONVERTED_JXL_FOLDER / f.name
+    elif args.mode == 2:
+        # Without an explicit output folder, default to a SUBFOLDER: input
+        # and output share the .jxl extension here, so flattening into the
+        # input root would land root-level files on top of themselves.
+        final_path = (output_root or (input_root / CONVERTED_JXL_FOLDER)) / f.name
+    else:
+        final_path = resolve_output(f, args.mode, input_root, single_file)
+        if final_path is None:
+            return None                          # outside the marker/subfolder
+    return _renamed_output(final_path, args) if rename else final_path
 
 
 def _planned_sources(args, read_markers=True) -> list:
@@ -5173,13 +5226,7 @@ def main():
                     "one too (EXPLORER_THUMBNAIL = auto; --explorer-thumbnail off: none)")
 
     # --- Plan: resolve outputs, then classify + policy per file ------------
-    if single_file:
-        if args.mode == 1:
-            output_root = None
-        else:
-            output_root = args.output
-    else:
-        output_root = args.output if args.mode in (0, 2) else None
+    # (Each output's folder: _planned_output, through _output_root.)
     if args.output is not None and args.mode not in (0, 2):
         logger.warning(f"The output positional is only honored in modes 0 and 2 "
                        f"(mode {args.mode} computes its own folders) — ignoring it")
@@ -5220,26 +5267,13 @@ def main():
     failures = []
     n_rename_missing = 0
     for f in files:
-        if args.mode == 0:
-            if output_root is not None:
-                final_path = output_root / f.name
-            else:
-                final_path = f                       # in place
-        elif args.mode == 1:
-            final_path = f.parent / CONVERTED_JXL_FOLDER / f.name
-        elif args.mode == 2:
-            # Without an explicit output folder, default to a SUBFOLDER: input
-            # and output share the .jxl extension here, so flattening into the
-            # input root would land root-level files on top of themselves.
-            final_path = (output_root or (input_root / CONVERTED_JXL_FOLDER)) / f.name
-        else:
-            try:
-                final_path = resolve_output(f, args.mode, input_root, single_file)
-            except ValueError as e:
-                logger.error(str(e))
-                sys.exit(2)
-            if final_path is None:
-                continue                             # outside the marker/subfolder
+        try:
+            final_path = _planned_output(f, args, rename=False)
+        except ValueError as e:
+            logger.error(str(e))
+            sys.exit(2)
+        if final_path is None:
+            continue                                 # outside the marker/subfolder
         if args.rename_from:
             if _same_dir(final_path, f):
                 # In place (mode 8, mode 0 without an output folder): a renamed
@@ -5257,7 +5291,7 @@ def main():
                 sys.exit(2)
             if new_name == final_path.name:
                 n_rename_missing += 1
-            final_path = final_path.with_name(new_name)
+            final_path = _renamed_output(final_path, args)
         # abspath on both sides: an absolute output next to a relative input
         # (or the reverse) names the SAME file, and missing that made the run
         # write the re-encode straight over its own input instead of taking

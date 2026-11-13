@@ -4834,6 +4834,16 @@ def _configure_run(parser, args, _pre_run_globals):
     return log_file
 
 
+def _output_root(args):
+    """The root resolve_output gets: the output positional, else the input
+    folder (a single JXL's own folder). One answer for _find_sources and
+    _planned_output. Mode 2's mkdir is deferred until after the dry-run
+    check — a simulation must not create folders on disk."""
+    if args.input.is_file():
+        return args.output or args.input.parent
+    return args.output or args.input
+
+
 def _find_sources(args):
     """Which JXLs this run takes and the output root, per mode: moved out of
     main() unchanged (refactor plan 261113, A3). One place that answers
@@ -4841,7 +4851,6 @@ def _find_sources(args):
     single_file = args.input.is_file()
     if single_file:
         jxls = [args.input]
-        output_root = args.output or args.input.parent
     else:
         if args.mode in (0, 1):
             jxls = find_jxls_flat(args.input)      # flat — subfolders not touched
@@ -4851,13 +4860,20 @@ def _find_sources(args):
             jxls = find_jxls_mode7(args.input)
         else:
             jxls = find_jxls_recursive(args.input)
-        if args.mode == 2:
-            output_root = args.output or args.input
-            # mkdir deferred until after the dry-run check — a simulation must
-            # not create folders on disk.
-        else:
-            output_root = args.output or args.input
-    return single_file, jxls, output_root
+    return single_file, jxls, _output_root(args)
+
+
+def _planned_output(naming_path: Path, args):
+    """Where a run with these arguments writes the TIFF named after
+    `naming_path`, or None when the mode leaves it out (outside the export
+    marker or the mode-7 subfolder). main() passes each page group's naming
+    path (_group_naming_path: the group comes from the markers); the
+    wrapper's collision scan passes each JXL itself, the approximation it has
+    always made, because grouping reads every file's markers (refactor C1).
+    Needs args.input, args.output and args.mode; the marker and folder
+    settings are this module's globals."""
+    return resolve_output(naming_path, args.mode, _output_root(args),
+                          single_file=args.input.is_file())
 
 
 def _planned_sources(args, read_markers=True) -> list:
@@ -4960,8 +4976,7 @@ def main():
                 logger.warning(f"SKIP group with only thumbnails | {main_jxl.name}")
                 continue
 
-        tiff = resolve_output(_group_naming_path(main_jxl, entries, group_size > 1), args.mode, output_root,
-                              single_file=single_file)
+        tiff = _planned_output(_group_naming_path(main_jxl, entries, group_size > 1), args)
         if tiff is None:
             continue
         tasks.append({

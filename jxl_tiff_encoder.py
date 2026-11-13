@@ -6526,40 +6526,45 @@ def _configure_run(parser, args):
     return log_file, _needs_decode
 
 
+def _output_root(args):
+    """The output root of a run: the output positional in modes 0/1/2, else
+    the input folder (a single TIFF's own folder in modes 0/1); the input in
+    every other mode. One answer for _find_sources and _planned_output."""
+    if args.mode in (0, 1) and args.input.is_file():
+        return args.output or args.input.parent
+    if args.mode in (0, 1, 2):
+        # Mode 0: output_root = output_dir if given, else same folder as each TIFF
+        return args.output or args.input
+    return args.input
+
+
 def _find_sources(args):
     """Which TIFFs this run takes and the output root, per mode: moved out of
     main() unchanged (refactor plan 261113, A3). One place that answers
     "which files", so the wrapper can ask it instead of guessing (C1)."""
     if args.mode in (0, 1) and args.input.is_file():
         tiffs = [args.input]
-        output_root = args.output or args.input.parent
     elif args.mode in (0, 1):
         # Directory input: flat (non-recursive)
-        # Mode 0: output_root = output_dir if given, else same folder as each TIFF
         tiffs = find_files_mode0(args.input)
-        output_root = args.output or args.input
     elif args.mode == 2:
         # Mode 2: recursive, all files to output_root (single file also accepted)
         if args.input.is_file():
             tiffs = [args.input]
         else:
             tiffs = find_tiffs_recursive(args.input)
-        output_root = args.output or args.input
         # mkdir deferred until after the dry-run check — a simulation must
         # not create folders on disk.
     elif args.mode == 6:
         tiffs = find_tiffs_mode6(args.input)
-        output_root = args.input
     elif args.mode == 7:
         tiffs = find_tiffs_mode7(args.input)
-        output_root = args.input
     elif args.mode == 8:
         # Mode 8: in-place recursive + delete source (single file also accepted)
         if args.input.is_file():
             tiffs = [args.input]
         else:
             tiffs = find_tiffs_recursive(args.input)
-        output_root = args.input
     else:
         # Modes 3/4/5: a single FILE input is valid too (find_tiffs_recursive
         # only works on directories and would silently find nothing).
@@ -6567,8 +6572,35 @@ def _find_sources(args):
             tiffs = [args.input]
         else:
             tiffs = find_tiffs_recursive(args.input)
-        output_root = args.input
-    return tiffs, output_root
+    return tiffs, _output_root(args)
+
+
+def _planned_output(t: Path, args):
+    """Where a run with these arguments writes t's JXL, or None when the mode
+    leaves t out (outside the export marker in modes 6/7). It is the MAIN
+    JXL: the pages of a split TIFF land next to it, under names only the open
+    TIFF can tell (convert_multipage). The first half of main()'s _plan_one,
+    moved here so main() and the wrapper's collision scan get one answer
+    (refactor C1). Needs args.input, args.output and args.mode; the marker
+    and folder settings are this module's globals."""
+    output_root = _output_root(args)
+    if args.mode == 0:
+        if output_root != args.input:
+            main_jxl = output_root / t.with_suffix(".jxl").name
+        else:
+            main_jxl = t.parent / t.with_suffix(".jxl").name
+    elif args.mode == 1:
+        main_jxl = t.parent / CONVERTED_JXL_FOLDER / t.with_suffix(".jxl").name
+    elif args.mode == 2:
+        if args.output is not None:
+            main_jxl = output_root / t.with_suffix(".jxl").name
+        elif args.input.is_file():
+            main_jxl = t.parent / CONVERTED_JXL_FOLDER / t.with_suffix(".jxl").name
+        else:
+            main_jxl = output_root / t.with_suffix(".jxl").name
+    else:
+        main_jxl = resolve_output(t, args.mode, args.input)
+    return main_jxl
 
 
 def _planned_sources(args, read_markers=True) -> list:
@@ -6847,22 +6879,7 @@ def main():
         """Resolve the output path and page list for one TIFF. Thread-safe:
         touches only locals plus the lock-protected discard counters."""
         # Resolve the main JXL path just to know the output directory
-        if args.mode == 0:
-            if output_root != args.input:
-                main_jxl = output_root / t.with_suffix(".jxl").name
-            else:
-                main_jxl = t.parent / t.with_suffix(".jxl").name
-        elif args.mode == 1:
-            main_jxl = t.parent / CONVERTED_JXL_FOLDER / t.with_suffix(".jxl").name
-        elif args.mode == 2:
-            if args.output is not None:
-                main_jxl = output_root / t.with_suffix(".jxl").name
-            elif args.input.is_file():
-                main_jxl = t.parent / CONVERTED_JXL_FOLDER / t.with_suffix(".jxl").name
-            else:
-                main_jxl = output_root / t.with_suffix(".jxl").name
-        else:
-            main_jxl = resolve_output(t, args.mode, args.input)
+        main_jxl = _planned_output(t, args)
 
         if main_jxl is None:
             return ("skipped_by_mode", None)  # e.g. outside _EXPORT
