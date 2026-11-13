@@ -3708,6 +3708,22 @@ def _apply_staging_args(args) -> None:
         _clean_staging(TEMP2_DIR)
 
 
+def _transcode_sources(args, decode):
+    """The files a lossless transcode run takes (JXLs to decode, else JPEGs;
+    flat in modes 0/1) and its output root: moved out of cmd_transcode
+    unchanged, so _planned_sources asks the same finders (refactor C1)."""
+    if args.input.is_file():
+        files = [args.input]
+        output_root = args.output or args.input.parent
+    elif decode:
+        files = find_jxls_flat(args.input) if args.mode in (0, 1) else find_jxls_recursive(args.input)
+        output_root = args.output or args.input
+    else:
+        files = find_jpegs_flat(args.input) if args.mode in (0, 1) else find_jpegs_recursive(args.input)
+        output_root = args.output or args.input
+    return files, output_root
+
+
 def cmd_transcode(args, auto_decode: bool = False):
     """Returns (errors, cancelled): error count and whether the user declined
     the delete confirmation."""
@@ -3765,15 +3781,7 @@ def cmd_transcode(args, auto_decode: bool = False):
                        "transcode paths (only the lossy convert path applies them)")
 
     # Collect files
-    if args.input.is_file():
-        files = [args.input]
-        output_root = args.output or args.input.parent
-    elif decode:
-        files = find_jxls_flat(args.input) if args.mode in (0, 1) else find_jxls_recursive(args.input)
-        output_root = args.output or args.input
-    else:
-        files = find_jpegs_flat(args.input) if args.mode in (0, 1) else find_jpegs_recursive(args.input)
-        output_root = args.output or args.input
+    files, output_root = _transcode_sources(args, decode)
 
     if not files:
         logger.warning("No input files found.")
@@ -5822,6 +5830,53 @@ def process_group_convert(group_pairs: list, workers: int, direction: str,
     # the old file and delete the source anyway).
     return results, moved_finals
 
+def _convert_sources(args, direction):
+    """The files a convert run takes, its output root and its direction (a
+    JPEG/PNG -> JXL run over a folder with neither falls back to its JXLs):
+    moved out of cmd_convert unchanged, so _planned_sources asks the same
+    finders (refactor C1)."""
+    if args.input.is_file():
+        files = [args.input]
+        output_root = args.output or args.input.parent
+    elif direction == "to_jxl":
+        jpegs = find_jpegs_flat(args.input) if args.mode in (0, 1) else find_jpegs_recursive(args.input)
+        pngs = find_pngs_flat(args.input) if args.mode in (0, 1) else find_pngs_recursive(args.input)
+        # --from-jpeg: restrict to JPEG inputs only. The wrapper's
+        # "JPEG -> JXL lossy" workflow uses this so PNGs in the folder are
+        # never converted (or deleted in mode 8) behind the user's back.
+        if getattr(args, "from_jpeg", False):
+            if pngs:
+                logger.info(f"--from-jpeg: ignoring {len(pngs)} PNG file(s)")
+            pngs = []
+        files = jpegs + pngs
+        # If no JPEGs/PNGs found, fall back to JXLs (auto-detect direction).
+        # Suppressed under --from-jpeg (the direction was explicit).
+        if not files and not getattr(args, "from_jpeg", False):
+            jxls = find_jxls_flat(args.input) if args.mode in (0, 1) else find_jxls_recursive(args.input)
+            if jxls:
+                files = jxls
+                direction = "from_jxl"
+                if args.format is None:
+                    args.format = "jpeg"
+                # Same per-format defaults as the normal from_jxl branch:
+                # PNG keeps 16-bit, JPEG is 8-bit (JPEG has no 16-bit).
+                if args.bit_depth is None:
+                    args.bit_depth = PNG_DEFAULT_BIT_DEPTH if args.format == "png" else 8
+                logger.debug("Auto-detected JXL content, switching to from_jxl")
+        elif direction == "to_jxl":
+            # Mixed folder with --force-convert: JXLs are silently ignored
+            # without this note (use auto mode for mixed content instead).
+            jxls_present = find_jxls_flat(args.input) if args.mode in (0, 1) else find_jxls_recursive(args.input)
+            if jxls_present:
+                logger.warning(f"{len(jxls_present)} JXL file(s) present but ignored "
+                               f"(JPEG/PNG -> JXL direction). Use auto mode for mixed folders.")
+        output_root = args.output or args.input
+    else:
+        files = find_jxls_flat(args.input) if args.mode in (0, 1) else find_jxls_recursive(args.input)
+        output_root = args.output or args.input
+    return files, output_root, direction
+
+
 def cmd_convert(args, from_jxl: bool = True):
     """Returns (errors, cancelled)."""
     global _counter, DELETE_SOURCE
@@ -5870,45 +5925,7 @@ def cmd_convert(args, from_jxl: bool = True):
 
 
     # Collect files (ICC label, op_type, and mode_str are set after this)
-    if args.input.is_file():
-        files = [args.input]
-        output_root = args.output or args.input.parent
-    elif direction == "to_jxl":
-        jpegs = find_jpegs_flat(args.input) if args.mode in (0, 1) else find_jpegs_recursive(args.input)
-        pngs = find_pngs_flat(args.input) if args.mode in (0, 1) else find_pngs_recursive(args.input)
-        # --from-jpeg: restrict to JPEG inputs only. The wrapper's
-        # "JPEG -> JXL lossy" workflow uses this so PNGs in the folder are
-        # never converted (or deleted in mode 8) behind the user's back.
-        if getattr(args, "from_jpeg", False):
-            if pngs:
-                logger.info(f"--from-jpeg: ignoring {len(pngs)} PNG file(s)")
-            pngs = []
-        files = jpegs + pngs
-        # If no JPEGs/PNGs found, fall back to JXLs (auto-detect direction).
-        # Suppressed under --from-jpeg (the direction was explicit).
-        if not files and not getattr(args, "from_jpeg", False):
-            jxls = find_jxls_flat(args.input) if args.mode in (0, 1) else find_jxls_recursive(args.input)
-            if jxls:
-                files = jxls
-                direction = "from_jxl"
-                if args.format is None:
-                    args.format = "jpeg"
-                # Same per-format defaults as the normal from_jxl branch:
-                # PNG keeps 16-bit, JPEG is 8-bit (JPEG has no 16-bit).
-                if args.bit_depth is None:
-                    args.bit_depth = PNG_DEFAULT_BIT_DEPTH if args.format == "png" else 8
-                logger.debug("Auto-detected JXL content, switching to from_jxl")
-        elif direction == "to_jxl":
-            # Mixed folder with --force-convert: JXLs are silently ignored
-            # without this note (use auto mode for mixed content instead).
-            jxls_present = find_jxls_flat(args.input) if args.mode in (0, 1) else find_jxls_recursive(args.input)
-            if jxls_present:
-                logger.warning(f"{len(jxls_present)} JXL file(s) present but ignored "
-                               f"(JPEG/PNG -> JXL direction). Use auto mode for mixed folders.")
-        output_root = args.output or args.input
-    else:
-        files = find_jxls_flat(args.input) if args.mode in (0, 1) else find_jxls_recursive(args.input)
-        output_root = args.output or args.input
+    files, output_root, direction = _convert_sources(args, direction)
 
     if not files:
         logger.warning("No input files found.")
@@ -6271,6 +6288,55 @@ def _delete_converted_sources(results, pairs, moved_finals):
 # AUTO MODE (Per-file detection for directories)
 # --------------------------------------------─
 
+def _auto_sources(args):
+    """The JPEGs, PNGs and JXLs an auto run takes, after --from-jxl,
+    --from-jpeg and the one-direction rule of a deleting run (#542): moved
+    out of cmd_auto unchanged, so _planned_sources asks the same finders
+    (refactor C1)."""
+    if args.mode in (0, 1):
+        jpeg_files = find_jpegs_flat(args.input)
+        png_files = find_pngs_flat(args.input)
+        jxl_files = find_jxls_flat(args.input)
+    else:
+        jpeg_files = find_jpegs_recursive(args.input)
+        png_files = find_pngs_recursive(args.input)
+        jxl_files = find_jxls_recursive(args.input)
+
+    # --from-jxl: restrict auto mode to the JXL decode direction. JPEG/PNG
+    # inputs are left untouched (used by the wrapper's "JXL -> JPEG auto"
+    # workflow, which must never create new JXLs from folder JPEGs).
+    if getattr(args, "from_jxl", False):
+        if jpeg_files or png_files:
+            logger.info(f"--from-jxl: ignoring {len(jpeg_files)} JPEG and {len(png_files)} PNG file(s)")
+        jpeg_files = []
+        png_files = []
+
+    # --from-jpeg: the mirror image — restrict the encode direction to JPEG
+    # sources and leave PNGs untouched. Honoured here too, not just in convert
+    # mode: silently ignoring a direction flag would convert (and, under
+    # --mode 8, delete) PNGs the user explicitly scoped out.
+    elif getattr(args, "from_jpeg", False):
+        if png_files:
+            logger.info(f"--from-jpeg: ignoring {len(png_files)} PNG file(s)")
+        png_files = []
+
+    # #542: a DELETING auto run acts in one direction. Auto mode converts
+    # both ways in one folder; armed with --delete-source it decoded a lossy
+    # 16-bit master (a TIFF-encoder JXL, no jbrd) into an 8-bit JPEG and
+    # deleted the master, and the next run of the same command turned the
+    # JXLs it had just archived back into JPEGs. A deleting run decodes JXLs
+    # only when that direction was asked for: --from-jxl (what the wrapper's
+    # JXL -> JPEG workflow passes) or --decode (which, on a folder, never
+    # reaches this function: it is the lossless jbrd recovery).
+    if (DELETE_SOURCE and jxl_files
+            and not (args.decode or getattr(args, "from_jxl", False))):
+        logger.warning(f"--delete-source: {len(jxl_files)} JXL file(s) left untouched. "
+                       f"A deleting run only decodes JXLs when asked to: "
+                       f"--from-jxl (every JXL) or --decode (lossless recovery).")
+        jxl_files = []
+    return jpeg_files, png_files, jxl_files
+
+
 def cmd_auto(args):
     """Auto-detect per-file for batch processing.
 
@@ -6320,47 +6386,7 @@ def cmd_auto(args):
     
     # Collect JPEG files (encode direction), PNG files (convert encode direction)
     # and JXL files (decode/convert direction). Modes 0 and 1 are flat.
-    if args.mode in (0, 1):
-        jpeg_files = find_jpegs_flat(args.input)
-        png_files = find_pngs_flat(args.input)
-        jxl_files = find_jxls_flat(args.input)
-    else:
-        jpeg_files = find_jpegs_recursive(args.input)
-        png_files = find_pngs_recursive(args.input)
-        jxl_files = find_jxls_recursive(args.input)
-
-    # --from-jxl: restrict auto mode to the JXL decode direction. JPEG/PNG
-    # inputs are left untouched (used by the wrapper's "JXL -> JPEG auto"
-    # workflow, which must never create new JXLs from folder JPEGs).
-    if getattr(args, "from_jxl", False):
-        if jpeg_files or png_files:
-            logger.info(f"--from-jxl: ignoring {len(jpeg_files)} JPEG and {len(png_files)} PNG file(s)")
-        jpeg_files = []
-        png_files = []
-
-    # --from-jpeg: the mirror image — restrict the encode direction to JPEG
-    # sources and leave PNGs untouched. Honoured here too, not just in convert
-    # mode: silently ignoring a direction flag would convert (and, under
-    # --mode 8, delete) PNGs the user explicitly scoped out.
-    elif getattr(args, "from_jpeg", False):
-        if png_files:
-            logger.info(f"--from-jpeg: ignoring {len(png_files)} PNG file(s)")
-        png_files = []
-
-    # #542: a DELETING auto run acts in one direction. Auto mode converts
-    # both ways in one folder; armed with --delete-source it decoded a lossy
-    # 16-bit master (a TIFF-encoder JXL, no jbrd) into an 8-bit JPEG and
-    # deleted the master, and the next run of the same command turned the
-    # JXLs it had just archived back into JPEGs. A deleting run decodes JXLs
-    # only when that direction was asked for: --from-jxl (what the wrapper's
-    # JXL -> JPEG workflow passes) or --decode (which, on a folder, never
-    # reaches this function: it is the lossless jbrd recovery).
-    if (DELETE_SOURCE and jxl_files
-            and not (args.decode or getattr(args, "from_jxl", False))):
-        logger.warning(f"--delete-source: {len(jxl_files)} JXL file(s) left untouched. "
-                       f"A deleting run only decodes JXLs when asked to: "
-                       f"--from-jxl (every JXL) or --decode (lossless recovery).")
-        jxl_files = []
+    jpeg_files, png_files, jxl_files = _auto_sources(args)
 
     if not jpeg_files and not png_files and not jxl_files:
         logger.warning("No JPEG, PNG or JXL files found.")
