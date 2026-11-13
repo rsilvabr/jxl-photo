@@ -22,17 +22,14 @@ Requirements:
   numpy + imagecodecs (only for --verify-roundtrip)
 """
 
-import subprocess, os, platform, tempfile, threading, logging, sys, shutil, uuid, hashlib, json
-import struct, base64, atexit
+import subprocess, os, tempfile, threading, logging, sys, shutil, uuid, hashlib, json
+import struct, atexit
 import math
 import re
-import functools
-import contextlib
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
 import time
-from typing import Any, Dict, Optional
+from typing import Dict, Optional
 import argparse
 
 import numpy as np
@@ -5107,13 +5104,7 @@ def _find_sources(args):
 
 
 def main():
-    global OVERWRITE, DELETE_SOURCE, DELETE_CONFIRM, VERIFY_ROUNDTRIP, DELETE_SKIPPED
-    global CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING, TEMP2_DIR, ENCODE_TAG_MODE
-    global ON_DOWNGRADE, ON_UNKNOWN, ON_SCAN, SCAN_SCOPE, JBRD_POLICY, KEEP_SMALLER, PROVENANCE_CHECK
-    global OVERWRITE_GUARD
-    global REDERIVE_ON_ENCODE_CHANGE, REDERIVE_ON_LOWER_EFFORT
-    global ON_REGENERATION, EXPORT_MARKER, EXPORT_JXL_SUBFOLDER, EXPORT_JXL_FOLDER
-    global OUTPUT_ICC, EXPLORER_THUMBNAIL
+    global EXPLORER_THUMBNAIL
     global _gen_divergence_logged, _error_details
     global _OUTPUT_ICC_LABEL, _OUTPUT_ICC_BYTES, _OUTPUT_ICC_PATH, _SRGB_ICC_PATH
     global _FORCE_REDERIVE

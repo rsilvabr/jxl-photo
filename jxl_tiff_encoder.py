@@ -11,15 +11,13 @@ Requirements:
   exiftool     ->  https://exiftool.org
 """
 
-import subprocess, os, platform, tempfile, threading, zlib, struct, logging, sys, shutil, base64, uuid, hashlib, json
+import subprocess, os, platform, tempfile, threading, zlib, struct, logging, sys, shutil, uuid, hashlib, json
 import math
 import re
-import functools
-import contextlib
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-import time
+import time  # noqa: F401 (tests reach the clock through the script: mod.time, AGENTS.md)
 from typing import Any, Dict, Optional
 import argparse
 import numpy as np
@@ -6735,7 +6733,7 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
 
-    global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING, CJXL_MODULAR, USE_RAM_FOR_PNG, DELETE_SOURCE, DELETE_CONFIRM, TEMP2_DIR, ENCODE_TAG_MODE, D50_PATCH_MODE, MULTIPAGE_TIFF_MODE, THUMBNAIL_MODE, THUMBNAIL_SUFFIX, SCAN_DISTANCE, SCAN_SCOPE, EIGHT_BIT_DISTANCE, EIGHT_BIT_LOSSLESS_UP_TO, WARN_DISCARDED_THUMBNAILS, ICC_PNG_STRATEGY, ICC_CACHE_DIR_OVERRIDE, VERIFY_ROUNDTRIP, DELETE_SKIPPED, PROVENANCE_CHECK, ADOPT_SCAN, OVERWRITE_GUARD
+    global ICC_CACHE_DIR_OVERRIDE
     global _gen_divergence_logged
     _gen_divergence_logged = False
 
@@ -7227,8 +7225,8 @@ def main():
     logger.info(f"\n{'-'*50}")
     if args.sync:
         logger.info(f"SYNC done: {synced} reconverted | {skipped} up to date | {err} errors")
-        logger.info(f"  -> Reconverted: TIFFs newer than their existing JXL")
-        logger.info(f"  -> Up to date: JXL is newer than or equal to TIFF")
+        logger.info("  -> Reconverted: TIFFs newer than their existing JXL")
+        logger.info("  -> Up to date: JXL is newer than or equal to TIFF")
     else:
         logger.info(f"Done: {ok} OK | {overwritten} overwrites | {skipped} skipped | {err} errors")
 

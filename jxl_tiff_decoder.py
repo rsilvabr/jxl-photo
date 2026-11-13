@@ -18,12 +18,10 @@ Requirements:
  exiftool → https://exiftool.org
 """
 
-import subprocess, os, tempfile, threading, logging, sys, shutil, re, base64, struct, uuid, io, json, hashlib
-import contextlib
+import subprocess, os, tempfile, threading, logging, sys, shutil, re, struct, uuid, io, json, hashlib
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
-import time
+import time  # noqa: F401 (tests reach the clock through the script: mod.time, AGENTS.md)
 import argparse
 import numpy as np
 from PIL import Image
@@ -1734,7 +1732,7 @@ def apply_icc_transform(img_array, source_icc, target_icc, tmp_dir):
                     indices = np.clip(indices, 0, len(lut)-2)
                     frac = (channel * (len(lut)-1)) - indices
                     pixels[:,:,c] = lut[indices] + frac * (lut[indices+1] - lut[indices])
-                logger.debug(f" >Applied LUT TRC")
+                logger.debug(" >Applied LUT TRC")
 
             result_array = (pixels * 65535.0).astype(np.uint16)
 
@@ -2062,7 +2060,7 @@ def cleanup_xmp_icc(tiff_path):
                 ["-overwrite_original",
                  f"-XMP-xmp:CreatorTool={_argfile_safe(clean)}", str(tiff_path)], timeout=EXIFTOOL_TIMEOUT
             )
-            logger.debug(f" >Cleaned up XMP CreatorTool")
+            logger.debug(" >Cleaned up XMP CreatorTool")
     except Exception as e:
         logger.debug(f"XMP cleanup skipped: {e}")
 
@@ -2199,7 +2197,7 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data, extratags=None):
                 preview = preview_srgb
                 if original_mode == 'L' and preview.mode == 'RGB':
                     preview = preview.convert('L')
-                logger.debug(f" >Preview converted to sRGB")
+                logger.debug(" >Preview converted to sRGB")
             except Exception as e:
                 logger.debug(f" >Preview color conversion failed: {e}, using original")
         
@@ -2318,7 +2316,7 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data, extratags=None):
             logger.info(f" >Added JPEG preview ({new_w}x{new_h})"
                         + (" with ICC" if icc_data else " (no ICC on this page)"))
         else:
-            logger.warning(f" >Temp file not created!")
+            logger.warning(" >Temp file not created!")
 
     except Exception as e:
         logger.warning(f"Preview generation failed: {e}")
@@ -2565,7 +2563,7 @@ def decode_jxl_to_numpy(jxl_path, tmp_dir, target_icc_path=None, target_depth=No
     elif mode == 'matrix':
         # PPM has no alpha channel: RGBA sources lose alpha in matrix mode.
         # (Use roundtrip/basic/none to preserve it.)
-        logger.info(f" >Matrix mode note: alpha channels are not preserved (PPM path)")
+        logger.info(" >Matrix mode note: alpha channels are not preserved (PPM path)")
         decode_rec2020_linear(jxl_path, ppm_path, djxl_icc_path)
         pixels = read_ppm_to_numpy(ppm_path)
         djxl_icc = djxl_icc_path.read_bytes() if djxl_icc_path.exists() else None
@@ -4905,10 +4903,6 @@ def main():
     # Every module global this function assigns (D-1). Declared as one block at
     # the top so no assignment can ever textually precede its declaration when
     # the validation order below changes.
-    global OVERWRITE, USE_MATRIX_MODE, FORCE_BASIC_MODE, FORCE_NONE_MODE
-    global CLEANUP_XMP_ICC_MARKER, DJXL_OUTPUT_DEPTH, TIFF_COMPRESSION, TEMP2_DIR, DELETE_SOURCE, DELETE_CONFIRM, ADD_JPEG_PREVIEW, THUMBNAIL_HANDLING, THUMBNAIL_SUFFIX, RECONSTRUCT_MULTIPAGE, DEPTH_POLICY, DELETE_SKIPPED, PROVENANCE_CHECK, ALLOW_INCOMPLETE_GROUPS, OVERWRITE_GUARD
-    global EXPORT_JXL_SUBFOLDER, EXPORT_MARKER, EXCLUDE_FOLDERS
-    global EXIFTOOL_IGNORE_MINOR
 
     _minor_metadata_failures.clear()        # per run
     _minor_metadata_unchecked.clear()

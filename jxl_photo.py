@@ -112,7 +112,7 @@ try:
     from rich.table import Table
     from rich.box import SIMPLE as BOX_SIMPLE, ROUNDED as BOX_ROUNDED
     from rich.console import Group
-    from rich.prompt import Prompt, IntPrompt, Confirm
+    from rich.prompt import Prompt, Confirm
     from rich.markup import escape as _markup_escape
     RICH_AVAILABLE = True
     # No force_terminal: when stdout is redirected to a file/pipe, rich must
@@ -450,8 +450,8 @@ def _session_number_error(session: Dict) -> Optional[str]:
         if mode not in _SESSION_MODES:
             return f"mode {mode} does not exist (valid: 0-8, or 99 for a manifest)"
 
-    for field, label, low, high in _SESSION_NUMBERS:
-        raw = session.get(field)
+    for key, label, low, high in _SESSION_NUMBERS:
+        raw = session.get(key)
         if raw in (None, ""):
             continue
         try:
@@ -473,24 +473,24 @@ def _session_number_error(session: Dict) -> Optional[str]:
         if depth not in _SESSION_BIT_DEPTHS:
             return f"bit depth is not a valid value: {depth} (valid: 8/16)"
 
-    for field, allowed in _SESSION_CHOICES.items():
-        raw = session.get(field)
+    for key, allowed in _SESSION_CHOICES.items():
+        raw = session.get(key)
         if raw in (None, ""):
             continue
         if not isinstance(raw, str) or raw.lower() not in allowed:
-            return (f"{field[len('last_'):]} is not a known value: {raw!r} "
+            return (f"{key[len('last_'):]} is not a known value: {raw!r} "
                     f"(valid: {'/'.join(allowed)})")
 
     # The two fields that pick WHICH script runs. Case-sensitive on purpose
     # (see the constants): accepting "Tiff" here would route the replay to
     # the transcoder on a TIFF tree while the panel says TIFF -> JXL.
-    for field, allowed in (("last_origin_format", _SESSION_ORIGIN_FORMATS),
+    for key, allowed in (("last_origin_format", _SESSION_ORIGIN_FORMATS),
                            ("last_dest_format", _SESSION_DEST_FORMATS)):
-        raw = session.get(field)
+        raw = session.get(key)
         if raw in (None, ""):
             continue
         if not isinstance(raw, str) or raw not in allowed:
-            return (f"{field[len('last_'):]} is not a known value: {raw!r} "
+            return (f"{key[len('last_'):]} is not a known value: {raw!r} "
                     f"(valid: {'/'.join(allowed)})")
 
     # Same refuse-corrupt rule for a free-form string field that reaches the
@@ -1263,9 +1263,11 @@ class ConfigManager:
         self.save_config()
 
     def _check_tiff_support(self) -> bool:
+        # These probes import a module only to see that it is installed
+        # (and so that PyInstaller bundles it into the exe).
         try:
-            import tifffile
-            import numpy
+            import tifffile  # noqa: F401
+            import numpy  # noqa: F401
             return True
         except ImportError:
             return False
@@ -1273,7 +1275,7 @@ class ConfigManager:
     def _check_imagecodecs(self) -> bool:
         """Check if imagecodecs is available for compressed TIFF support."""
         try:
-            import imagecodecs
+            import imagecodecs  # noqa: F401
             return True
         except ImportError:
             return False
@@ -1286,18 +1288,18 @@ class DependencyChecker:
 
     def _check_pillow(self) -> bool:
         try:
-            import PIL
+            import PIL  # noqa: F401
             return True
         except ImportError:
             return False
 
     def _check_rich(self) -> bool:
         try:
-            import rich
-            import rich.console
-            import rich.table
-            import rich.panel
-            import rich.prompt
+            import rich  # noqa: F401
+            import rich.console  # noqa: F401
+            import rich.table  # noqa: F401
+            import rich.panel  # noqa: F401
+            import rich.prompt  # noqa: F401
             return True
         except ImportError:
             return False
@@ -1759,7 +1761,7 @@ class FolderAnalyzer:
             lines.append(f"   Confidence: {confidence}")
 
             if analysis['reasoning']:
-                lines.append(f"   Reasoning:")
+                lines.append("   Reasoning:")
                 for r in analysis['reasoning']:
                     lines.append(f"     - {r}")
 
@@ -6229,7 +6231,7 @@ class InteractiveMenu:
         export_marker = self.config.config.export_marker
 
         if RICH_AVAILABLE and console:
-            console.print(f"\n[bold cyan]Auto Mode: Analyzing folder structure...[/bold cyan]")
+            console.print("\n[bold cyan]Auto Mode: Analyzing folder structure...[/bold cyan]")
             console.print("[grey70]This may take a moment for large folders...[/grey70]")
         else:
             print("\n--- Auto Mode: Analyzing folder structure... ---")
@@ -6256,15 +6258,12 @@ class InteractiveMenu:
             return False
 
         rec_mode = analysis['recommended_mode']
-        confidence = analysis['confidence']
 
         # Compute folder mappings for the recommended mode
         mappings = analyzer.compute_folder_mappings(analysis, rec_mode)
 
         # Build recommendation options
         mode_names = {m: _mode_title(m, export_marker) for m in range(9)}
-
-        rec_name = mode_names.get(rec_mode, f"Mode {rec_mode}")
 
         if mappings:
             _rows = []
@@ -7489,10 +7488,10 @@ class InteractiveMenu:
                 f"source), but NECESSARY IF YOU MOVED FOLDERS since archiving.")
             if _adopt_ok:
                 pv_explain += (
-                    f"\n  adopt   = for an archive made BEFORE this check existed, which has "
-                    f"no record at all. Each unrecorded output is VERIFIED against its source "
-                    f"and then stamped, so this is a ONE-TIME pass: afterwards the strict "
-                    f"check applies again.")
+                    "\n  adopt   = for an archive made BEFORE this check existed, which has "
+                    "no record at all. Each unrecorded output is VERIFIED against its source "
+                    "and then stamped, so this is a ONE-TIME pass: afterwards the strict "
+                    "check applies again.")
             _pv_list = "/".join(_pv_choices)
             self.ui.markup(f"\n[grey70]{pv_explain}[/grey70]", f"\n{pv_explain}")
             # A typo keeps the default (the plain prompt never asked again).
@@ -7644,8 +7643,8 @@ class InteractiveMenu:
              f"If {origin.upper()} is not found, appends {dest.upper()} and logs a warning."),
 
             ("5", _mode_title(5),
-             f"Creates a sibling folder next to each source folder, without renaming it.\n"
-             f"[cyan]F:/Photos/Raw/[/cyan] → [cyan]F:/Photos/JXL_16bits/[/cyan] (or TIFF_16bits / JXL_jpeg / JPEG_recovered, by direction)"),
+             "Creates a sibling folder next to each source folder, without renaming it.\n"
+             "[cyan]F:/Photos/Raw/[/cyan] → [cyan]F:/Photos/JXL_16bits/[/cyan] (or TIFF_16bits / JXL_jpeg / JPEG_recovered, by direction)"),
 
             ("6", _mode_title(6, export_marker),
              f"ONLY processes files INSIDE folders matching '{export_marker}' (prefix/suffix token).\n"
@@ -7654,10 +7653,10 @@ class InteractiveMenu:
              f"Works with _EXPORT, Export_Lightroom, Lightroom_Export, etc. (case-insensitive)."),
 
             ("7", _mode_title(7, export_marker),
-             f"Like mode 6, but ONLY processes files inside one subfolder of the export marker.\n"
-             f"The subfolder name is asked next (empty = all subfolders = same as mode 6).\n"
-             f"Files in other subfolders within export folders are ignored.\n"
-             f"Use when you keep different colour-space variants in separate subfolders."),
+             "Like mode 6, but ONLY processes files inside one subfolder of the export marker.\n"
+             "The subfolder name is asked next (empty = all subfolders = same as mode 6).\n"
+             "Files in other subfolders within export folders are ignored.\n"
+             "Use when you keep different colour-space variants in separate subfolders."),
 
             ("8", _mode_title(8), inplace_rec_desc),
 
@@ -7715,10 +7714,10 @@ class InteractiveMenu:
         # Manifest mode (99) doesn't need mode-specific config
         if mode == 99:
             if RICH_AVAILABLE and console:
-                console.print(f"\n[bold cyan]Mode settings: Manifest Mode[/bold cyan]")
+                console.print("\n[bold cyan]Mode settings: Manifest Mode[/bold cyan]")
                 console.print(f"[grey70]Running {len(workflow.get('manifest_entries', []))} entries from manifest[/grey70]")
             else:
-                print(f"\n--- Mode settings: Manifest Mode ---")
+                print("\n--- Mode settings: Manifest Mode ---")
             workflow['mode_config'] = mode_config
             return True
 
@@ -7797,15 +7796,15 @@ class InteractiveMenu:
 
         elif mode == 1:
             folder_name = _dest_folder_names(origin, dest)[0]
-            self.ui.markup(f"\n[bold cyan]Mode settings: Subfolder Name[/bold cyan]",
-                           f"\n--- Mode settings: Subfolder Name ---")
+            self.ui.markup("\n[bold cyan]Mode settings: Subfolder Name[/bold cyan]",
+                           "\n--- Mode settings: Subfolder Name ---")
             self.ui.markup(f"Will create: [green]'{_rich_safe(folder_name)}'[/green] in each source folder",
                            f"Will create: '{folder_name}' in each source folder")
 
         elif mode == 3:
             folder_name = _dest_folder_names(origin, dest)[1]
-            self.ui.markup(f"\n[bold cyan]Mode settings: Subfolder Name[/bold cyan]",
-                           f"\n--- Mode settings: Subfolder Name ---")
+            self.ui.markup("\n[bold cyan]Mode settings: Subfolder Name[/bold cyan]",
+                           "\n--- Mode settings: Subfolder Name ---")
             self.ui.markup(f"Will create: [green]'{_rich_safe(folder_name)}'[/green] in each source folder",
                            f"Will create: '{folder_name}' in each source folder")
 
@@ -10056,7 +10055,7 @@ class InteractiveMenu:
                                    workers, workflow, advanced, manifest=False)
 
         if RICH_AVAILABLE and console:
-            console.print(f"\n[bold cyan]Executing:[/bold cyan]")
+            console.print("\n[bold cyan]Executing:[/bold cyan]")
             console.print(f"[grey70]{_rich_safe(' '.join(_display_cmd(cmd)))}[/grey70]\n")
         else:
             print(f"\nExecuting: {' '.join(_display_cmd(cmd))}\n")
@@ -10090,8 +10089,6 @@ class InteractiveMenu:
     @staticmethod
     def _describe_session(session: Dict) -> str:
         """One-line summary of a stored workflow, for the preset list."""
-        origin = (session.get('last_origin_format') or '?').upper()
-        dest = (session.get('last_dest_format') or '?').upper()
         # Coerced like _run_saved_session does: a mode stored as the NUMBER 99
         # (or as "99.0" by a hand edit) still has to read as a manifest here,
         # or the row advertises "mode 99" for a run that replays a CSV.
@@ -10386,9 +10383,9 @@ class InteractiveMenu:
             print(f"  Staging:      {last_staging or '(none)'}")
             _last_adv = session.get('last_advanced_options') or {}
             if _last_adv.get('delete_source'):
-                print(f"  Delete source: ON")
+                print("  Delete source: ON")
             if session.get('last_overwrite_guard') is False:
-                print(f"  Overwrite guard: off")
+                print("  Overwrite guard: off")
             if session.get('last_expert_flags'):
                 print(f"  Expert flags: {session.get('last_expert_flags')}")
             print()

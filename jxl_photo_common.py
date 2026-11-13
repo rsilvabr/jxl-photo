@@ -27,25 +27,19 @@ import base64
 import contextlib
 import functools
 import hashlib
-import io
 import json
 import logging
-import math
 import os
-import platform
 import re
 import shutil
 import struct
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import uuid
-import zlib
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
 
 TOOLKIT_VERSION = "2.29.1"
 
@@ -877,7 +871,6 @@ def _marker_matches(part_lower: str, marker_lower: str) -> bool:
     # cases (Export_Lightroom, Lightroom_Export, My_EXPORT) while rejecting
     # 'exports', 'EXPORTED_RAWS', 'reexport' — and mid-name tokens like
     # 'backup_export_old'.
-    import re as _re
     if part_lower.startswith(bare):
         e = len(bare)
         if e == len(part_lower) or part_lower[e] in '_- ':

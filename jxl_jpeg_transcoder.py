@@ -30,13 +30,11 @@ import tempfile
 import threading
 import hashlib
 import argparse
-import functools
 import json
 import re
 import struct
 import uuid
 import zlib
-import contextlib
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -3706,7 +3704,7 @@ def _apply_staging_args(args) -> None:
 def cmd_transcode(args, auto_decode: bool = False):
     """Returns (errors, cancelled): error count and whether the user declined
     the delete confirmation."""
-    global _counter, STORE_MD5, DELETE_SOURCE, TEMP2_DIR
+    global _counter, STORE_MD5, DELETE_SOURCE
     _counter = {"done": 0, "total": 0}
     _planned_outputs.clear()        # run-scoped (#615)
 
@@ -5840,7 +5838,7 @@ def process_group_convert(group_pairs: list, workers: int, direction: str,
 
 def cmd_convert(args, from_jxl: bool = True):
     """Returns (errors, cancelled)."""
-    global _counter, TEMP2_DIR, DELETE_SOURCE
+    global _counter, DELETE_SOURCE
     _counter = {"done": 0, "total": 0}
     _planned_outputs.clear()        # run-scoped (#615)
     _FORCE_REDERIVE.clear()
@@ -6297,7 +6295,7 @@ def cmd_auto(args):
 
     Returns (errors, cancelled).
     """
-    global _counter, TEMP2_DIR, DELETE_SOURCE, STORE_MD5
+    global _counter, DELETE_SOURCE, STORE_MD5
     _counter = {"done": 0, "total": 0}
     _planned_outputs.clear()        # run-scoped (#615)
     _FORCE_REDERIVE.clear()
