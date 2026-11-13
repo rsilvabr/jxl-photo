@@ -1115,6 +1115,17 @@ Use `--overwrite` to force overwriting existing files, or `--sync` to only overw
 
 This means the existing output file has a more recent modification time than the source. The script assumes the output is up-to-date and skips processing. Use `--overwrite` to force processing regardless of timestamps.
 
+### "cjxl did not transcode it losslessly" on a .jpg
+
+The file is not a JPEG that cjxl can rebuild bit for bit — usually another
+format with a `.jpg` name (a PNG saved as `.jpg` by some apps). cjxl then
+encodes its pixels at its own default distance, which is lossy, so the
+lossless transcode refuses the result: no JXL is written and the file is
+kept (since v2.30.0; before, such a file came out as a lossy JXL logged as
+`OK`). Rename it to its real extension, or use `--force-convert` to encode
+its pixels at the distance you choose. A real JPEG that cjxl cannot
+transcode (CMYK, arithmetic coding) fails in cjxl itself, as before.
+
 ### "MD5 FAIL" on decode
 
 The JXL was modified after encoding, or was not encoded with `--lossless_jpeg=1`. Files encoded by other tools (Lightroom, etc.) won't pass MD5 verification.

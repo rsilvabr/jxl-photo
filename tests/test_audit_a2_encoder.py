@@ -180,7 +180,7 @@ def test_eb_cap_counts_python_buffers(tmp_path, monkeypatch):
 
 @real
 def test_eb_cap_budgets_a_four_channel_page_higher(tmp_path, monkeypatch):
-    """Review V5 of the refactor: with the PNG at zlib level 0, a 16-bit page
+    """#653, review V5 of the refactor: with the PNG at zlib level 0, a 16-bit page
     of 4 channels (an RGB+IR scan) holds ~24 B/px in Python, above the
     3-channel budget; the cap gets the per-channel figure."""
     src = tmp_path / HOSTILE / "SCAN (2)"

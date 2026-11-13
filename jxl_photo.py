@@ -7133,7 +7133,7 @@ class InteractiveMenu:
                         # read_markers=False: the review redraws this count on
                         # every turn, and the recompressor's modes 6/7 would read
                         # the derivative markers of every JXL with exiftool each
-                        # time, silently (review V1). The count stays the one
+                        # time, silently (#652, review V1). The count stays the one
                         # v2.29.1 showed: derivatives included.
                         return len(child._planned_sources(args, read_markers=False))
                 except SystemExit:

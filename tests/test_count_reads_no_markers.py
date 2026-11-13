@@ -1,4 +1,4 @@
-"""The delete preview's file count reads no marker (review V1 of the refactor).
+"""The delete preview's file count reads no marker (#652, review V1 of the refactor).
 
 The review screen redraws the count on every turn. Since F8 the count asks the
 child which files a run takes (_planned_sources); the recompressor's modes 6/7

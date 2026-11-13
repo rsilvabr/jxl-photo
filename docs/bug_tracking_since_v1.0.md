@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #652.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #655.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -30,6 +30,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-82 — the review of the Python refactor](#round-82--the-review-of-the-python-refactor-2026-11-13) | 2026-11-13 | v2.30.0_beta1 | #652–#654 (3) |
 | [Round-81 — the Python refactor](#round-81--the-python-refactor-2026-11-13) | 2026-11-13 | v2.29.1 | #648–#651 (4) |
 | [Round-80 — what the sweep left to decide](#round-80--what-the-sweep-left-to-decide-2026-11-11) | 2026-11-11 | v2.28.0 | #642–#647 (6) |
 | [Round-79 — real files the fixtures did not have](#round-79--real-files-the-fixtures-did-not-have-2026-11-11) | 2026-11-11 | v2.27.1 | #641 (1) |
@@ -97,6 +98,20 @@ were never tagged and never shipped.
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
 
 ---
+
+## Round-82 — the review of the Python refactor (2026-11-13)
+
+The independent review of the refactor (v2.30.0: the shared exiftool
+process, the batch-reader engine, the wizard asking the scripts which files a
+run takes) found #652 and #653; #654 is older and was found while closing the
+refactor. The review's other items were tests, comments and a log line, with
+no number. Nothing here deleted or damaged a file.
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 652 | **The wizard's file count for a JXL → JXL run in modes 6/7 read every JXL's markers with exiftool, at each redraw of the review, with nothing on screen** (never released): the count started asking the recompressor which files a run takes (`_planned_sources`), whose default reads the `jxlphoto-derived` markers to leave the derivatives out (#602) — one exiftool batch over every JXL below the export marker each time the review screen or the delete preview is drawn, with the child's log silenced. Measured: 10.7 s for 2 000 small JXLs on an SSD (v2.29.1: no exiftool, under 1 s); minutes on a hard disk with thousands of masters | `jxl_photo.py` | ✅ Fixed — the count asks with `read_markers=False`, as v2.29.1 counted (derivatives included, no exiftool). `tests/test_count_reads_no_markers.py` (failed before) |
+| 653 | **The encoder's worker memory cap under-budgeted 16-bit pages of four channels (RGB+IR film scans, RGBA)**: the Python side of an encode was budgeted at 19 bytes per pixel whatever the channel count; measured, such a page peaks at about 22.8 B/px with the compressed temp PNG of v2.29.1 and 24.1 B/px with the uncompressed one of v2.30.0. Near the machine's memory limit, one worker too many could start | `jxl_tiff_encoder.py` | ✅ Fixed — `_python_bytes_per_pixel(channels)`: 19 × channels / 3, rounded up (19 for RGB, 26 for four channels), from the largest channel count among the run's pages (`_PAGE_CHANNELS`). `test_eb_cap_budgets_a_four_channel_page_higher` (failed before) |
+| 654 | **The lossless JPEG → JXL turned a PNG named `.jpg` into a lossy JXL and logged it as OK**: cjxl reads a file by its content, so such a PNG was encoded from its pixels at cjxl's own default distance by the path that promises a reversible archive. Without metadata the result was a bare codestream, which failed the integrity check by chance; with EXIF or XMP it passed, got a `checksums.md5` line, provenance markers and a History entry — and a failure writing those was swallowed at DEBUG. Nothing was deleted: the delete gate keeps a JPEG whose JXL has no jbrd box | `jxl_jpeg_transcoder.py` | ✅ Fixed — a JXL without a jbrd box from the lossless transcode is an error for the file: the output is removed, the source kept, and the message names `--force-convert` (the mirror of the decode side's jbrd rule). The path writes no XMP any more. `tests/test_lossless_transcode_needs_jbrd.py` (real cjxl and exiftool, hostile folder; failed before) |
 
 ## Round-81 — the Python refactor (2026-11-13)
 

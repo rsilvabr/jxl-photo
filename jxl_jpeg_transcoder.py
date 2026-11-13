@@ -1935,24 +1935,25 @@ def encode_one_transcode(src_path: Path, write_path: Path, final_path: Path,
         if r.returncode != 0:
             raise RuntimeError(f"cjxl: {_stderr_tail(r.stderr)}")
 
-        # WHICH source made this output. Written BEFORE reorder_jxl_boxes:
-        # every exiftool edit re-appends its boxes after the codestream, so
-        # doing it afterwards would undo the reorder (bug #134's class).
-        # NEVER written into a JXL that carries a jbrd box, though: appending
-        # XMP to a JPEG-reconstruction container makes djxl --reconstruct_jpeg
-        # FAIL when the source JPEG already had XMP metadata — the original
-        # JPEG silently stops being bit-exactly recoverable while the delete
-        # gate still certifies the output (v2.0.0+ data-loss bug). Provenance
-        # for this path is the checksums.md5 db instead (see
-        # _provenance_filter and the delete gate's reconstruction test).
-        try:
-            if not has_jbrd_box(write_path):
-                _run_exiftool_argfile(
-                    ["-overwrite_original"] + _provenance_marker_args(src_path)
-                    + _history_args("converted", src_path, write_path)
-                    + [str(write_path)], timeout=EXIFTOOL_TIMEOUT)
-        except Exception as _e_prov:
-            logger.debug(f"Provenance marker skipped: {_e_prov}")
+        # The lossless transcode ALWAYS carries the jbrd box: cjxl fails on a
+        # JPEG it cannot rebuild bit for bit (CMYK, arithmetic coding, 4:1:1
+        # sampling — cjxl 0.12.0). A JXL without one means cjxl read the file
+        # as ANOTHER format (a PNG named .jpg) and encoded its pixels at its
+        # own default distance: lossy, logged as OK, in the path that promises
+        # a reversible archive. An error for the file (#654), the mirror of
+        # the decode side's jbrd rule: the except below removes the output,
+        # the source stays. This branch used to write provenance markers and
+        # a History entry into such a JXL and swallowed their failure at
+        # DEBUG; the path writes no XMP any more. A jbrd container never got
+        # any: appended XMP breaks djxl --reconstruct_jpeg when the JPEG had
+        # XMP (the v2.0.0+ data-loss bug) — its provenance is checksums.md5
+        # (see _provenance_filter and the delete gate's reconstruction test).
+        if not has_jbrd_box(write_path):
+            raise RuntimeError(
+                "cjxl did not transcode it losslessly: the JXL has no jbrd box, so "
+                "the file could not be rebuilt from it (not a JPEG cjxl can "
+                "transcode — another format named .jpg?). --force-convert "
+                "encodes its pixels instead")
 
         reorder_jxl_boxes(write_path)
 

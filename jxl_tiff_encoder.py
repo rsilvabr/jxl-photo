@@ -351,7 +351,7 @@ def _python_bytes_per_pixel(channels: int) -> int:
     samples: _PYTHON_BYTES_PER_PIXEL was measured on 3-channel pages, and
     the page array and the PNG for cjxl both grow with the channels. With
     the PNG at zlib level 0 (refactor B2) a 16-bit page of 4 channels (RGB+IR
-    or RGBA) peaks at ~24.1 B/px, above the 3-channel 19 (review V5)."""
+    or RGBA) peaks at ~24.1 B/px, above the 3-channel 19 (#653, review V5)."""
     return math.ceil(_PYTHON_BYTES_PER_PIXEL * max(1, int(channels or 3)) / 3)
 
 
