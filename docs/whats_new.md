@@ -10,7 +10,8 @@ as [GitHub Releases](https://github.com/rsilvabr/jxl-photo/releases).
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.30.1-rc2](version_history.md#v2301-rc2)** | 2026-11-14 | Pre-release. Tested with libjxl 0.13.0: with it, a JPEG archive is still rebuilt bit for bit by every libjxl since 0.11, and a lossy encode keeps an all-opaque alpha channel; everything in v2.30.1-rc1 |
+| **[v2.30.1](version_history.md#v2301)** | 2026-11-14 | The wizard's checks read every option the run gets; libjxl 0.13.0 supported: JPEG archives every libjxl rebuilds bit for bit, alpha channels kept |
+| [v2.30.1-rc2](version_history.md#v2301-rc2) | 2026-11-14 | Pre-release. Tested with libjxl 0.13.0: with it, a JPEG archive is still rebuilt bit for bit by every libjxl since 0.11, and a lossy encode keeps an all-opaque alpha channel; everything in v2.30.1-rc1 |
 | [v2.30.1-rc1](version_history.md#v2301-rc1) | 2026-11-13 | Pre-release (test releases are now named `-rcN`). The wizard's manifest check and delete preview read every option the run gets; a file row in mode 2 with an empty Destination runs; the count and the check as fast as before v2.30.0 |
 | [v2.30.0](version_history.md#v2300) | 2026-11-13 | Archiving a TIFF takes about half the time; flags must be written in full; the history names the libjxl version; modes 6/7 of the decoder and the transcoder with an output folder land next to the library's own export folder |
 | [v2.30.0_beta1](version_history.md#v2300_beta1) | 2026-11-13 | Pre-release. Faster metadata writing; flags must be written in full; the history names the libjxl version; a PNG named `.jpg` is refused by the lossless JPEG transcode |
@@ -37,6 +38,17 @@ as [GitHub Releases](https://github.com/rsilvabr/jxl-photo/releases).
 | [v2.17.0](version_history.md#v2170) | 2026-10-24 | Film scans archived lossless and never recompressed lossy unless asked; they keep what their scanner software needs (whole XMP, private tags); thumbnail pages kept by default, except Capture One's |
 
 Every release since v1.0: [version_history.md](version_history.md#release-history).
+
+## v2.30.1
+
+2026-11-14. Everything in the two test releases, rc1 and rc2; the code is rc2's. Nothing to do when upgrading.
+
+- **libjxl 0.13.0 supported** (and recommended: it carries security fixes). With it, a lossless JPEG → JXL archive is still rebuilt bit for bit by every libjxl since 0.11, and a lossy encode keeps an alpha channel with nothing in it. Masters, copies, sizes and quality are the same as with 0.12.0.
+- The wizard's manifest check and delete preview read every option the run gets: a resize, the output folder name and the expert flags. A manifest whose resized, renamed JPEGs land on another row's JPEG is now refused before anything runs.
+- A manifest row whose Source is a single file runs in mode 2 with an empty Destination (it used to fail).
+- The file count and the manifest check of a JPEG ↔ JXL run are as fast as before v2.30.0. Closes edge cases in the delete preview and in the decoder's history entry.
+
+[Technical notes](version_history.md#v2301)
 
 ## v2.30.1-rc2
 
