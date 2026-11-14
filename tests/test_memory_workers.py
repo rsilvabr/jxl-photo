@@ -515,6 +515,9 @@ def _convert_one_failing(tmp_path, monkeypatch, fake_run_captured):
     _jxl_stub(src)
     out = tmp_path / "out" / "a.jxl"
     monkeypatch.setattr(rec, "_run_captured", fake_run_captured)
+    # The profile probe's decode runs through _run_to_memory since #674: the
+    # same failure there, or a real djxl would run on the stub.
+    monkeypatch.setattr(rec, "_run_to_memory", fake_run_captured)
     monkeypatch.setattr(rec, "_get_cjxl_cmd", lambda: "cjxl")
     monkeypatch.setattr(rec, "_cjxl_buffering_flag", lambda: [])
     status = rec.convert_one(src, out, out, "convert", False, "", "", None)[1]

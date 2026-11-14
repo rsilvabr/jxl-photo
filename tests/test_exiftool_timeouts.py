@@ -34,7 +34,10 @@ SCRIPTS = {
 # refactor F6), the version probes and the planning-time batch readers.
 EXEMPT = {"_run_exiftool_argfile", "_read_mpg_markers", "_tool_version",
           "_exiftool_one_process", "_exiftool_commands", "_run_exiftool_writes",
-          "_prefetch_exiftool_reads"}
+          "_prefetch_exiftool_reads",
+          # The batch engine's runner (#676): one chunk of a planning-time
+          # batch read, called only by _exiftool_batch, with its per-batch limit.
+          "_batch_exiftool"}
 # Runners of several commands whose callers must give the setting too: the
 # timeout is the 2nd (_exiftool_commands, _run_exiftool_writes) or 3rd
 # (the common module's g-functions) argument, or `timeout=`.
