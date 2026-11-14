@@ -4637,6 +4637,93 @@ _carried_icc = _common._carried_icc
 def _read_creator_and_relation(*a, **k): return _common._read_creator_and_relation(_G, *a, **k)
 
 
+# What _source_tags read of each master this run (#680), keyed by path, size
+# and modification time; files written in the last seconds are never kept.
+_SOURCE_TAGS_CACHE = {}
+
+
+def _exif_resolution(*a, **k): return _common._exif_resolution(_G, *a, **k)
+
+
+def _resized_dimension_lines(*a, **k): return _common._resized_dimension_lines(_G, *a, **k)
+
+
+def _jfif_density_args(jxl_path: Path):
+    """The `-units`/`-density` a JPEG made from raw samples needs to carry the
+    resolution the PNG route carried (#680), or None when this file must take
+    the PNG route.
+
+    djxl's PNG holds the master's EXIF, and ImageMagick takes the resolution
+    from it (600 PPI in Capture One exports) for the JPEG's JFIF header; raw
+    samples hold nothing, and the header said 1x1 without a unit — the same
+    pixels, five bytes of the file different. Only an EXIF that gives inches
+    or centimetres is handed over; no resolution, or another unit, keeps the
+    PNG route (byte for byte the JPEG of before)."""
+    unit, x, y = _exif_resolution(jxl_path)
+    if unit in (2, 3) and isinstance(x, (int, float)) and isinstance(y, (int, float)) \
+            and x > 0 and y > 0:
+        return ["-units", "PixelsPerInch" if unit == 2 else "PixelsPerCentimeter",
+                "-density", f"{x}x{y}"]
+    return None
+
+
+def _decode_in_memory_for_magick(jxl_path: Path, bits: int, icc_args: list,
+                                 out_icc: Path, orig_icc: Path):
+    """The ImageMagick route's decode without its 16-bit PNG (#680): djxl
+    writes a PAM to stdout, read into memory; returns (magick input args,
+    pixel bytes, (width, height, grey)) or None when this file keeps the PNG
+    route. Raises like the PNG route when djxl fails.
+
+    The PNG cost 232 MB in TEMP_DIR and 8.6 s of libpng deflate inside djxl
+    per 45 MP master, more than half of a JPG MOBILE derivative. Only what the
+    PNG did not decide takes the new route: an RGB/RGBA master that carries
+    its ICC in XMP (the PNG's iCCP or sRGB chunk names the source otherwise),
+    decoded in its own space (a lossy ICC blob takes the float PFM route), a
+    PAM raw samples can carry (8/16 bits), an EXIF resolution to hand over
+    (_jfif_density_args). Grey stays on the PNG route: its profile rides in
+    the PNG's iCCP. A PNG output too (_via_magick): ImageMagick writes
+    gAMA/cHRM/pHYs from what it read in a source PNG, not proven equal.
+
+    djxl writes a PAM at the FILE's own depth whatever --bits_per_sample
+    says (0.12 and 0.13; only its PNG writer obeys): the route is taken only
+    when that depth is the one the PNG would have had (`bits`) — a 16-bit
+    master's resized copy, not its full-size 8-bit conversion, whose pixels
+    came out up to 46 levels apart when it was fed the 16-bit samples.
+
+    Anything that goes wrong here (a read, a djxl that fails) returns None:
+    the PNG route then runs exactly as before #680 and reports its own
+    errors. A djxl that times out raises, as the PNG route's did — it is not
+    given a second full timeout."""
+    try:
+        creator, tokens = _read_creator_and_relation(jxl_path)
+        if not _carried_icc(creator, tokens):
+            return None
+        density = _jfif_density_args(jxl_path)
+        if density is None:
+            return None
+    except Exception:
+        return None
+    try:
+        r = _run_to_memory(["djxl", str(jxl_path), "-", "--output_format=pam"]
+                           + list(icc_args), CODEC_TIMEOUT)
+    except OSError:
+        return None
+    if r.returncode != 0 or not r.stdout:
+        return None
+    if _decoded_in_original_space(out_icc, orig_icc) is not True:
+        return None
+    head = _pam_header(r.stdout)
+    raw = _pam_raw_input(r.stdout)
+    if (head is None or raw is None or head[4] not in (b"RGB", b"RGB_ALPHA")
+            or head[3] != (255 if bits == 8 else 65535)):
+        return None
+    return raw[0] + density, raw[1], (head[0], head[1], False)
+
+
+_pam_header = _common._pam_header
+_pam_raw_input = _common._pam_raw_input
+
+
 _srgb_icc_cache = None
 _srgb_icc_lock = threading.Lock()
 
@@ -5494,24 +5581,14 @@ def _derivative_metadata_args(jxl_path: Path, label: str, size) -> list:
     lines = ["-XMP-dc:Relation+=" + _argfile_safe(t) for t in keep]
     lines.append("-XMP-dc:Relation+=" + DERIVED_XMP_PREFIX + label)
     if size:
-        nw, nh = size
-        lines.append(f"-ExifImageWidth={nw}")
-        lines.append(f"-ExifImageHeight={nh}")
-        r = _run_exiftool_argfile(
-            ["-j", "-s", "-s", "-XMP-exif:PixelXDimension",
-             "-XMP-exif:PixelYDimension", str(jxl_path)], timeout=EXIFTOOL_TIMEOUT)
-        if r is not None and r.stdout:
-            entry = json.loads(r.stdout)[0]
-            if entry.get("PixelXDimension") is not None:
-                lines.append(f"-XMP-exif:PixelXDimension={nw}")
-            if entry.get("PixelYDimension") is not None:
-                lines.append(f"-XMP-exif:PixelYDimension={nh}")
+        lines += _resized_dimension_lines(jxl_path, size)
     return lines
 
 
 def _output_magick_args(jxl_path: Path, tmp_png: Path, tmp_dir: Path,
                         output_icc, bit_depth: int, quality: int,
-                        is_png: bool, float_src=None, unrotate=None) -> tuple:
+                        is_png: bool, float_src=None, unrotate=None,
+                        image=None) -> tuple:
     """(magick args, size|None, grey, converted) for the derivative/ICC pass.
 
     Order validated in the plan: source profile -> target conversion ->
@@ -5525,8 +5602,12 @@ def _output_magick_args(jxl_path: Path, tmp_png: Path, tmp_dir: Path,
     djxl's own (assigned explicitly — the PFM carries none), and WITHOUT an
     output_icc the pixels are CONVERTED to the original ICC (re-assigning
     linear sRGB would leave the master's space).
+
+    image: (width, height, grey) of pixels decoded into memory
+    (_decode_in_memory_for_magick, #680) — there is no tmp_png then, and the
+    master carries its ICC in XMP, so _source_profile_args never opens one.
     """
-    grey = _png_is_grayscale(tmp_png)
+    grey = image[2] if image is not None else _png_is_grayscale(tmp_png)
     derivative = _is_derivative()
     args = []
     converted = bool(output_icc) and not grey
@@ -5566,7 +5647,7 @@ def _output_magick_args(jxl_path: Path, tmp_png: Path, tmp_dir: Path,
                 args += _magick_icc_args(output_icc, [])
     size = None
     if derivative and RESIZE_MODE:
-        w, h = _png_size(tmp_png)
+        w, h = (image[0], image[1]) if image is not None else _png_size(tmp_png)
         geom = _resize_geometry(w, h, RESIZE_MODE, RESIZE_VALUE, ALLOW_UPSCALE)
         if geom:
             args += ["-filter", "Lanczos", "-resize", f"{geom[0]}x{geom[1]}!"]
@@ -5733,16 +5814,24 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                 tmp_png = Path(tmp) / "tmp.png"
                 _decode_bits = 16 if (derivative or _unrot) else bit_depth
                 icc_args, out_icc, orig_icc = _djxl_icc_args(Path(tmp))
-                r = _run_captured(["djxl", str(jxl_path), str(tmp_png), f"--bits_per_sample={_decode_bits}"] + icc_args, CODEC_TIMEOUT)
-                if r.returncode != 0:
-                    raise RuntimeError(f"djxl: {_stderr_tail(r.stderr)}")
+                # The pixels in memory when nothing needs the PNG (#680) — a
+                # 16-bit decode only: a full-size 8-bit conversion of a 16-bit
+                # master would decode twice (djxl's PAM keeps the file's depth).
+                mem = (None if is_png or _decode_bits != 16 else
+                       _decode_in_memory_for_magick(jxl_path, _decode_bits, icc_args,
+                                                    out_icc, orig_icc))
+                if mem is None:
+                    r = _run_captured(["djxl", str(jxl_path), str(tmp_png), f"--bits_per_sample={_decode_bits}"] + icc_args, CODEC_TIMEOUT)
+                    if r.returncode != 0:
+                        raise RuntimeError(f"djxl: {_stderr_tail(r.stderr)}")
                 # A lossy JXL carrying a whole ICC blob decodes to LINEAR
                 # sRGB, not to the file's own space: the intermediate must
                 # be the float PFM with djxl's own profile assigned, never
-                # the PNG labelled with the XMP ICC.
+                # the PNG labelled with the XMP ICC. (The memory route is
+                # only taken for pixels in the file's own space.)
                 float_src = None
                 magick_in = tmp_png
-                if _decoded_in_original_space(out_icc, orig_icc) is False:
+                if mem is None and _decoded_in_original_space(out_icc, orig_icc) is False:
                     if _png_has_alpha(tmp_png):
                         # The float PFM has no alpha, and alpha is not
                         # colour-managed: merging it back through the
@@ -5786,11 +5875,17 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                                 f"from the XMP-labelled PNG | {jxl_path.name}")
                 magick_output, size, grey, _converted = _output_magick_args(
                     jxl_path, tmp_png, Path(tmp), output_icc, bit_depth,
-                    quality, is_png, float_src=float_src, unrotate=_unrot)
+                    quality, is_png, float_src=float_src, unrotate=_unrot,
+                    image=None if mem is None else mem[2])
                 logger.debug(f"Using ICC/derivative pipeline: {magick_output[:3]}")
-                r = _run_captured(["magick", str(magick_in)] + magick_output
-                                  + (_MAGICK_KEEP_ICCP if is_png else [])    # #635
-                                  + [_magick_out], CODEC_TIMEOUT)
+                if mem is None:
+                    r = _run_captured(["magick", str(magick_in)] + magick_output
+                                      + (_MAGICK_KEEP_ICCP if is_png else [])    # #635
+                                      + [_magick_out], CODEC_TIMEOUT)
+                else:
+                    r = _run_captured(["magick"] + mem[0] + magick_output + [_magick_out],
+                                      CODEC_TIMEOUT, input=mem[1])
+                    mem = None          # the pixels are ImageMagick's now
                 if r.returncode != 0:
                     raise RuntimeError(f"magick: {_stderr_tail(r.stderr)}")
                 if not grey:

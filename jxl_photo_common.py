@@ -3114,14 +3114,82 @@ def _exiftool_source(g, path, tmp_dir) -> str:
                        f"(a '%' in its path): {(r.stderr or r.stdout or '')[:200].strip()}")
 
 
+_SOURCE_TAG_ARGS = ["-j", "-s", "-s", "-XMP-xmp:CreatorTool", "-XMP-dc:Relation",
+                    "-IFD0:ResolutionUnit#", "-IFD0:XResolution#", "-IFD0:YResolution#",
+                    "-XMP-exif:PixelXDimension", "-XMP-exif:PixelYDimension"]
+# Files changed less than this long ago are never answered from the cache: a
+# same-size rewrite inside a coarse clock tick (2 s on FAT) keeps the key.
+_SOURCE_TAGS_SETTLED = 5.0
+
+
+def _source_tags(g, jxl_path) -> dict:
+    """exiftool's JSON entry of one file for _SOURCE_TAG_ARGS (the XMP
+    CreatorTool and Relation the colour and provenance code reads, the EXIF
+    resolution a JPEG derivative carries over, the XMP pixel dimensions a
+    resized one rewrites). Raises on failure.
+
+    One process answers all of them, and the entry is kept for the run in
+    the script's _SOURCE_TAGS_CACHE (when it has one) while the file keeps its
+    path, size and modification time and has not just been written (#680): a
+    derivative asked its master the same question up to three times, an
+    exiftool process each."""
+    p = Path(jxl_path)
+    cache = getattr(g, "_SOURCE_TAGS_CACHE", None)
+    key = None
+    if cache is not None:
+        try:
+            st = p.stat()
+            if time.time() - st.st_mtime > _SOURCE_TAGS_SETTLED:
+                key = (os.path.normcase(os.path.abspath(str(p))), st.st_size, st.st_mtime_ns)
+        except OSError:
+            key = None
+        if key is not None:
+            hit = cache.get(key)
+            if hit is not None:
+                return hit
+    r = g._run_exiftool_argfile(_SOURCE_TAG_ARGS + [str(p)], timeout=g.EXIFTOOL_TIMEOUT)
+    if not r.stdout:
+        raise RuntimeError(f"exiftool could not read {p.name} (rc={r.returncode})")
+    entry = json.loads(r.stdout)[0]
+    if key is not None:
+        if len(cache) >= 512:
+            cache.clear()
+        cache[key] = entry
+    return entry
+
+
+def _resized_dimension_lines(g, jxl_path, size) -> list:
+    """exiftool lines a resized derivative of `jxl_path` writes for its new
+    size (w, h): the EXIF ones always, the XMP ones only where the master
+    carries them. The master's answer comes from _source_tags — its one read
+    for the run (#680); this was an exiftool process of its own per
+    derivative. A read that fails leaves the XMP ones out, as before."""
+    nw, nh = size
+    lines = [f"-ExifImageWidth={nw}", f"-ExifImageHeight={nh}"]
+    try:
+        entry = _source_tags(g, jxl_path)
+    except Exception:
+        entry = {}
+    if entry.get("PixelXDimension") is not None:
+        lines.append(f"-XMP-exif:PixelXDimension={nw}")
+    if entry.get("PixelYDimension") is not None:
+        lines.append(f"-XMP-exif:PixelYDimension={nh}")
+    return lines
+
+
+def _exif_resolution(g, jxl_path):
+    """(ResolutionUnit, XResolution, YResolution) of the file's EXIF IFD0 as
+    numbers, None for each one it does not have. Raises when the file cannot
+    be read (_source_tags)."""
+    entry = _source_tags(g, jxl_path)
+    return (entry.get("ResolutionUnit"), entry.get("XResolution"), entry.get("YResolution"))
+
+
 def _read_creator_and_relation(g, jxl_path: Path):
     """(creator_tool str, [relation tokens]) of one file. Raises on failure:
-    a derivative whose source profile cannot be read must not be produced."""
-    r = g._run_exiftool_argfile(["-j", "-s", "-s", "-XMP-xmp:CreatorTool",
-                               "-XMP-dc:Relation", str(jxl_path)], timeout=g.EXIFTOOL_TIMEOUT)
-    if not r.stdout:
-        raise RuntimeError(f"exiftool could not read {jxl_path.name} (rc={r.returncode})")
-    entry = json.loads(r.stdout)[0]
+    a derivative whose source profile cannot be read must not be produced.
+    Read with _source_tags (one process, kept for the run, #680)."""
+    entry = _source_tags(g, jxl_path)
     rel = entry.get("Relation")
     tokens = [] if rel is None else [str(t).strip() for t in (rel if isinstance(rel, list) else [rel])]
     return str(entry.get("CreatorTool") or ""), tokens

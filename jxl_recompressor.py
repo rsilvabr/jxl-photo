@@ -2546,6 +2546,7 @@ def _jxl_thumb_installed(*a, **k): return _common._jxl_thumb_installed(_G, *a, *
 def _explorer_thumbnail_wanted(*a, **k): return _common._explorer_thumbnail_wanted(_G, *a, **k)
 
 
+_pam_header = _common._pam_header
 _pam_raw_input = _common._pam_raw_input
 _pam_array = _common._pam_array
 
@@ -2925,6 +2926,61 @@ def _creator_tool_without_icc(text: str) -> str:
 def _read_creator_and_relation(*a, **k): return _common._read_creator_and_relation(_G, *a, **k)
 
 
+# What _source_tags read of each source this run (#680), keyed by path, size
+# and modification time; files written in the last seconds are never kept.
+_SOURCE_TAGS_CACHE = {}
+
+
+def _resized_dimension_lines(*a, **k): return _common._resized_dimension_lines(_G, *a, **k)
+
+
+def _decode_in_memory_for_derivative(jxl_path: Path, icc_args: list,
+                                     out_icc: Path, orig_icc: Path):
+    """The derivative's 16-bit decode without its PNG (#680): djxl writes a
+    PAM to stdout, read into memory; returns (magick input args, pixel bytes,
+    (width, height)) or None when this file keeps the PNG route. Raises like
+    the PNG route when djxl fails.
+
+    The PNG cost 232 MB in TEMP_DIR and 8.6 s of libpng deflate inside djxl
+    per 45 MP master, 40% of an sRGB derivative. Only an RGB/RGBA source that
+    carries its ICC in XMP (the PNG's iCCP or sRGB chunk names the source
+    otherwise), decoded in its own space (a lossy ICC blob takes the float
+    PFM route, which needs the PNG's alpha check), with a PAM raw samples can
+    carry, takes the new route. Grey stays on the PNG route: without a recipe
+    cjxl reads that PNG itself, and with one its grey profile rides from the
+    PNG's iCCP into conv.png (raw samples would drop it).
+
+    djxl writes a PAM at the FILE's own depth whatever --bits_per_sample
+    says (0.12 and 0.13; only its PNG writer obeys): an 8-bit source, which
+    the PNG route widens to 16 bits, keeps that route.
+
+    Anything that goes wrong here (a read, a djxl that fails) returns None:
+    the PNG route then runs exactly as before #680 and reports its own
+    errors. A djxl that times out raises, as the PNG route's did — it is not
+    given a second full timeout."""
+    try:
+        creator, tokens = _read_creator_and_relation(jxl_path)
+        if not _carried_icc(creator, tokens):
+            return None
+    except Exception:
+        return None
+    try:
+        r = _run_to_memory(["djxl", str(jxl_path), "-", "--output_format=pam"]
+                           + list(icc_args), CJXL_TIMEOUT)
+    except OSError:
+        return None
+    if r.returncode != 0 or not r.stdout:
+        return None
+    if _decoded_in_original_space(out_icc, orig_icc) is not True:
+        return None
+    head = _pam_header(r.stdout)
+    raw = _pam_raw_input(r.stdout)
+    if (head is None or raw is None or head[4] not in (b"RGB", b"RGB_ALPHA")
+            or head[3] != 65535):
+        return None
+    return raw[0], raw[1], (head[0], head[1])
+
+
 def _read_origin_inputs(*a, **k): return _common._read_origin_inputs(_G, *a, **k)
 
 
@@ -2970,16 +3026,20 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
         tmp = Path(tmp)
         dec_png, conv_png = tmp / "dec.png", tmp / "conv.png"
         icc_args, out_icc, orig_icc = _djxl_icc_args(tmp)
-        r = _run_captured(["djxl", str(jxl_path), str(dec_png), "--bits_per_sample=16"]
-                          + icc_args, CJXL_TIMEOUT)
-        if r.returncode != 0 or not dec_png.exists():
-            raise RuntimeError(f"djxl: {_stderr_tail(r.stderr)}")
+        # The pixels in memory when nothing needs the PNG (#680).
+        mem = _decode_in_memory_for_derivative(jxl_path, icc_args, out_icc, orig_icc)
+        if mem is None:
+            r = _run_captured(["djxl", str(jxl_path), str(dec_png), "--bits_per_sample=16"]
+                              + icc_args, CJXL_TIMEOUT)
+            if r.returncode != 0 or not dec_png.exists():
+                raise RuntimeError(f"djxl: {_stderr_tail(r.stderr)}")
         # A lossy JXL carrying a whole ICC blob (table-curve profile) decodes
         # to LINEAR sRGB, not to the file's own space: the PNG must NOT be
         # labelled with the XMP ICC. The source then becomes a float PFM
-        # decode with djxl's own profile assigned explicitly.
-        blob = _decoded_in_original_space(out_icc, orig_icc) is False
-        grey = _png_is_grayscale(dec_png)
+        # decode with djxl's own profile assigned explicitly. (The memory
+        # route is only taken for RGB pixels in the file's own space.)
+        blob = mem is None and _decoded_in_original_space(out_icc, orig_icc) is False
+        grey = mem is None and _png_is_grayscale(dec_png)
         converted = False
         size = None
         if grey and not blob and not (RESIZE_MODE or SHARPEN != "none"):
@@ -3052,7 +3112,9 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
                         out_profile = orig_path
                 else:
                     src_icc = _carried_icc(creator, _tokens)
-                    chunks = _png_chunk_types(dec_png)
+                    # Read only when there is no XMP ICC: the memory route
+                    # has no PNG, and always an XMP ICC.
+                    chunks = () if src_icc else _png_chunk_types(dec_png)
                     if src_icc:
                         src_path = tmp / "src.icc"
                         src_path.write_bytes(src_icc)
@@ -3083,7 +3145,7 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
                     else:
                         out_profile = src_path
             if RESIZE_MODE:
-                w, h = _png_size(dec_png)
+                w, h = mem[2] if mem is not None else _png_size(dec_png)
                 geom = _resize_geometry(w, h, RESIZE_MODE, RESIZE_VALUE, ALLOW_UPSCALE)
                 if geom:
                     args += ["-filter", "Lanczos", "-resize", f"{geom[0]}x{geom[1]}!"]
@@ -3098,9 +3160,15 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
                 # B2: `-colorspace Lab ... -colorspace sRGB` drops the ICC
                 # profile; re-assign the one that describes the pixels now.
                 args += ["-profile", str(out_profile)]
-            cmd = (["magick", str(magick_in)] + args
-                   + ["-depth", "16"] + _TEMP_PNG_ARGS + ["png:" + _magick_out_path(conv_png)])
-            r = _run_captured(cmd, CJXL_TIMEOUT)
+            if mem is None:
+                cmd = (["magick", str(magick_in)] + args
+                       + ["-depth", "16"] + _TEMP_PNG_ARGS + ["png:" + _magick_out_path(conv_png)])
+                r = _run_captured(cmd, CJXL_TIMEOUT)
+            else:
+                cmd = (["magick"] + mem[0] + args
+                       + ["-depth", "16"] + _TEMP_PNG_ARGS + ["png:" + _magick_out_path(conv_png)])
+                r = _run_captured(cmd, CJXL_TIMEOUT, input=mem[1])
+                mem = None          # the pixels are ImageMagick's now
             if r.returncode != 0 or not conv_png.exists():
                 raise RuntimeError(f"magick: {_stderr_tail(r.stderr)}")
             if (not grey or blob) and "iCCP" not in _png_chunk_types(conv_png):
@@ -3175,18 +3243,7 @@ def _derivative_metadata_args(jxl_path: Path, converted: bool = True,
         lines.append("-XMP-dc:Relation+=" + _icc_profile_token(_OUTPUT_ICC_BYTES))
     lines += _legacy_icc_lines(creator, keep, migrate=not converted)
     if size:
-        nw, nh = size
-        lines.append(f"-ExifImageWidth={nw}")
-        lines.append(f"-ExifImageHeight={nh}")
-        r = _run_exiftool_argfile(
-            ["-j", "-s", "-s", "-XMP-exif:PixelXDimension",
-             "-XMP-exif:PixelYDimension", str(jxl_path)], timeout=EXIFTOOL_TIMEOUT)
-        if r is not None and r.stdout:
-            entry = json.loads(r.stdout)[0]
-            if entry.get("PixelXDimension") is not None:
-                lines.append(f"-XMP-exif:PixelXDimension={nw}")
-            if entry.get("PixelYDimension") is not None:
-                lines.append(f"-XMP-exif:PixelYDimension={nh}")
+        lines += _resized_dimension_lines(jxl_path, size)
     return lines
 
 
