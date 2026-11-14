@@ -1297,6 +1297,76 @@ def extract_icc_from_png(png_path):
         logger.debug(f"PNG ICC extraction failed: {e}")
     return None
 
+def _planes_from_array(arr, target_depth=16):
+    """(pixels, alpha|None) from the array of a decoded image (imagecodecs'
+    PNG decode, or _pam_array's PAM of the same decode): grey stays 2D, 8-bit
+    widened to 16 (*257) or 16-bit rounded to 8 to reach target_depth."""
+    if arr.ndim == 2 or (arr.ndim == 3 and arr.shape[2] == 1):
+        # Grayscale — keep it 2D so single-channel JXLs decode back to
+        # single-channel TIFF pages instead of being expanded to RGB.
+        if arr.ndim == 3:
+            arr = arr[:, :, 0]
+        if target_depth == 16 and arr.dtype == np.uint8:
+            arr = arr.astype(np.uint16) * 257
+        elif target_depth == 8 and arr.dtype == np.uint16:
+            arr = np.rint(arr / 257).astype(np.uint8)
+        return arr, None
+    elif arr.ndim == 3 and arr.shape[2] == 2:
+        # Grayscale + alpha (PNG color type 4): return 2D gray + alpha
+        gray = arr[:, :, 0]
+        alpha = arr[:, :, 1]
+        if target_depth == 16 and gray.dtype == np.uint8:
+            gray = gray.astype(np.uint16) * 257
+            alpha = alpha.astype(np.uint16) * 257
+        elif target_depth == 8 and gray.dtype == np.uint16:
+            gray = np.rint(gray / 257).astype(np.uint8)
+            alpha = np.rint(alpha / 257).astype(np.uint8)
+        return gray, alpha
+    elif arr.ndim == 3 and arr.shape[2] in (3, 4):
+        rgb = arr[:, :, :3]
+        alpha = arr[:, :, 3] if arr.shape[2] == 4 else None
+        if target_depth == 16 and rgb.dtype == np.uint8:
+            rgb = rgb.astype(np.uint16) * 257
+        elif target_depth == 8 and rgb.dtype == np.uint16:
+            rgb = np.rint(rgb / 257).astype(np.uint8)
+        if alpha is not None:
+            if target_depth == 16 and alpha.dtype == np.uint8:
+                alpha = alpha.astype(np.uint16) * 257
+            elif target_depth == 8 and alpha.dtype == np.uint16:
+                alpha = np.rint(alpha / 257).astype(np.uint8)
+        return rgb, alpha
+    else:
+        # Unexpected shape from imagecodecs — fail loudly (per-file error)
+        # instead of silently degrading through the PIL fallback.
+        raise ValueError(f"Unsupported PNG array shape from imagecodecs: {arr.shape}")
+
+
+def _decode_planes_in_memory(jxl_path, extra_args, target_depth):
+    """(pixels, alpha|None) of djxl's decode at the file's own depth, read from
+    a PAM on stdout (#681) — the arrays read_png_to_numpy gives for the PNG
+    decode_auto_png writes (the same arrays, 117 of 117 real masters, #673),
+    without that PNG: 232 MB in TEMP_DIR, 8.5 s of libpng deflate inside djxl
+    and 1.4 s to read it back for a 45 MP master, more than half of a decode.
+    None when the caller must decode to the PNG, as before: a PAM _pam_array
+    cannot carry (12-bit), or a djxl that failed (the PNG route then reports
+    its own error). A djxl that times out raises, as the PNG route's did — it
+    is not given a second full timeout."""
+    try:
+        r = _run_to_memory(["djxl", str(jxl_path), "-", "--output_format=pam"]
+                           + list(extra_args or []), DJXL_TIMEOUT)
+    except OSError:
+        return None
+    if r.returncode != 0 or not r.stdout:
+        return None
+    arr = _pam_array(r.stdout)
+    if arr is None:
+        return None
+    return _planes_from_array(arr, target_depth)
+
+
+_pam_array = _common._pam_array
+
+
 def read_png_to_numpy(png_path, target_depth=16):
     """
     Read PNG file and convert to numpy array.
@@ -1349,44 +1419,7 @@ def read_png_to_numpy(png_path, target_depth=16):
         logger.warning("imagecodecs unavailable; falling back to PIL.")
 
     if arr is not None:
-        if arr.ndim == 2 or (arr.ndim == 3 and arr.shape[2] == 1):
-            # Grayscale — keep it 2D so single-channel JXLs decode back to
-            # single-channel TIFF pages instead of being expanded to RGB.
-            if arr.ndim == 3:
-                arr = arr[:, :, 0]
-            if target_depth == 16 and arr.dtype == np.uint8:
-                arr = arr.astype(np.uint16) * 257
-            elif target_depth == 8 and arr.dtype == np.uint16:
-                arr = np.rint(arr / 257).astype(np.uint8)
-            return arr, None
-        elif arr.ndim == 3 and arr.shape[2] == 2:
-            # Grayscale + alpha (PNG color type 4): return 2D gray + alpha
-            gray = arr[:, :, 0]
-            alpha = arr[:, :, 1]
-            if target_depth == 16 and gray.dtype == np.uint8:
-                gray = gray.astype(np.uint16) * 257
-                alpha = alpha.astype(np.uint16) * 257
-            elif target_depth == 8 and gray.dtype == np.uint16:
-                gray = np.rint(gray / 257).astype(np.uint8)
-                alpha = np.rint(alpha / 257).astype(np.uint8)
-            return gray, alpha
-        elif arr.ndim == 3 and arr.shape[2] in (3, 4):
-            rgb = arr[:, :, :3]
-            alpha = arr[:, :, 3] if arr.shape[2] == 4 else None
-            if target_depth == 16 and rgb.dtype == np.uint8:
-                rgb = rgb.astype(np.uint16) * 257
-            elif target_depth == 8 and rgb.dtype == np.uint16:
-                rgb = np.rint(rgb / 257).astype(np.uint8)
-            if alpha is not None:
-                if target_depth == 16 and alpha.dtype == np.uint8:
-                    alpha = alpha.astype(np.uint16) * 257
-                elif target_depth == 8 and alpha.dtype == np.uint16:
-                    alpha = np.rint(alpha / 257).astype(np.uint8)
-            return rgb, alpha
-        else:
-            # Unexpected shape from imagecodecs — fail loudly (per-file error)
-            # instead of silently degrading through the PIL fallback.
-            raise ValueError(f"Unsupported PNG array shape from imagecodecs: {arr.shape}")
+        return _planes_from_array(arr, target_depth)
 
     with Image.open(png_path) as img:
         # Handle 16-bit modes (I;16, I) - return as 2D uint16 grayscale
@@ -2065,260 +2098,131 @@ def cleanup_xmp_icc(tiff_path):
 _PREVIEW_BLOCK_ROWS = 256
 
 
-def add_jpeg_preview(tiff_path, tmp_dir, icc_data, extratags=None):
-    """Add JPEG preview as second page of TIFF with proper thumbnail structure.
+def _jpeg_preview_array(img_data, icc_data):
+    """The preview page of a single-page TIFF: (array, (width, height)) — the
+    JPEG_PREVIEW_SIZE px sRGB JPEG (quality 90) decoded back, as tifffile
+    stores it with compression='jpeg' — or None for an empty image. Raises on
+    any other failure (the caller only warns: a preview is never worth
+    failing a decode).
 
-    extratags: page 0's private tags (TIFFTAG_PREFIX) — the rewrite below
-    builds a new file from the pixels, so they would be lost otherwise.
+    The decoder writes it as page 1 in the same TiffWriter as the image
+    (#681). It used to rebuild the finished file for it — read the TIFF back,
+    compress its page again and copy the result over: 2 x 251 MB written and
+    read for a 45 MP page. The array is the one that rebuild made (the same
+    pixels, the same steps), so the file is the same.
 
-    v2 changes:
-    - ICC is embedded in the main 16-bit image (page 0) for color-managed viewers
-    - 16-bit main image is kept as page 0 (primary image for Windows Explorer)
-    - 8-bit JPEG preview is written as page 1 with subfiletype=1 (thumbnail/reduced flag)
-    - Windows Explorer uses page 0's ICC for thumbnails, showing correct colors
-
-    This replaces the old approach of appending JPEG as page 1 while keeping the
-    main image as the primary page.
+    ICC: the page's own (None for a page whose profile was INHERITED: the
+    original carried no tag) converts the preview to sRGB for Windows
+    Explorer; the preview page itself carries none.
     """
-    if not ADD_JPEG_PREVIEW:
-        return
-    
-    logger.info(f" >Adding JPEG preview to {tiff_path.name}...")
-    
-    try:
-        # Read the current TIFF (16-bit data that was just written). For
-        # single-page files (the only case this function runs) series[0] IS
-        # page 0 — keep the array for the rewrite below instead of decoding
-        # the full image a second time (~2x RAM and I/O on large files).
-        with tifffile.TiffFile(str(tiff_path)) as tif:
-            main_data = tif.series[0].asarray()
-            img_data = main_data
-            # Preserve page 0's SubfileType for the rewrite below (a restored
-            # non-zero SubfileType would otherwise be lost).
-            try:
-                main_subfiletype = int(tif.pages[0].subfiletype or 0)
-            except Exception:
-                main_subfiletype = 0
-            # ...and its ExtraSamples, which the main writer set from the
-            # jxlphoto-extrasamples marker (an IR channel is 0, not alpha).
-            try:
-                main_extrasamples = tuple(int(v) for v in (tif.pages[0].extrasamples or ()))
-            except Exception:
-                main_extrasamples = ()
-            # Try to get ICC if not passed
-            if icc_data is None:
-                try:
-                    icc_data = tif.pages[0].icc_profile
-                except Exception:
-                    icc_data = None
+    if img_data.ndim == 3 and img_data.shape[2] == 4:
+        # JPEG preview cannot carry alpha; drop the alpha channel before
+        # generating the preview. The main image retains alpha in the TIFF.
+        img_data = img_data[:, :, :3]
+    elif img_data.ndim == 3 and img_data.shape[2] == 2:
+        # Gray+alpha (LA): keep only the gray channel for the preview —
+        # Image.save() cannot write mode LA as JPEG. The main image
+        # retains the alpha extrasample in the TIFF.
+        img_data = img_data[:, :, 0]
 
-        if img_data.ndim == 3 and img_data.shape[2] == 4:
-            # JPEG preview cannot carry alpha; drop the alpha channel before
-            # generating the preview. The main image retains alpha in the TIFF.
-            img_data = img_data[:, :, :3]
-        elif img_data.ndim == 3 and img_data.shape[2] == 2:
-            # Gray+alpha (LA): keep only the gray channel for the preview —
-            # Image.save() cannot write mode LA as JPEG. The main image
-            # retains the alpha extrasample in the TIFF.
-            img_data = img_data[:, :, 0]
+    if img_data.ndim == 2:
+        h, w = img_data.shape
+    else:
+        h, w = img_data.shape[:2]
 
-        if img_data.ndim == 2:
-            h, w = img_data.shape
+    # Safety check: skip preview for empty/corrupted images
+    if h == 0 or w == 0 or img_data.size == 0:
+        logger.warning(f" >Skipping JPEG preview: empty image dimensions ({h}x{w})")
+        return None
+
+    # Calculate resize dimensions — never UPSCALE a small image for a
+    # "preview" (a preview larger than the source is always wrong).
+    max_dim = min(JPEG_PREVIEW_SIZE, max(w, h))
+    if w >= h:
+        new_w = max_dim
+        new_h = max(1, int(h * max_dim / w))
+    else:
+        new_h = max_dim
+        new_w = max(1, int(w * max_dim / h))
+
+    # Convert to 8-bit for JPEG preview (rounded, like the rest of the
+    # pipeline — not a bit-shift truncation). In blocks of rows (#570):
+    # the float of the WHOLE image was ~2.2 GB per worker on a 45 MP
+    # master (4 GB at 84 MP) for a 256 px preview. Same formula per
+    # block, so the preview is byte-identical.
+    if img_data.dtype == np.uint8:
+        img_8bit = img_data
+    else:
+        img_8bit = np.empty(img_data.shape, dtype=np.uint8)
+        if img_data.dtype == np.uint16:
+            def _to8(block):
+                return np.rint(block / 257).astype(np.uint8)
         else:
-            h, w = img_data.shape[:2]
+            mx = img_data.max()
+            # Handle NaN, Inf, or zero max values safely
+            if np.isnan(mx) or np.isinf(mx) or mx <= 0:
+                logger.warning(f" >Invalid max value ({mx}) for 8-bit conversion, using direct cast")
 
-        # Safety check: skip preview for empty/corrupted images
-        if h == 0 or w == 0 or img_data.size == 0:
-            logger.warning(f" >Skipping JPEG preview: empty image dimensions ({h}x{w})")
-            return
-
-        # Calculate resize dimensions — never UPSCALE a small image for a
-        # "preview" (a preview larger than the source is always wrong).
-        max_dim = min(JPEG_PREVIEW_SIZE, max(w, h))
-        if w >= h:
-            new_w = max_dim
-            new_h = max(1, int(h * max_dim / w))
-        else:
-            new_h = max_dim
-            new_w = max(1, int(w * max_dim / h))
-
-        # Convert to 8-bit for JPEG preview (rounded, like the rest of the
-        # pipeline — not a bit-shift truncation). In blocks of rows (#570):
-        # the float of the WHOLE image was ~2.2 GB per worker on a 45 MP
-        # master (4 GB at 84 MP) for a 256 px preview. Same formula per
-        # block, so the preview is byte-identical.
-        if img_data.dtype == np.uint8:
-            img_8bit = img_data
-        else:
-            img_8bit = np.empty(img_data.shape, dtype=np.uint8)
-            if img_data.dtype == np.uint16:
                 def _to8(block):
-                    return np.rint(block / 257).astype(np.uint8)
+                    return np.clip(block, 0, 255).astype(np.uint8)
             else:
-                mx = img_data.max()
-                # Handle NaN, Inf, or zero max values safely
-                if np.isnan(mx) or np.isinf(mx) or mx <= 0:
-                    logger.warning(f" >Invalid max value ({mx}) for 8-bit conversion, using direct cast")
+                def _to8(block):
+                    return ((block.astype(np.float32) / mx) * 255).astype(np.uint8)
+        for _y in range(0, img_data.shape[0], _PREVIEW_BLOCK_ROWS):
+            img_8bit[_y:_y + _PREVIEW_BLOCK_ROWS] = _to8(
+                img_data[_y:_y + _PREVIEW_BLOCK_ROWS])
 
-                    def _to8(block):
-                        return np.clip(block, 0, 255).astype(np.uint8)
-                else:
-                    def _to8(block):
-                        return ((block.astype(np.float32) / mx) * 255).astype(np.uint8)
-            for _y in range(0, img_data.shape[0], _PREVIEW_BLOCK_ROWS):
-                img_8bit[_y:_y + _PREVIEW_BLOCK_ROWS] = _to8(
-                    img_data[_y:_y + _PREVIEW_BLOCK_ROWS])
+    # Resize using high-quality resampling
+    pil_img = Image.fromarray(img_8bit)
+    try:
+        resample = Image.Resampling.LANCZOS   # Pillow >= 9.1
+    except AttributeError:
+        resample = Image.LANCZOS              # Pillow < 9.1
+    preview = pil_img.resize((new_w, new_h), resample)
 
-        # Resize using high-quality resampling
-        pil_img = Image.fromarray(img_8bit)
+    # Convert preview to sRGB for Windows Explorer compatibility
+    # (similar to Capture One behavior).  Preserve grayscale inputs
+    # as single-channel instead of forcing them to RGB.
+    original_mode = preview.mode
+    if icc_data and ImageCms:
         try:
-            resample = Image.Resampling.LANCZOS   # Pillow >= 9.1
-        except AttributeError:
-            resample = Image.LANCZOS              # Pillow < 9.1
-        preview = pil_img.resize((new_w, new_h), resample)
+            srgb_profile = ImageCms.createProfile('sRGB')
+            src_profile = ImageCms.ImageCmsProfile(io.BytesIO(icc_data))
+            preview_srgb = ImageCms.profileToProfile(preview, src_profile, srgb_profile)
+            preview = preview_srgb
+            if original_mode == 'L' and preview.mode == 'RGB':
+                preview = preview.convert('L')
+            logger.debug(" >Preview converted to sRGB")
+        except Exception as e:
+            logger.debug(f" >Preview color conversion failed: {e}, using original")
 
-        # Convert preview to sRGB for Windows Explorer compatibility
-        # (similar to Capture One behavior).  Preserve grayscale inputs
-        # as single-channel instead of forcing them to RGB.
-        original_mode = preview.mode
-        if icc_data and ImageCms:
-            try:
-                # Create sRGB profile
-                srgb_profile = ImageCms.createProfile('sRGB')
-                
-                # Load source profile from ICC bytes
-                src_profile = ImageCms.ImageCmsProfile(io.BytesIO(icc_data))
-                
-                # Convert from source ICC to sRGB
-                preview_srgb = ImageCms.profileToProfile(preview, src_profile, srgb_profile)
-                preview = preview_srgb
-                if original_mode == 'L' and preview.mode == 'RGB':
-                    preview = preview.convert('L')
-                logger.debug(" >Preview converted to sRGB")
-            except Exception as e:
-                logger.debug(f" >Preview color conversion failed: {e}, using original")
-        
-        # Save JPEG to temp file WITHOUT ICC (sRGB assumed by Windows)
-        jpeg_path = tmp_dir / "preview.jpg"
-        preview.save(str(jpeg_path), format='JPEG', quality=90)
+    # The JPEG WITHOUT an ICC (sRGB assumed by Windows), decoded back: the
+    # page tifffile writes with compression='jpeg'. In memory — the same
+    # encoder output the temp file of the rebuild held.
+    buf = io.BytesIO()
+    preview.save(buf, format='JPEG', quality=90)
+    buf.seek(0)
+    with Image.open(buf) as jpeg_preview:
+        jpeg_arr = np.array(jpeg_preview)
+    return jpeg_arr, (new_w, new_h)
 
-        # Now rewrite the TIFF with proper structure:
-        # Page 0: 16-bit main image with ICC (primary image for Windows Explorer)
-        # Page 1: JPEG preview with thumbnail flag (NEWSubfileType=1)
 
-        # TIFFTAG_NEWSubfileType = 254 (0xFE) — set to 1 for thumbnail
-        # TIFFTAG_IMAGEWIDTH, etc. for each page
-
-        # Write new TIFF with main image as page 0 and JPEG preview as page 1
-        # Using tifffile's ability to write multipage TIFFs with different configurations per page
-
-        # Create the multipage TIFF properly
-        # Page 0: 16-bit main image with ICC (primary image)
-        # Page 1: JPEG data with NEWSubfileType=1 (thumbnail/reduced resolution)
-
-        # tifffile multipage writing with explicit page config
-        compression_map = {"uncompressed": None, "lzw": "lzw", "zip": "zlib", "none": None}
-        tiff_comp = compression_map.get(TIFF_COMPRESSION, "zlib")
-
-        # We need to restructure the TIFF
-        # Strategy: write to a temp file, then use tifffile to create proper structure
-        temp_tiff = tmp_dir / "output.tif"
-
-        # ICC fallback if not passed (uses the already-loaded array above —
-        # no second full-image decode)
-        if icc_data is None:
-            try:
-                with tifffile.TiffFile(str(tiff_path)) as tif:
-                    icc_data = tif.pages[0].icc_profile
-            except Exception:
-                icc_data = None
-
-        # Write TIFF with main image as page 0 and JPEG preview as page 1
-        # Using photometric interpretation for page 0 (RGB, grayscale, or RGBA)
-        # and page 1 (JPEG data is YCbCr or RGB).
-
-        # Save JPEG preview; load it as an array via PIL
-        with Image.open(jpeg_path) as jpeg_preview:
-            jpeg_arr = np.array(jpeg_preview)
-
-        # Write multipage TIFF following Capture One structure:
-        # Page 0: main image (primary image for Windows Explorer)
-        # Page 1: 8-bit preview with subfiletype=1 (thumbnail flag)
-        # This ensures Windows Explorer uses the correct ICC from page 0
-
-        # Same byte order as the TIFF being rebuilt (the master's, v2.25.0).
-        try:
-            with open(tiff_path, "rb") as _bf:
-                _byteorder = ">" if _bf.read(2) == b"MM" else "<"
-        except OSError:
-            _byteorder = "<"
-        with tifffile.TiffWriter(str(temp_tiff), byteorder=_byteorder) as tif_writer:
-            try:
-                write_method = tif_writer.write
-            except AttributeError:
-                write_method = tif_writer.save
-            
-            # Page 0: main image (primary)
-            # Windows Explorer uses this page for thumbnail with ICC
-            if main_data.ndim == 2 or (main_data.ndim == 3 and main_data.shape[2] == 1):
-                main_photometric = 'MINISBLACK'
-            elif main_data.ndim == 3 and main_data.shape[2] == 2:
-                # Gray+alpha page
-                main_photometric = 'MINISBLACK'
-            else:
-                main_photometric = 'RGB'
-            kwargs_main = {
-                'photometric': main_photometric,
-                'compression': tiff_comp,
-                # Same anti-default-tag treatment as the main writer: without
-                # these, tifffile injects Software=tifffile.py and a shaped-JSON
-                # ImageDescription on single-page outputs whenever exiftool is
-                # missing/slow.
-                'metadata': None,
-                'software': '',
-            }
-            if main_subfiletype:
-                kwargs_main.update(_page_subfiletype_kwargs(main_subfiletype))
-            if extratags:
-                kwargs_main['extratags'] = list(kwargs_main.get('extratags', ())) + list(extratags)
-            if main_data.ndim == 3 and main_data.shape[2] in (2, 4):
-                kwargs_main['extrasamples'] = main_extrasamples or 'UNASSALPHA'
-            if icc_data:
-                kwargs_main['iccprofile'] = icc_data
-            
-            write_method(main_data, **kwargs_main)
-
-            # Page 1: 8-bit preview as thumbnail (subfiletype=1)
-            # This marks it as a reduced-resolution image
-            if jpeg_arr.ndim == 2 or (jpeg_arr.ndim == 3 and jpeg_arr.shape[2] == 1):
-                preview_photometric = 'MINISBLACK'
-            else:
-                preview_photometric = 'RGB'
-            kwargs_preview = {
-                'photometric': preview_photometric,
-                'compression': 'jpeg',
-                'subfiletype': 1,  # Marks as thumbnail/reduced resolution
-            }
-            # Preview doesn't need ICC - Windows uses page 0's ICC
-            
-            write_method(jpeg_arr, **kwargs_preview)
-
-        # Replace original TIFF with properly structured one
-        if temp_tiff.exists():
-            logger.debug(f" >Temp file created: {temp_tiff.stat().st_size} bytes")
-            shutil.move(str(temp_tiff), str(tiff_path))
-            # "with ICC" only when one was actually attached: a page whose ICC
-            # was INHERITED gets None on purpose (the original carried no tag),
-            # and the line claimed otherwise on every film-scan IR page.
-            logger.info(f" >Added JPEG preview ({new_w}x{new_h})"
-                        + (" with ICC" if icc_data else " (no ICC on this page)"))
-        else:
-            logger.warning(" >Temp file not created!")
-
-    except Exception as e:
-        logger.warning(f"Preview generation failed: {e}")
-        import traceback
-        logger.debug(f"Preview error traceback: {traceback.format_exc()}")
+def _preview_page_kwargs(jpeg_arr) -> dict:
+    """tifffile arguments of the preview page: a reduced-resolution image
+    (NewSubfileType 1, as Capture One writes it), JPEG-compressed, no ICC
+    (Windows Explorer uses page 0's)."""
+    grey = jpeg_arr.ndim == 2 or (jpeg_arr.ndim == 3 and jpeg_arr.shape[2] == 1)
+    return {
+        'photometric': 'MINISBLACK' if grey else 'RGB',
+        'compression': 'jpeg',
+        'subfiletype': 1,  # Marks as thumbnail/reduced resolution
+        # Without tifffile's default Software and shaped-JSON ImageDescription
+        # (#681): copy_metadata's two `-ifd1:` clean-ups then find nothing to
+        # remove and leave the file as it is — each one rewrote the whole TIFF
+        # (251 MB for a 45 MP page) to delete two short tags.
+        'metadata': None,
+        'software': '',
+    }
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PATH RESOLUTION (ALL MODES 0-8)
@@ -2468,8 +2372,15 @@ def decode_jxl_to_numpy(jxl_path, tmp_dir, target_icc_path=None, target_depth=No
     if mode == 'roundtrip':
         png_path = tmp_dir / "decoded_roundtrip.png"
         icc_args, out_icc, orig_icc = _djxl_icc_args(tmp_dir)
-        decode_auto_png(jxl_path, png_path, extra_args=icc_args)
-        same = _decoded_in_original_space(out_icc, orig_icc)
+        # The pixels from memory (#681); the PNG as before when the PAM cannot
+        # carry them, or for a lossy ICC blob, whose float route below takes
+        # the alpha channel from that PNG.
+        planes = _decode_planes_in_memory(jxl_path, icc_args, target_depth)
+        same = _decoded_in_original_space(out_icc, orig_icc) if planes is not None else None
+        if planes is None or same is False:
+            planes = None
+            decode_auto_png(jxl_path, png_path, extra_args=icc_args)
+            same = _decoded_in_original_space(out_icc, orig_icc)
         if same is False:
             # Lossy JXL carrying a whole ICC blob (a table-curve profile with
             # no native JXL form): djxl returned LINEAR sRGB, so pasting the
@@ -2550,7 +2461,8 @@ def decode_jxl_to_numpy(jxl_path, tmp_dir, target_icc_path=None, target_depth=No
                 "sRGB and the paste would give wrong colours). Increase djxl: "
                 "libjxl >= 0.11.2 writes both profiles — "
                 "https://github.com/libjxl/libjxl/releases")
-        rgb, alpha = read_png_to_numpy(png_path, target_depth=target_depth)
+        rgb, alpha = (planes if planes is not None
+                      else read_png_to_numpy(png_path, target_depth=target_depth))
         if alpha is not None:
             pixels = np.dstack([rgb, alpha])
         else:
@@ -2585,8 +2497,11 @@ def decode_jxl_to_numpy(jxl_path, tmp_dir, target_icc_path=None, target_depth=No
 
     elif mode == 'none':
         png_path = tmp_dir / "decoded_none.png"
-        decode_auto_png(jxl_path, png_path)
-        rgb, alpha = read_png_to_numpy(png_path, target_depth=target_depth)
+        planes = _decode_planes_in_memory(jxl_path, [], target_depth)     # #681
+        if planes is None:
+            decode_auto_png(jxl_path, png_path)
+        rgb, alpha = (planes if planes is not None
+                      else read_png_to_numpy(png_path, target_depth=target_depth))
         if alpha is not None:
             pixels = np.dstack([rgb, alpha])
         else:
@@ -3025,6 +2940,11 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
             # EXIF/XMP to overwrite them (e.g. consumer JXLs, None mode).
             # The pages exactly as written, for the PIXSUM_PREFIX record.
             _written_pages = []
+            # JPEG preview: only for single-page, non-None groups (None mode
+            # keeps the v1.6.0 minimal-output contract; a multi-page TIFF has
+            # no single image to preview). Written as page 1 by this same
+            # writer (#681), before copy_metadata like the rebuild it replaces.
+            _want_preview = ADD_JPEG_PREVIEW and not is_multipage and strategy != 'none'
             # The TIFF in the master's byte order (II/MM, v2.25.0).
             with tifffile.TiffWriter(str(write_path),
                                      byteorder=_jxl_exif_byteorder(main_jxl)) as tif_writer:
@@ -3083,24 +3003,33 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
                         kwargs['extratags'] = (list(kwargs.get('extratags', ()))
                                                + _page_tt[(page_idx, is_thumb)])
 
+                    _preview = _preview_icc = None
+                    if _want_preview and i == 0:
+                        # ICC: the page's own; a page whose ICC was INHERITED
+                        # converts with None — the preview must not stand for
+                        # a profile the original page never had.
+                        _preview_icc = None if entry_inherited else page_icc
+                        if _preview_icc is None:
+                            _preview_icc = kwargs.get('iccprofile')
+                        logger.info(f" >Adding JPEG preview to {write_path.name}...")
+                        try:
+                            _preview = _jpeg_preview_array(pixels, _preview_icc)
+                        except Exception as e:
+                            logger.warning(f"Preview generation failed: {e}")
+                            import traceback
+                            logger.debug(f"Preview error traceback: {traceback.format_exc()}")
                     write_method(pixels, **kwargs)
                     _written_pages.append(pixels)
+                    if _preview is not None:
+                        write_method(_preview[0], **_preview_page_kwargs(_preview[0]))
+                        # "with ICC" only when one converted it: an INHERITED
+                        # page gets None on purpose (#film-scan IR pages).
+                        logger.info(f" >Added JPEG preview ({_preview[1][0]}x{_preview[1][1]})"
+                                    + (" with ICC" if _preview_icc else " (no ICC on this page)"))
             _pixsum = _pixel_sum(_written_pages)
             del _written_pages
 
-            # JPEG preview: only for single-page, non-None groups.
-            # add_jpeg_preview recreates the file via tifffile (pixels + ICC only),
-            # so it must run BEFORE copy_metadata or all EXIF/XMP would be wiped.
-            # Multi-page TIFFs skip it (add_jpeg_preview operates on series[0]),
-            # and None mode skips it to preserve the v1.6.0 minimal-output contract.
-            # ICC: when the anchor page was ICC-INHERITED, pass None — the
-            # preview rewrite must not re-attach an ICC tag that the original
-            # page never had (the main writer deliberately omits it).
-            if ADD_JPEG_PREVIEW and not is_multipage and strategy != 'none':
-                _anchor_inherited = page_arrays[0][4] if page_arrays else False
-                add_jpeg_preview(write_path, tmp_dir, None if _anchor_inherited else page_icc,
-                                 extratags=_page_tt.get((page_arrays[0][1], page_arrays[0][2])))
-            elif ADD_JPEG_PREVIEW and is_multipage:
+            if ADD_JPEG_PREVIEW and is_multipage:
                 logger.info(f" >Skipping JPEG preview for multi-page TIFF ({len(page_arrays)} pages)")
 
             meta_ok = True

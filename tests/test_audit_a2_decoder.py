@@ -56,14 +56,8 @@ def _image(h, w):
 # ===========================================================================
 
 def _preview(tmp_path, monkeypatch, img):
-    # The preview rewrite needs imagecodecs: without it, skip rather than
-    # fail (261104 review, S4).
-    pytest.importorskip("imagecodecs")
-    d = _hostile(tmp_path)
-    tif = d / "DSC_0001 (2).tif"
-    tifffile.imwrite(str(tif), img, photometric="rgb")
-    work = d / "tmp [w]"
-    work.mkdir()
+    # The preview of the decoder's single-page TIFF, from the pixels it writes
+    # (_jpeg_preview_array: page 1 of the first writer since #681).
     dec.setup_logger()
     handed = []
     from PIL import Image
@@ -73,20 +67,18 @@ def _preview(tmp_path, monkeypatch, img):
         handed.append(np.array(arr, copy=True))
         return real_fromarray(arr, *a, **k)
     monkeypatch.setattr(Image, "fromarray", fromarray)
-    monkeypatch.setattr(dec, "ADD_JPEG_PREVIEW", True)
-    dec.add_jpeg_preview(tif, work, None)
-    return tif, handed
+    result = dec._jpeg_preview_array(img, None)
+    return result, handed
 
 
 def test_db_preview_input_identical(tmp_path, monkeypatch):
     """Equivalence pin (no pre-fix proof): the 8-bit image the preview is
     resized from is exactly rint(x / 257) of the whole image, block by block."""
     img = _image(600, 400)
-    tif, handed = _preview(tmp_path, monkeypatch, img)
+    result, handed = _preview(tmp_path, monkeypatch, img)
     assert handed, "no preview was made"
     np.testing.assert_array_equal(handed[0], np.rint(img / 257).astype(np.uint8))
-    with tifffile.TiffFile(str(tif)) as t:
-        assert len(t.pages) == 2, "the preview page is missing"
+    assert result is not None and result[1] == (170, 256), result and result[1]
 
 
 def test_db_no_full_image_float(tmp_path, monkeypatch):

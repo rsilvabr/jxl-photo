@@ -168,7 +168,7 @@ def test_thumb_only_group_respects_none_mode(monkeypatch, tmp_path):
     monkeypatch.setattr(dec, "OVERWRITE", True)
     monkeypatch.setattr(dec, "ADD_JPEG_PREVIEW", True)
     previews, full_copies = [], []
-    monkeypatch.setattr(dec, "add_jpeg_preview", lambda *a, **k: previews.append(1))
+    monkeypatch.setattr(dec, "_jpeg_preview_array", lambda *a, **k: previews.append(1))
     monkeypatch.setattr(dec, "copy_metadata", lambda *a, **k: full_copies.append(1))
     monkeypatch.setattr(dec, "cleanup_xmp_icc", lambda *a, **k: None)
     monkeypatch.setattr(dec, "_run_exiftool_argfile", lambda *a, **k: _FakeRun())

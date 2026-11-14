@@ -1248,22 +1248,17 @@ def test_grayscale_flag_from_array_not_metadata(monkeypatch, tmp_path):
 
 
 def test_la_preview_no_upscale_and_no_la_jpeg(tmp_path, monkeypatch):
-    """add_jpeg_preview on a gray+alpha TIFF: preview written (not LA-fail)
+    """The preview of a gray+alpha page: made (not an LA-JPEG failure), grey,
     and never larger than the source."""
-    pytest.importorskip("imagecodecs")
-    la_tiff = tmp_path / "la.tif"
     img = np.dstack([np.full((48, 64), 300, dtype=np.uint16),
                      np.full((48, 64), 65535, dtype=np.uint16)])
-    with tifffile.TiffWriter(str(la_tiff)) as t:
-        t.write(img, photometric="minisblack", extrasamples=["unassalpha"])
     dec.setup_logger()
-    monkeypatch.setattr(dec, "ADD_JPEG_PREVIEW", True)
-    dec.add_jpeg_preview(la_tiff, tmp_path, None)
-    with tifffile.TiffFile(str(la_tiff)) as t:
-        assert len(t.pages) == 2, "preview page was not added"
-        prev = t.pages[1]
-        assert prev.imagewidth <= 64 and prev.imagelength <= 48, \
-            f"preview upscaled: {prev.imagewidth}x{prev.imagelength}"
+    result = dec._jpeg_preview_array(img, None)
+    assert result is not None, "no preview was made"
+    arr, (w, h) = result
+    assert arr.ndim == 2, f"not a grey preview: {arr.shape}"
+    assert w <= 64 and h <= 48 and arr.shape == (h, w), f"preview upscaled: {w}x{h}"
+    assert dec._preview_page_kwargs(arr)["photometric"] == "MINISBLACK"
 
 
 # ---------------------------------------------------------------------------
@@ -1630,20 +1625,30 @@ def test_wrapper_mode4_preview_matches_token_rule():
 
 
 def test_preview_rewrite_has_no_tifffile_default_tags(tmp_path, monkeypatch):
-    """add_jpeg_preview must write metadata=None/software='' so the TIFF
-    carries no tifffile default Software/ImageDescription."""
-    pytest.importorskip("imagecodecs")
-    src_tiff = tmp_path / "x.tif"
-    tifffile.imwrite(src_tiff, np.zeros((32, 32, 3), dtype=np.uint16), photometric="rgb")
+    """The single-page decode with its JPEG preview (page 1, written by the
+    same writer since #681) carries no tifffile default Software or
+    ImageDescription on EITHER page — the preview page's used to be removed
+    afterwards by two exiftool rewrites of the whole TIFF."""
+    src = tmp_path / "x.jxl"
+    src.write_bytes(b"\x00" * 16)
+    out = tmp_path / "x.tif"
     dec.setup_logger()
+    monkeypatch.setattr(dec, "OVERWRITE", True)
     monkeypatch.setattr(dec, "ADD_JPEG_PREVIEW", True)
-    dec.add_jpeg_preview(src_tiff, tmp_path, None)
-    with tifffile.TiffFile(str(src_tiff)) as t:
-        pg = t.pages[0]
-        sw = pg.tags.get('Software')
-        desc = pg.tags.get('ImageDescription')
-        assert sw is None, f"tifffile Software tag leaked: {sw and sw.value!r}"
-        assert desc is None, f"shaped-JSON ImageDescription leaked"
+    monkeypatch.setattr(dec, "decode_jxl_to_numpy",
+                        lambda *a, **k: (np.zeros((32, 32, 3), dtype=np.uint16), None, "x", "roundtrip"))
+    monkeypatch.setattr(dec, "copy_metadata", lambda *a, **k: None)
+    monkeypatch.setattr(dec, "cleanup_xmp_icc", lambda *a, **k: None)
+    main, status, _ = dec.convert_multipage_jxl_group(
+        src, [(src, 0, False, False, 0, False, None)], out, out)
+    assert status == "ok"
+    with tifffile.TiffFile(str(out)) as t:
+        assert len(t.pages) == 2 and int(t.pages[1].subfiletype) == 1, "no preview page"
+        for pg in t.pages:
+            sw = pg.tags.get('Software')
+            desc = pg.tags.get('ImageDescription')
+            assert sw is None, f"tifffile Software tag leaked: {sw and sw.value!r}"
+            assert desc is None, f"shaped-JSON ImageDescription leaked"
 
 
 def test_bare_codestream_rejected_at_gates(tmp_path):

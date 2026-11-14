@@ -248,9 +248,9 @@ def test_a_thumbnail_the_encoder_cannot_encode_is_left_out(mode, kept):
 
 @needs_tools
 def test_a_single_page_tiff_keeps_its_private_tags_through_the_preview_rewrite(tmp_path):
-    """A single-page decode gets a JPEG preview page, written by rebuilding
-    the file from its pixels (add_jpeg_preview): the private tags must be
-    carried through that rebuild too."""
+    """A single-page decode gets a JPEG preview page (page 1, written by the
+    same writer since #681; it used to rebuild the file from its pixels):
+    the private tags must be on the image page all the same."""
     d = tmp_path / HOSTILE
     (d / "jxl").mkdir(parents=True)
     src = d / "slide [3] 100%.tif"
