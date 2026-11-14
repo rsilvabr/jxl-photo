@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.30.2-rc1](#v2302-rc1)** | 2026-11-14 | Pre-release. The Explorer thumbnail no longer writes the whole decoded image to the temp folder: the same thumbnails, much faster when the temp folder sits on a slow disk (round 86, 1 fix) |
+| **[v2.30.2-rc2](#v2302-rc2)** | 2026-11-14 | Pre-release. Resized copies, decoded TIFFs and deleting runs no longer write a full-size temporary image per photo; a new master is written once instead of seven times; planning reads a few KB of each JXL instead of the whole file — the same files, byte for byte; a grey resized JPEG copy is marked as one (round 87, 8 fixes) |
+| [v2.30.2-rc1](#v2302-rc1) | 2026-11-14 | Pre-release. The Explorer thumbnail no longer writes the whole decoded image to the temp folder: the same thumbnails, much faster when the temp folder sits on a slow disk (round 86, 1 fix) |
 | [v2.30.1](#v2301) | 2026-11-14 | Everything in the two test releases: the wizard's checks read every option the run gets; libjxl 0.13.0 supported (JPEG archives every libjxl rebuilds bit for bit, alpha kept) |
 | [v2.30.1-rc2](#v2301-rc2) | 2026-11-14 | Pre-release. Tested with libjxl 0.13.0: with it, a lossless JPEG archive is still rebuilt bit for bit by every djxl since 0.11, and a lossy encode keeps an all-opaque alpha channel (round 85, 2 fixes) |
 | [v2.30.1-rc1](#v2301-rc1) | 2026-11-13 | Pre-release (test releases are now named `-rcN`). The wizard's manifest check and delete preview read every flag the run gets (resize, output folder name, expert flags); a file row in mode 2 with an empty Destination converts; the count and the check of a JPEG ↔ JXL run as fast as before v2.30.0 (round 84, 6 fixes) |
@@ -108,11 +109,88 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.30.2-rc2
+
+**Released 2026-11-14, the second test release (pre-release) of v2.30.2**;
+the last stable release is [v2.30.1](#v2301), and everything in
+[v2.30.2-rc1](#v2302-rc1) is in it. The fixes of an audit of what each step
+writes and reads on disk (round 87, #672–#676, #679–#681; the Fable's
+measurements, the code here). Nothing to do when upgrading. Every file the
+scripts write is the same as with rc1, byte for byte, except a grey resized
+JPEG copy (#672, a fix).
+
+- **Fixed — a grey derivative JPEG is marked as one (#672).** The
+  transcoder's ImageMagick route gave a grey image no profile step, so
+  ImageMagick kept the master's EXIF and XMP from djxl's PNG; a master's XMP
+  is often larger than a JPEG's 64 KB APP1 segment (SilverFast's mask list:
+  109 KB on the IR page of a real scan), ImageMagick wrote it broken, the
+  later exiftool writes were ignored, and the copy kept `jxlphoto-src`/
+  `srcsum` without `jxlphoto-derived` — the next run refused it as "not a
+  derivative of this run". A grey image now gets `+profile "!icc,*"`: its ICC
+  stays, the codec's EXIF/XMP go, the metadata is copied from the master as
+  for RGB.
+- **A derivative decodes its master into memory (#680).** Every resized JPEG
+  (JPG MOBILE) and every recompressor derivative (sRGB, resized) had djxl
+  write a 16-bit PNG into the temp folder: 232 MB and 8.6 s of libpng
+  deflate inside djxl for a 45 MP master. djxl now writes a PAM to stdout,
+  read into memory, and ImageMagick reads the samples raw from stdin, for an
+  RGB/RGBA master that carries its ICC in XMP, decoded in its own space,
+  whose PAM has the depth the PNG would have had. djxl writes a PAM/PPM at
+  the FILE's depth whatever `--bits_per_sample` says (0.12 and 0.13; only its
+  PNG writer obeys), so a full-size 8-bit conversion of a 16-bit master keeps
+  the PNG: fed the 16-bit samples, its pixels came out up to 46 levels apart.
+  A JPEG gets the master's EXIF resolution in its JFIF header (`-units`/
+  `-density`), which the PNG's EXIF used to give ImageMagick. Grey, a PNG
+  output, an ICC blob, an 8-bit source and a master without its ICC in XMP or
+  without a resolution keep the PNG route; any failure falls back to it. The
+  master's CreatorTool, Relation, resolution and XMP pixel dimensions come
+  from one exiftool process, kept for the run while the file keeps its path,
+  size and date (`_source_tags`): a derivative asked them up to four times.
+- **The encoder writes each master once (#675).** Each exiftool write command
+  rewrote the whole master (48 MB copied to append 8 KB), then
+  `reorder_jxl_boxes` and the Explorer thumbnail box rewrote it again: 7
+  writes, 337 MB for a 48 MB master. The same commands now run on a stub
+  (cjxl's boxes, the codestream cut to its first 4 KB) and the master is put
+  together in one pass (`_assemble_from_stub`, the box order of
+  `reorder_jxl_boxes` shared through `_ordered_box_parts`). Anything the stub
+  route cannot do falls back to the old steps on the untouched file.
+- **Planning reads a few KB of each JXL (#676).** exiftool reads the whole
+  JXL to answer any question (50 MB for a 48 MB master, `-fast` or not), so a
+  run with nothing to do — SYNC PHOTOS, a JPG MOBILE whose copies are up to
+  date — read every master in full first (86 GB for one year of masters).
+  The batch engine now hands exiftool a metadata stub per JXL (every box but
+  the Explorer thumbnail, the codestream cut to its first bytes) and maps the
+  answers back; anything less than a clean answer for every stub reads the
+  chunk from the files as before.
+- **The decoder (#681)** takes the pixels from a PAM in memory instead of a
+  16-bit PNG (roundtrip and none modes), writes the JPEG preview as page 1 of
+  its first writer instead of rebuilding the finished TIFF (2 × 251 MB read
+  and written for a 45 MP page), and writes that page without tifffile's
+  default tags, so the two exiftool clean-ups that each rewrote the whole TIFF
+  find nothing to do.
+- **The delete checks.** The round-trip check before a delete (#673) decodes
+  into memory: the same arrays, without the 236 MB PNG and its 8.7 s, most of
+  a deleting run. The JPEG archive's delete gate (#679) rebuilds the JPEG in
+  memory instead of a temp file.
+- **A plain recompression of a scanner-profile file (#674)** decodes into
+  memory only for djxl's two profile probes; the PNG is made only when the
+  "skip" route encodes it.
+- **Measured** (99 real masters, 8 workers, NVMe, the clock frozen, every
+  output compared byte for byte with rc1's code): JPG MOBILE 137 → 91 s,
+  resized JXL 127 → 80 s, sRGB JXL 238 → 165 s, the decoder 72 → 37 s (19
+  masters), the round-trip decode of 19 masters 151 → 6.8 s, the ten batch
+  readers on 99 masters 36.8 → 12.5 s from the disk cache (a few MB instead of
+  3 GB from a hard disk). On a disk as slow as 45 MB/s the encoder writes 97
+  instead of 337 MB per 45 MP master. Two more ideas of the audit wait: the
+  recompressor's second temp file and cjxl's output in memory need a process
+  fed and read at once without a thread, for a gain of under a second per
+  file on a healthy disk.
+
 ## v2.30.2-rc1
 
-**Released 2026-11-14, a test release (pre-release) of v2.30.2**; the last
-stable release is [v2.30.1](#v2301). One fix (round 86, #671). Nothing to do
-when upgrading.
+**Released 2026-11-14, a test release (pre-release) of v2.30.2**,
+superseded by [v2.30.2-rc2](#v2302-rc2) the same day; the last stable release
+is [v2.30.1](#v2301). One fix (round 86, #671). Nothing to do when upgrading.
 
 - **Fixed — the Explorer thumbnail no longer writes the whole decoded image
   to the temp folder (#671).** To make the 768 px thumbnail of an output,

@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.30.2-rc1** (2026-11-14, pre-release; last stable: [v2.30.1](docs/version_history.md#v2301)) · [What's new](#whats-new-in-v2302-rc1) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.30.2-rc2** (2026-11-14, pre-release; last stable: [v2.30.1](docs/version_history.md#v2301)) · [What's new](#whats-new-in-v2302-rc2) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 **Windows program, no Python needed:** [jxl-photo-exe](https://github.com/rsilvabr/jxl-photo-exe/releases/latest) — unzip and double-click; cjxl/djxl, ExifTool, ImageMagick and jxl-thumb included.
 
@@ -201,14 +201,15 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## What's new in v2.30.2-rc1
+## What's new in v2.30.2-rc2
 
-2026-11-14. A test release (pre-release) of v2.30.2; the last stable release is [v2.30.1](docs/whats_new.md#v2301). Nothing to do when upgrading.
+2026-11-14. The second test release (pre-release) of v2.30.2; the last stable release is [v2.30.1](docs/whats_new.md#v2301). Nothing to do when upgrading. Everything in [v2.30.2-rc1](docs/whats_new.md#v2302-rc1) is in it.
 
-- **Explorer thumbnails no longer write the whole photo to the temp folder.** The full-size image a 768 px thumbnail is made from now stays in memory; it used to be a temporary file of about 270 MB for a 45 MP photo, once per output. The thumbnails come out byte for byte the same.
-- Much faster when the temp folder sits on a slow disk: six thumbnails took 7 s instead of 262 s on a SATA SSD that had slowed down to about 45 MB/s. On a fast drive the speed is the same, with about 270 MB less written to the SSD per photo.
+- **Less written to the temp folder, faster runs.** Resized copies, sRGB JXL copies, decoded TIFFs and the check before a delete no longer write a full-size temporary image (about 230 MB for a 45 MP photo): JPG MOBILE took 91 s instead of 137 s on 99 photos, the decoder about half the time.
+- The encoder writes each master once instead of seven times, and planning reads a few KB of each JXL instead of the whole file, so a sync with nothing to do starts much sooner.
+- The files come out byte for byte the same. One fix: a resized grey JPEG copy (the infrared page of a film scan) is now marked as a copy, so the next run no longer refuses it.
 
-[Technical notes](docs/version_history.md#v2302-rc1) · [earlier releases, in short](docs/whats_new.md) · [every release](docs/version_history.md#release-history)
+[Technical notes](docs/version_history.md#v2302-rc2) · [earlier releases, in short](docs/whats_new.md) · [every release](docs/version_history.md#release-history)
 
 ---
 

@@ -9,13 +9,15 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #672.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #682.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
 v1.9.0_beta2 row) and were renumbered on 2026-10-07 — each of those sections
 says so. #586–#599 were set aside for round 70, which was worked on in
-parallel with round 71, and stay unused.
+parallel with round 71, and stay unused. #677–#678 were set aside in round 87
+for two proposals that were not done (the recompressor's second temp file,
+cjxl's output in memory) and stay unused.
 
 **Bugs that never shipped are here too.** A bug introduced by a commit and
 caught before the next release (by the suite, the real-photo battery or a
@@ -30,6 +32,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-87 — what each step writes and reads on disk](#round-87--what-each-step-writes-and-reads-on-disk-2026-11-14) | 2026-11-14 | v2.30.2-rc2 | #672–#676, #679–#681 (8) |
 | [Round-86 — the Explorer thumbnail's decode in memory](#round-86--the-explorer-thumbnails-decode-in-memory-2026-11-14) | 2026-11-14 | v2.30.2-rc1 | #671 (1) |
 | [Round-85 — libjxl 0.13: JPEG archives and alpha channels](#round-85--libjxl-013-jpeg-archives-and-alpha-channels-2026-11-14) | 2026-11-14 | v2.30.1-rc2 | #669–#670 (2) |
 | [Round-84 — the independent review of v2.30.0](#round-84--the-independent-review-of-v2300-2026-11-13) | 2026-11-13 | v2.30.1-rc1 | #663–#668 (6) |
@@ -102,6 +105,29 @@ were never tagged and never shipped.
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
 
 ---
+
+## Round-87 — what each step writes and reads on disk (2026-11-14)
+
+An audit after #671 (the Fable, `AI_tools/261114_Fable_review_io-optimizations.md`)
+measured, per process, every byte each step of the four scripts writes and
+reads for a 45 MP master. The largest cost was not the disk but djxl writing
+16-bit PNGs (8.6 s of libpng deflate against 0.4 s for the same decode as a
+PAM); a master was written 7 times before it left staging; exiftool read the
+whole JXL to answer a planning question. One correctness bug was found on the
+way (#672). Every output of the changed paths was compared byte for byte with
+the code before, on real files (the clock frozen). #677–#678 were set aside
+for two proposals not done (a process fed and read at once without a thread).
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 672 | **A grey derivative JPEG kept the master's `jxlphoto-src`/`srcsum` and got no `jxlphoto-derived`** (the IR page of a film scan, resized to JPEG): the ImageMagick route gave a grey image no profile step, so ImageMagick kept the EXIF and XMP of djxl's PNG; the master's XMP (SilverFast's mask list, 109 KB) does not fit a JPEG's 64 KB APP1 segment, ImageMagick wrote it broken, and every later exiftool write was ignored. The log said OK; the next run refused the file as "not a derivative of this run" and exited 1. No delete followed (#600 keeps the JXL of any JXL → JPEG) | `jxl_jpeg_transcoder.py` | ✅ Fixed — grey gets `+profile "!icc,*"` (its ICC stays, the codec's EXIF/XMP go); the metadata is copied from the master as for RGB. A grey PNG was right before and now gets exactly what an RGB one gets. `tests/test_grey_derivative_markers.py` (real codecs; the JPEG case failed before) |
+| 673 | **The round-trip check before a delete wrote a 16-bit PNG per page and read it back** (`_decode_jxl_for_verify`: the encoder's delete gate, the adopt scan, the recompressor's `--verify-roundtrip`): 236 MB and 8.7 s for a 45 MP page, most of a deleting run | `jxl_photo_common.py` | ✅ Fixed — a PAM on stdout read into memory (`_run_to_memory`) turned into the same array (`_pam_array`, `_pam_header` shared with the thumbnail); a 12-bit file keeps the PNG. The same arrays on 19 + 117 real masters. `tests/test_decode_in_memory.py` (failed before) |
+| 674 | **A plain recompression of a source whose colour is an ICC profile decoded it to a PNG only to read djxl's two profile probes** (`_recompress_encode`): in two of the three outcomes the PNG was never opened | `jxl_recompressor.py` | ✅ Fixed — the probe decode goes to memory; the PNG is decoded only for the "skip" route that encodes it. 99 of 99 plain recompressions byte for byte the same. `tests/test_decode_in_memory.py` (failed before) |
+| 675 | **The encoder wrote each master 7 times after cjxl**: each exiftool write command rewrote the whole file (48 MB to append 8 KB), then `reorder_jxl_boxes`, then the Explorer thumbnail box — 337 MB for a 48 MB master, on the staging disk | `jxl_photo_common.py`, `jxl_tiff_encoder.py` | ✅ Fixed — the same commands run on a stub (`_write_metadata_stub`; argfiles copied, never edited), and `_assemble_from_stub` writes the master once in the box order of `reorder_jxl_boxes` (`_ordered_box_parts`, one copy of the rule) with the thumbnail box; any failure falls back to the old steps on the untouched file. 80 real masters byte for byte the same. `tests/test_master_assembly.py` (failed before) |
+| 676 | **Planning read every JXL in full** (`_exiftool_batch`): exiftool reads the whole file to answer any question, so SYNC PHOTOS and an up-to-date JPG MOBILE read 86 GB for one year of masters before their first file | `jxl_photo_common.py` | ✅ Fixed — a metadata stub per JXL (every box but the thumbnail, the codestream cut to its first bytes), the answers mapped back; anything less than a clean answer for every stub reads the chunk from the files as before. The ten batch readers answer the same on 99 real masters. `tests/test_planning_stubs.py` (failed before) |
+| 679 | **The JPEG archive's delete gate rebuilt the whole JPEG into a temp file to hash it** (`_jxl_reconstructs_to`, `_jxl_reconstruct_md5`) | `jxl_jpeg_transcoder.py` | ✅ Fixed — `djxl --reconstruct_jpeg x.jxl - --output_format=jpeg` into memory (`_jxl_rebuilt_jpeg`); djxl 0.12 and 0.13 give the same bytes; every case that cannot run still fails closed. `tests/test_decode_in_memory.py` (failed before) |
+| 680 | **Every derivative decoded its master to a 16-bit PNG in the temp folder** (the transcoder's resized JPEG, the recompressor's sRGB or resized JXL): 232 MB and 8.6 s of libpng deflate for a 45 MP master, more than half of a JPG MOBILE file; and its master's tags were read by up to four exiftool processes | `jxl_photo_common.py`, `jxl_jpeg_transcoder.py`, `jxl_recompressor.py` | ✅ Fixed — a PAM in memory, ImageMagick reading raw samples, for an RGB/RGBA master with its ICC in XMP, decoded in its own space, whose PAM has the depth the PNG would have had (djxl writes a PAM at the file's depth whatever `--bits_per_sample` says); a JPEG gets the master's EXIF resolution (`_jfif_density_args`); everything else keeps the PNG. The master's tags in one cached read (`_source_tags`, `_resized_dimension_lines` shared). 465 outputs byte for byte the same; JPG MOBILE 137 → 91 s. `tests/test_derivative_decode_in_memory.py` (failed before) |
+| 681 | **The decoder wrote 2.49 GB for a 251 MB TIFF**: djxl's 16-bit PNG, the preview rebuild (the TIFF read back, compressed again, copied over), two exiftool commands rewriting the whole TIFF to delete the tags tifffile put on the preview page | `jxl_tiff_decoder.py` | ✅ Fixed — the pixels from a PAM in memory (roundtrip/none modes; basic, an ICC blob and 12-bit keep the PNG); the preview written as page 1 by the first writer (`_jpeg_preview_array`; `add_jpeg_preview` removed) without tifffile's default tags. 90 TIFFs byte for byte the same; 72 → 37 s on 19 masters. `tests/test_decoder_in_memory.py` (failed before) |
 
 ## Round-86 — the Explorer thumbnail's decode in memory (2026-11-14)
 

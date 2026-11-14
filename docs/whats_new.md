@@ -10,7 +10,8 @@ as [GitHub Releases](https://github.com/rsilvabr/jxl-photo/releases).
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.30.2-rc1](version_history.md#v2302-rc1)** | 2026-11-14 | Pre-release. Explorer thumbnails no longer write the whole photo to the temp folder: the same thumbnails, much faster when the temp folder sits on a slow disk |
+| **[v2.30.2-rc2](version_history.md#v2302-rc2)** | 2026-11-14 | Pre-release. Copies, decoded TIFFs and the check before a delete without a full-size temporary image; each master written once; planning reads a few KB per JXL; the same files byte for byte |
+| [v2.30.2-rc1](version_history.md#v2302-rc1) | 2026-11-14 | Pre-release. Explorer thumbnails no longer write the whole photo to the temp folder: the same thumbnails, much faster when the temp folder sits on a slow disk |
 | [v2.30.1](version_history.md#v2301) | 2026-11-14 | The wizard's checks read every option the run gets; libjxl 0.13.0 supported: JPEG archives every libjxl rebuilds bit for bit, alpha channels kept |
 | [v2.30.1-rc2](version_history.md#v2301-rc2) | 2026-11-14 | Pre-release. Tested with libjxl 0.13.0: with it, a JPEG archive is still rebuilt bit for bit by every libjxl since 0.11, and a lossy encode keeps an all-opaque alpha channel; everything in v2.30.1-rc1 |
 | [v2.30.1-rc1](version_history.md#v2301-rc1) | 2026-11-13 | Pre-release (test releases are now named `-rcN`). The wizard's manifest check and delete preview read every option the run gets; a file row in mode 2 with an empty Destination runs; the count and the check as fast as before v2.30.0 |
@@ -39,6 +40,16 @@ as [GitHub Releases](https://github.com/rsilvabr/jxl-photo/releases).
 | [v2.17.0](version_history.md#v2170) | 2026-10-24 | Film scans archived lossless and never recompressed lossy unless asked; they keep what their scanner software needs (whole XMP, private tags); thumbnail pages kept by default, except Capture One's |
 
 Every release since v1.0: [version_history.md](version_history.md#release-history).
+
+## v2.30.2-rc2
+
+2026-11-14. The second test release (pre-release) of v2.30.2; the last stable release is [v2.30.1](#v2301). Nothing to do when upgrading. Everything in [v2.30.2-rc1](#v2302-rc1) is in it.
+
+- **Less written to the temp folder, faster runs.** Resized copies, sRGB JXL copies, decoded TIFFs and the check before a delete no longer write a full-size temporary image (about 230 MB for a 45 MP photo): JPG MOBILE took 91 s instead of 137 s on 99 photos, the decoder about half the time.
+- The encoder writes each master once instead of seven times, and planning reads a few KB of each JXL instead of the whole file, so a sync with nothing to do starts much sooner.
+- The files come out byte for byte the same. One fix: a resized grey JPEG copy (the infrared page of a film scan) is now marked as a copy, so the next run no longer refuses it.
+
+[Technical notes](version_history.md#v2302-rc2)
 
 ## v2.30.2-rc1
 

@@ -241,6 +241,33 @@
   (`_djxl_icc_args`/`_decoded_in_original_space`, parity-pinned in all four
   scripts). The correct decode is a float PFM CONVERTED to the original
   profile; the decoder fails closed when magick is absent.
+- **Full-size decodes stay in memory (round 87, v2.30.2-rc2).** The
+  round-trip check before a delete (#673), the recompressor's profile probes
+  (#674), the jbrd gate's rebuilt JPEG (#679), a derivative's source (#680)
+  and the decoder's pixels (#681: roundtrip and none modes, `basic` and an
+  ICC blob keep the PNG) come from djxl's stdout (`_run_to_memory`;
+  `_pam_header`/`_pam_array`, common), never a 16-bit PNG in `TEMP_DIR`
+  (230 MB and 8.6 s of libpng deflate per 45 MP page). djxl writes a PAM/PPM
+  at the FILE's depth whatever `--bits_per_sample` says (0.12 and 0.13; only
+  its PNG writer obeys), so every reader checks MAXVAL (255/65535 only, a
+  12-bit file keeps the PNG) and a route that asks another depth keeps the PNG
+  (a full-size 8-bit JPEG of a 16-bit master: fed 16-bit samples, its pixels
+  came out up to 46 levels apart). A derivative takes the memory route only
+  for an RGB/RGBA master with its ICC in XMP decoded in its own space
+  (`_decode_in_memory_for_magick`, `_decode_in_memory_for_derivative`); a JPEG
+  then gets the master's EXIF resolution from `_jfif_density_args` (the PNG's
+  EXIF gave it to ImageMagick before), and anything else or any failure keeps
+  the PNG route. The master's tags a derivative reads come from ONE cached
+  exiftool process (`_source_tags`: keyed by path, size and mtime_ns, only for
+  a file unchanged for 5 s). The decoder writes the JPEG preview as page 1 of
+  its FIRST TiffWriter (`_jpeg_preview_array`; `_preview_page_kwargs` passes
+  `metadata=None, software=''`, so the `-ifd1:` clean-ups find nothing) —
+  never rebuild the finished TIFF for it again. A grey image on the
+  transcoder's ImageMagick route gets `+profile "!icc,*"` (#672): without a
+  profile step ImageMagick keeps the codec's EXIF/XMP from djxl's PNG, and a
+  master's XMP over 64 KB becomes a broken APP1 that turns every later
+  exiftool write into a no-op. Every change of this round was proven byte
+  for byte against the code before on real files, with the clock frozen.
 - **The encoder never converts colour, resizes or sharpens — by design.** It
   writes the MASTER, and its outputs carry the `jxlphoto-src`/`srcsum` proof
   that the delete gates trust. Derivatives (colour/size/sharpening) come from
@@ -268,7 +295,9 @@
   before the EXIF, so without that sort every master comes
   out XMP → Exif (v2.17.0–v2.19.0 did). `--refresh-explorer-thumbnails`
   repairs existing files in place (`_move_exif_first`, status `REORDERED`).
-  Any new path that writes boxes must keep that order. The Exif box must
+  Any new path that writes boxes must keep that order: the rule has ONE copy,
+  `_ordered_box_parts`, used by `reorder_jxl_boxes` and by the encoder's
+  one-pass assembly (`_assemble_from_stub`, #675). The Exif box must
   also be PLAIN (#562): IrfanView cannot read a `brob` (Brotli) box, which
   is cjxl's default for the EXIF/XMP it copies from a JPEG — the transcoder
   passes `_metadata_boxes_flag()` (`--compress_boxes=0` unless
@@ -394,6 +423,14 @@
   reader uses it: `tests/test_batch_stall.py` fails on one that loops on
   its own. `python tools/batch_equivalence.py <old rev> <new rev|WORKTREE>`
   runs every reader old against new on the same fake exiftool answers.
+  Since #676 the engine hands exiftool a metadata STUB of each JXL container
+  (`_batch_on_stubs`: every box but the Explorer thumbnail, the codestream cut
+  to its first bytes, in a `jxlstub_` folder of `TEMP_DIR`, named by index)
+  and maps the answers back — exiftool reads the WHOLE file for any question,
+  `-fast` or not. Anything less than a clean answer for every stub re-reads
+  that chunk from the files; a bare codestream is read itself. A reader needs
+  nothing for it; `tests/test_planning_stubs.py` compares the ten readers,
+  stub against file, on real files.
 - **Per-file exiftool calls use `EXIFTOOL_TIMEOUT`** (each script defines it
   as its codec timeout), never a literal: a 60/120 s limit turned twelve good
   45 MP files into errors under a 17-worker load on 2026-10-06. Only the
@@ -408,7 +445,13 @@
   before) and exiftool reports each status (12.15+, probed once per run in
   `_EXIFTOOL_BATCH`; conftest clears it per test). Otherwise one process per
   command, exactly as before. The encoder's writes after cjxl go through
-  `_run_exiftool_writes` (the first failure raises its old message); its
+  `_run_exiftool_writes` (the first failure raises its old message), on a
+  STUB of cjxl's output since #675 (`_write_metadata_stub`;
+  `_retarget_exiftool_writes` copies each argfile with the stub's path in
+  place of the output's — never edits one, None when that path is not there
+  exactly once); `_assemble_from_stub` then writes the master ONCE (boxes,
+  thumbnail box, codestream) instead of seven rewrites, and any failure of
+  that route falls back to the old steps on the untouched file; its
   reads in `build_metadata_injection_args` are prefetched
   (`_prefetch_exiftool_reads`: answered only for the EXACT same arguments,
   read-only commands only — never an `-o` extraction, which fails when run
@@ -740,7 +783,8 @@
 - The suite and the battery set `JXLPHOTO_LOG_DIR` (conftest / `run()`), so no
   test writes to `Logs\`. Every subprocess call in the four backends goes
   through `_run_captured` except the version probes (`_tool_version`,
-  `_warn_if_libjxl_too_old`) and `_run_to_memory` (#671: an output that must
+  `_warn_if_libjxl_too_old`) and `_run_to_memory` (#671, then the decodes of
+  round 87 — see "Full-size decodes stay in memory": an output that must
   never reach the disk, read into memory in the calling thread — the same
   no-reader-thread rules; `_run_captured`'s stdout is a temp FILE by design);
   `tests/test_subprocess_capture.py` enforces it.

@@ -41,7 +41,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-TOOLKIT_VERSION = "2.30.2-rc1"
+TOOLKIT_VERSION = "2.30.2-rc2"
 
 
 class Script:
