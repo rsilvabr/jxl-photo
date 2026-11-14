@@ -340,7 +340,17 @@
   jxlp payloads without their 4-byte index) must stay byte-identical to
   jxl-thumb's `ReadThumbnailBox`. djxl is called WITHOUT `--color_space` for
   the thumbnail (with it, a lossless file is converted while `--icc_out`
-  still names the original profile). The refresh
+  still names the original profile). The full-size decode never touches
+  the disk (#671: a 272 MB PAM per 45 MP output in TEMP_DIR set the pace
+  of a whole rebuild on a slow SSD): djxl writes the PAM to stdout, read
+  into memory by `_run_to_memory`, and magick reads the samples RAW from
+  stdin (`_pam_raw_input`, `-size WxH -depth N -endian MSB rgb:-` then
+  `+size +depth +endian`, or `-depth 16` stays in force and the JPEG
+  changes). Never hand magick a PAM/PNG/MIFF on stdin: it copies such an
+  input to a temp file first (measured), raw samples it does not. magick
+  starts after djxl has EXITED — djxl writes `--icc_out` after the image.
+  A PAM raw samples cannot carry (a 12-bit MAXVAL) goes through
+  `thumb.pam`, the old route. The refresh
   (`--refresh-explorer-thumbnails`) restores each file's mtime: the
   encoder's sync compares it with the TIFF's. Helpers parity-pinned
   (encoder + recompressor).
@@ -730,7 +740,10 @@
 - The suite and the battery set `JXLPHOTO_LOG_DIR` (conftest / `run()`), so no
   test writes to `Logs\`. Every subprocess call in the four backends goes
   through `_run_captured` except the version probes (`_tool_version`,
-  `_warn_if_libjxl_too_old`); `tests/test_subprocess_capture.py` enforces it.
+  `_warn_if_libjxl_too_old`) and `_run_to_memory` (#671: an output that must
+  never reach the disk, read into memory in the calling thread — the same
+  no-reader-thread rules; `_run_captured`'s stdout is a temp FILE by design);
+  `tests/test_subprocess_capture.py` enforces it.
 - Prefer verifying real behavior against real photos over reasoning alone — the
   test suite is synthetic/mocked, so codec-path bugs (ICC, bit depth,
   multi-page, channel counts) only show up against actual files.

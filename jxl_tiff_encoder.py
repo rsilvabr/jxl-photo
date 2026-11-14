@@ -1706,6 +1706,9 @@ def _argfile_via_stdin(*a, **k): return _common._argfile_via_stdin(_G, *a, **k)
 def _run_captured(*a, **k): return _common._run_captured(_G, *a, **k)
 
 
+def _run_to_memory(*a, **k): return _common._run_to_memory(_G, *a, **k)
+
+
 _stderr_tail = _common._stderr_tail
 
 
@@ -1988,6 +1991,9 @@ def _jxl_thumb_installed(*a, **k): return _common._jxl_thumb_installed(_G, *a, *
 
 
 def _explorer_thumbnail_wanted(*a, **k): return _common._explorer_thumbnail_wanted(_G, *a, **k)
+
+
+_pam_raw_input = _common._pam_raw_input
 
 
 def _make_explorer_thumbnail(*a, **k): return _common._make_explorer_thumbnail(_G, *a, **k)

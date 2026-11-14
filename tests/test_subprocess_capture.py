@@ -44,7 +44,12 @@ _SCRIPTS = (
 )
 _SUBPROCESS_ATTRS = {"run", "Popen", "call", "check_call", "check_output"}
 # The only module-level functions allowed to call subprocess directly.
-_ALLOWED_OWNERS = {"_run_captured", "_tool_version", "_warn_if_libjxl_too_old"}
+# _run_to_memory (#671) is _run_captured's twin for an output that must never
+# reach the disk (the Explorer thumbnail's full-size PAM): same rules — no
+# reader thread, stderr to a temp file, a timeout that holds — but stdout is
+# read into memory in the calling thread. N2 runs it (the lossless encode).
+_ALLOWED_OWNERS = {"_run_captured", "_run_to_memory", "_tool_version",
+                   "_warn_if_libjxl_too_old"}
 # The scripts' own filenames, for attributing a stack frame to a child script.
 _SCRIPT_FILES = set(_SCRIPTS)
 _PROBE_FUNCS = {"_tool_version", "_warn_if_libjxl_too_old"}
@@ -138,7 +143,10 @@ def test_a_real_run_starts_no_reader_thread(tmp_path, monkeypatch):
         finally:
             sys.argv = old
 
-    # 1. Encoder: the --ram (stdin pipe) and --no-ram (file) cjxl paths.
+    # 1. Encoder: the --ram (stdin pipe) and --no-ram (file) cjxl paths. The
+    #    first run also makes an Explorer thumbnail (djxl's PAM read into
+    #    memory by _run_to_memory, #671); a 64 px image gets none stored, but
+    #    the decode and the magick pass run all the same.
     enc_dir = tmp_path / "enc"
     enc_dir.mkdir()
     img16 = np.zeros((48, 64, 3), dtype=np.uint16)
@@ -146,8 +154,15 @@ def test_a_real_run_starts_no_reader_thread(tmp_path, monkeypatch):
     img16[..., 1] = np.arange(48, dtype=np.uint16)[:, None] * 1000
     img16[..., 2] = 30000
     tifffile.imwrite(enc_dir / "a.tif", img16, photometric="rgb")
+    thumbs = []
+    real_thumb = enc._make_explorer_thumbnail
+    monkeypatch.setattr(enc, "_make_explorer_thumbnail",
+                        lambda *a, **k: thumbs.append(real_thumb(*a, **k)) or thumbs[-1])
     run_main(enc, [enc_dir, "--mode", "1", "--distance", "1", "--effort", "1",
-                   "--workers", "2", "--no-preflight", "--ram"])
+                   "--workers", "2", "--no-preflight", "--ram",
+                   "--explorer-thumbnail", "on"])
+    assert thumbs and thumbs[0] and thumbs[0][:2] == b"\xff\xd8", \
+        "the encoder's Explorer thumbnail did not run (or failed)"
     run_main(enc, [enc_dir, "--mode", "1", "--distance", "1", "--effort", "1",
                    "--workers", "2", "--no-preflight", "--no-ram", "--overwrite"])
     jxl_dir = enc_dir / enc.CONVERTED_JXL_FOLDER

@@ -2444,6 +2444,58 @@ def _thumbnail_box_fingerprint(jxl_path):
     return ""
 
 
+# The raw ImageMagick format for each PAM tuple type (and its DEPTH). magick
+# copies an image it reads from stdin to a temp file before decoding it when
+# the format has a header — PAM, PNG and MIFF alike, whatever -limit says
+# (measured: 260 MB written for a 45 MP page, 2026-11-14) — and reads raw
+# samples as they come.
+_PAM_RAW_FORMATS = {(b"GRAYSCALE", 1): "gray", (b"GRAYSCALE_ALPHA", 2): "graya",
+                    (b"RGB", 3): "rgb", (b"RGB_ALPHA", 4): "rgba"}
+
+
+def _pam_raw_input(data):
+    """(magick input arguments, pixel bytes) for the one PAM image in `data`
+    (djxl's output), or None when raw samples cannot carry it exactly: not a
+    P7 header followed by exactly its payload (a second frame, a short read),
+    a MAXVAL other than 255 or 65535 (raw samples are read as the full range:
+    a 12-bit 4095 would come out sixteen times too dark), an unknown tuple
+    type. The caller then hands magick the PAM itself, as before #671.
+
+    The settings of the raw read are reset right after it (+size +depth
+    +endian): -depth 16 stays in force otherwise and the JPEG came out with
+    other bytes. With the reset, the JPEG is byte for byte the one made from
+    the PAM file."""
+    view = memoryview(data)
+    head = bytes(view[:1024])
+    end = head.find(b"\nENDHDR\n")
+    if not head.startswith(b"P7\n") or end < 0:
+        return None
+    fields, tupltypes = {}, []
+    for line in head[3:end].split(b"\n"):
+        line = line.strip()
+        if not line or line.startswith(b"#"):
+            continue
+        key, _, value = line.partition(b" ")
+        if key == b"TUPLTYPE":
+            tupltypes.append(value.strip())
+        else:
+            fields[key] = value.strip()
+    try:
+        w, h = int(fields[b"WIDTH"]), int(fields[b"HEIGHT"])
+        depth, maxval = int(fields[b"DEPTH"]), int(fields[b"MAXVAL"])
+    except (KeyError, ValueError):
+        return None
+    if len(tupltypes) != 1 or maxval not in (255, 65535) or w <= 0 or h <= 0:
+        return None
+    fmt = _PAM_RAW_FORMATS.get((tupltypes[0], depth))
+    width = 1 if maxval == 255 else 2
+    start = end + len(b"\nENDHDR\n")
+    if fmt is None or len(view) - start != w * h * depth * width:
+        return None
+    return (["-size", f"{w}x{h}", "-depth", str(8 * width), "-endian", "MSB",
+             f"{fmt}:-", "+size", "+depth", "+endian"], view[start:])
+
+
 def _make_explorer_thumbnail(g, jxl_path, tmp_dir):
     """An EXPLORER_THUMBNAIL_SIZE px sRGB JPEG of the file (bytes), or None
     with a warning: a thumbnail is never worth failing an archive file.
@@ -2451,7 +2503,14 @@ def _make_explorer_thumbnail(g, jxl_path, tmp_dir):
     lossless file too while --icc_out still names the original profile (a
     double conversion). Left alone, --icc_out names exactly what the pixels
     are in (the file's own profile, or linear sRGB for a lossy ICC blob) and
-    ImageMagick converts from it to sRGB, after the resize."""
+    ImageMagick converts from it to sRGB, after the resize.
+
+    The full-size decode never touches the disk (#671): djxl writes the PAM
+    to stdout, read into memory (_run_to_memory), and magick reads its
+    samples raw from stdin (_pam_raw_input). magick starts only once djxl has
+    exited: djxl writes the --icc_out profile AFTER the image, and the
+    command names the profile only when it exists. A PAM the raw read cannot
+    carry still goes through thumb.pam, the route before #671."""
     tmp_dir = Path(tmp_dir)
     pam, icc, jpg = tmp_dir / "thumb.pam", tmp_dir / "thumb_src.icc", tmp_dir / "thumb.jpg"
     srgb = tmp_dir / "thumb_srgb.icc"
@@ -2460,18 +2519,24 @@ def _make_explorer_thumbnail(g, jxl_path, tmp_dir):
             raise RuntimeError("needs djxl and ImageMagick (magick) on PATH")
         from PIL import ImageCms
         srgb.write_bytes(ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes())
-        r = g._run_captured(["djxl", str(jxl_path), str(pam), f"--icc_out={icc}"],
-                          g.CJXL_TIMEOUT)
-        if r.returncode != 0 or not pam.exists():
+        r = g._run_to_memory(["djxl", str(jxl_path), "-", "--output_format=pam",
+                              f"--icc_out={icc}"], g.CJXL_TIMEOUT)
+        if r.returncode != 0 or not r.stdout:
             raise RuntimeError(f"djxl: {g._stderr_tail(r.stderr)}")
+        raw = g._pam_raw_input(r.stdout)
+        if raw is None:
+            pam.write_bytes(r.stdout)
+            source, pixels = [str(pam)], None
+        else:
+            source, pixels = raw
         size = int(g.EXPLORER_THUMBNAIL_SIZE)
-        cmd = ["magick", str(pam), "-resize", f"{size}x{size}>"]
+        cmd = ["magick", *source, "-resize", f"{size}x{size}>"]
         if icc.exists() and icc.stat().st_size:
             cmd += ["-profile", str(icc)]
         cmd += ["-profile", str(srgb), "-background", "white", "-flatten", "-strip",
                 "-quality", "85", "-sampling-factor", "2x2", "-interlace", "none",
                 "jpeg:" + g._magick_out_path(jpg)]
-        r = g._run_captured(cmd, g.CJXL_TIMEOUT)
+        r = g._run_captured(cmd, g.CJXL_TIMEOUT, input=pixels)
         if r.returncode != 0 or not jpg.exists():
             raise RuntimeError(f"magick: {g._stderr_tail(r.stderr)}")
         return jpg.read_bytes()
@@ -2897,6 +2962,94 @@ def _run_captured(g, cmd, timeout, text=False, input=None, stall=None):
         if isinstance(e, bytes):
             e = e.decode("utf-8", "replace").replace("\r\n", "\n")
     return g._CompletedProcess(cmd, rc, o, e)
+
+
+_PIPE_CHUNK = 1 << 23
+
+
+def _read_pipe_until_eof(fd, deadline):
+    """Everything readable from the pipe `fd` until its writer closes it, as
+    bytes, or None when `deadline` (a time.monotonic() value) passes first.
+
+    Only what is ready is read, so a child that is still computing never
+    holds this thread past the deadline: on Windows PeekNamedPipe says how
+    much is waiting (an empty pipe whose writer is gone raises
+    BrokenPipeError: the end), elsewhere select() does. No thread is started
+    (see _run_captured). The pieces are joined once at the end: a bytearray
+    grown piece by piece copied a 272 MB image some forty times over."""
+    chunks = []
+    if os.name == "nt":
+        import _winapi
+        import msvcrt
+        handle = msvcrt.get_osfhandle(fd)
+        pause = 0.0005
+        while True:
+            try:
+                ready = _winapi.PeekNamedPipe(handle, 0)[0]
+            except OSError as exc:
+                if isinstance(exc, BrokenPipeError) or getattr(exc, "winerror", None) in (109, 232):
+                    break
+                raise
+            if ready:
+                chunk = os.read(fd, min(ready, _PIPE_CHUNK))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                pause = 0.0005
+                continue
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(pause)
+            pause = min(pause * 2, 0.05)
+        return b"".join(chunks)
+    import select
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return None
+        if not select.select([fd], [], [], left)[0]:
+            return None
+        chunk = os.read(fd, _PIPE_CHUNK)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+
+
+def _run_to_memory(g, cmd, timeout):
+    """`cmd` run like _run_captured, but its stdout is read into MEMORY in this
+    thread and never touches the disk (#671). Returns a CompletedProcess with
+    stdout and stderr as bytes.
+
+    For a decode that is only an intermediate: the Explorer thumbnail's
+    full-size PAM (272 MB for a 45 MP 16-bit page) used to go to TEMP_DIR once
+    per output, and on a slow staging disk those writes set the pace of the
+    whole run (7 files a minute instead of 34, 2026-11-14). _run_captured
+    cannot carry it: its stdout is a temp FILE, by design.
+
+    The rules of _run_captured hold: no thread (stdout read here,
+    _read_pipe_until_eof; stderr to a temp file), long codec paths get their
+    prefix, `timeout` holds while the child computes, and a timeout or a
+    Ctrl+C never leaves the child running."""
+    cmd = g._long_codec_paths(cmd)
+    deadline = time.monotonic() + timeout
+    with tempfile.TemporaryFile(dir=g.TEMP_DIR) as err:
+        p = subprocess.Popen(cmd, stdin=g._DEVNULL, stdout=subprocess.PIPE,
+                             stderr=err, bufsize=0)
+        try:
+            out = _read_pipe_until_eof(p.stdout.fileno(), deadline)
+            if out is None:
+                raise subprocess.TimeoutExpired(cmd, timeout)
+            # The child closed its stdout: it is exiting. A few seconds of
+            # grace even when the deadline came at that very moment.
+            rc = p.wait(timeout=max(5.0, deadline - time.monotonic()))
+        except BaseException:
+            p.kill()
+            p.wait()
+            raise
+        finally:
+            p.stdout.close()
+        err.seek(0)
+        return g._CompletedProcess(cmd, rc, out, err.read())
 
 
 def _exiftool_source(g, path, tmp_dir) -> str:
