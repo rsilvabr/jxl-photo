@@ -5537,6 +5537,16 @@ def _output_magick_args(jxl_path: Path, tmp_png: Path, tmp_dir: Path,
     args = []
     converted = bool(output_icc) and not grey
     src_profile = None
+    if grey:
+        # A grey image takes no profile step below (it is never colour-
+        # converted), so nothing removed what ImageMagick read from djxl's PNG
+        # besides an ICC: the master's EXIF and XMP (its `Raw profile`
+        # chunks). A master's XMP is larger than a JPEG's 64 KB APP1 segment;
+        # ImageMagick wrote it broken, every later exiftool write to the file
+        # was ignored, and the derivative kept the master's src/srcsum
+        # without a `jxlphoto-derived` (#672). The metadata is copied from the
+        # master afterwards (_copy_metadata), as for RGB.
+        args += ["+profile", "!icc,*"]
     if grey and float_src is not None:
         # Grey master with a table-curve grey profile: djxl returned LINEAR
         # grey. Grey is never colour-converted, so go back to the file's own
