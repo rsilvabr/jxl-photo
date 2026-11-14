@@ -1727,6 +1727,35 @@ _RELATION_BATCH_HEAD = _common._RELATION_BATCH_HEAD
 def _run_exiftool_writes(*a, **k): return _common._run_exiftool_writes(_G, *a, **k)
 
 
+def _retarget_exiftool_writes(writes, target, stub):
+    """The encoder's exiftool writes (command, failure text, quoted output)
+    aimed at `stub` instead of `target` (#675), or None when a command does
+    not name `target` exactly once — the writes then run on `target` as they
+    are. An argfile command is COPIED with its target line replaced (bytes,
+    line ends kept), never edited: when the stub route is not taken, the
+    original writes still aim at the master."""
+    t, s = str(target), str(stub)
+    tb, sb = t.encode("utf-8"), s.encode("utf-8")
+    out = []
+    for cmd, msg, quoted in writes:
+        if isinstance(cmd, Path):
+            lines = cmd.read_bytes().split(b"\n")
+            hits = [i for i, line in enumerate(lines) if line.rstrip(b"\r") == tb]
+            if len(hits) != 1:
+                return None
+            i = hits[0]
+            lines[i] = sb + (b"\r" if lines[i].endswith(b"\r") else b"")
+            copy = cmd.with_name(cmd.stem + "_stub" + cmd.suffix)
+            copy.write_bytes(b"\n".join(lines))
+            out.append((copy, msg, quoted))
+        else:
+            args = [str(a) for a in cmd]
+            if args.count(t) != 1:
+                return None
+            out.append(([s if a == t else a for a in args], msg, quoted))
+    return out
+
+
 def _prefetch_exiftool_reads(*a, **k): return _common._prefetch_exiftool_reads(_G, *a, **k)
 
 
@@ -1977,6 +2006,18 @@ _thumbnail_box_fingerprint = _common._thumbnail_box_fingerprint
 
 
 _write_thumbnail_box = _common._write_thumbnail_box
+
+
+_write_metadata_stub = _common._write_metadata_stub
+
+
+_assembled_size = _common._assembled_size
+
+
+_assemble_from_stub = _common._assemble_from_stub
+
+
+def _thumbnail_for_assembly(*a, **k): return _common._thumbnail_for_assembly(_G, *a, **k)
 
 
 _JXL_THUMB_CLSID = "{EF830030-FBD6-4B62-BFD4-0DBD590D6135}"
@@ -4627,18 +4668,53 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 writes.append((["-overwrite_original"] + page_flags + [str(write_path)],
                                "exiftool page marker write failed: ", 200))
 
-            _run_exiftool_writes(writes, EXIFTOOL_TIMEOUT)
+            # The master is written ONCE after cjxl (#675): the exiftool writes
+            # run on a stub (cjxl's boxes, the codestream cut to its first
+            # bytes), then the stub's boxes in reorder_jxl_boxes's order, the
+            # Explorer thumbnail box and cjxl's codestream go into the master
+            # in one pass. Each exiftool command used to rewrite the whole
+            # master (48 MB copied to append 8 KB), then the reorder and the
+            # thumbnail box rewrote it again: 7 writes, 337 MB for a 48 MB
+            # file. Anything the stub route cannot do falls back to those
+            # steps on the untouched file, as before.
+            _assembled = False
+            _thumb_jpeg = _thumb_fp = None
+            _stub = tmp_dir / "metadata_stub.jxl"
+            _stub_writes = _retarget_exiftool_writes(writes, write_path, _stub)
+            if _stub_writes is not None:
+                try:
+                    _write_metadata_stub(write_path, _stub)
+                    _run_exiftool_writes(_stub_writes, EXIFTOOL_TIMEOUT)
+                    if not STRIP_METADATA and _explorer_thumbnail_wanted(_dist == 0):
+                        _thumb_jpeg, _thumb_fp = _thumbnail_for_assembly(
+                            write_path, tmp_dir, _assembled_size(write_path, _stub))
+                    _assemble_from_stub(write_path, _stub, _thumb_jpeg, _thumb_fp)
+                    _assembled = True
+                except Exception as e:
+                    _thumb_jpeg = _thumb_fp = None
+                    logger.debug(f"  >metadata stub not usable ({e}): written in "
+                                 f"place | {write_path.name}")
+            if _assembled:
+                # The fingerprint check of _add_explorer_thumbnail: the box
+                # must name the codestream it was made from.
+                if _thumb_jpeg is not None and (
+                        _codestream_fingerprint(write_path) != _thumb_fp
+                        or _thumbnail_box_fingerprint(write_path) != _thumb_fp):
+                    raise RuntimeError("the codestream changed while the Explorer "
+                                       "thumbnail was written")
+            else:
+                _run_exiftool_writes(writes, EXIFTOOL_TIMEOUT)
 
-            # Reorder JXL boxes so Exif/XMP come before the codestream. This must
-            # run after all exiftool operations (metadata, thumbnail, markers)
-            # because each exiftool edit can re-append boxes after the codestream.
-            reorder_jxl_boxes(write_path)
+                # Reorder JXL boxes so Exif/XMP come before the codestream. This must
+                # run after all exiftool operations (metadata, thumbnail, markers)
+                # because each exiftool edit can re-append boxes after the codestream.
+                reorder_jxl_boxes(write_path)
 
-            # Explorer thumbnail (EXPLORER_THUMBNAIL), made from the finished
-            # file and put in its own box. Only the files that get one pay for
-            # it (lossless by default); a failure only warns.
-            if not STRIP_METADATA and _explorer_thumbnail_wanted(_dist == 0):
-                _add_explorer_thumbnail(write_path, tmp_dir)
+                # Explorer thumbnail (EXPLORER_THUMBNAIL), made from the finished
+                # file and put in its own box. Only the files that get one pay for
+                # it (lossless by default); a failure only warns.
+                if not STRIP_METADATA and _explorer_thumbnail_wanted(_dist == 0):
+                    _add_explorer_thumbnail(write_path, tmp_dir)
 
             # Validate EVERY successful output, not just mode-8 delete gates:
             # cjxl returning 0 does not guarantee a well-formed file (disk

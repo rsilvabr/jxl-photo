@@ -153,6 +153,24 @@ def reorder_jxl_boxes(jxl_path):
             boxes.append((name, header, payload))
         i += size if size != 0 else file_size
 
+    parts = _ordered_box_parts(boxes)
+
+    # Every header is settled before the file is opened: a box that cannot
+    # be re-headered above raises with the file untouched.
+    with open(jxl_path, "wb") as f:
+        for _name, h, p in parts:
+            f.write(h)
+            f.write(p)
+
+
+def _ordered_box_parts(boxes):
+    """[(type, header, payload)] of a container's boxes in the order every
+    output gets: the structure boxes (JXL , ftyp, jxll), the metadata ones
+    (Exif first, _exif_box_rank, stable), any other box that sat before the
+    codestream, the codestream boxes, the rest. A size-0 ("to the end of the
+    file") box moved off the end gets its real size; RuntimeError when that
+    size does not fit. The one copy of the rule reorder_jxl_boxes and the
+    one-pass assembly (#675) share."""
     # Split boxes into groups: metadata (before codestream) and codestream
     CODESTREAM = {b"jxlc", b"jxlp"}
     META_ORDER = {b"JXL ", b"ftyp", b"jxll"}       # required structure first
@@ -215,14 +233,8 @@ def reorder_jxl_boxes(jxl_path):
                 raise RuntimeError(
                     f"Cannot re-header size-0 box {name!r}: real size {real_size} "
                     f"exceeds the 32-bit box size field") from None
-        parts.append((h, p))
-
-    # Every header is settled before the file is opened: a box that cannot
-    # be re-headered above raises with the file untouched.
-    with open(jxl_path, "wb") as f:
-        for h, p in parts:
-            f.write(h)
-            f.write(p)
+        parts.append((name, h, p))
+    return parts
 
 
 def _exif_box_rank(box) -> int:
@@ -250,6 +262,206 @@ def _jxl_boxes(f, end):
         out.append((typ, pos, hdr, size))
         pos += size
     return out
+
+
+# === One-pass assembly of a container (#675) and metadata stubs (#676) ===
+
+# The codestream bytes a metadata stub keeps: its headers (size, the image
+# header exiftool reads for ImageWidth/ImageHeight) sit in the first ones.
+_STUB_CODESTREAM_BYTES = 4096
+
+
+class _FilePayload:
+    """A codestream payload left where it is in the encode's file."""
+    __slots__ = ("off", "length")
+
+    def __init__(self, off, length):
+        self.off, self.length = off, length
+
+    def __len__(self):
+        return self.length
+
+
+def _container_boxes(f, end):
+    """_jxl_boxes of an open container the stub routes take, else
+    RuntimeError: a bare codestream, a chain that does not end at the end of
+    the file, no codestream box, a codestream box with a 64-bit header, a
+    file over 4 GiB."""
+    if end > 0xFFFFFFFF:
+        raise RuntimeError("over 4 GiB")
+    f.seek(0)
+    if f.read(2) == b"\xff\x0a":
+        raise RuntimeError("a bare codestream")
+    boxes = _jxl_boxes(f, end)
+    if not boxes or boxes[-1][1] + boxes[-1][3] != end:
+        raise RuntimeError("the box chain does not end at the end of the file")
+    cs = [b for b in boxes if b[0] in (b"jxlc", b"jxlp")]
+    if not cs:
+        raise RuntimeError("no codestream box")
+    if any(hdr != 8 for _typ, _pos, hdr, _size in cs):
+        raise RuntimeError("a codestream box with a 64-bit header")
+    return boxes
+
+
+def _write_metadata_stub(real_path, stub_path, drop_thumbnail=False):
+    """Write `stub_path`: the container at `real_path` with each codestream
+    payload cut to its first _STUB_CODESTREAM_BYTES bytes (a jxlp keeps its
+    4-byte index too) and every other box as it is — without the Explorer
+    thumbnail box when `drop_thumbnail`. A few KB to a few tens of KB for a
+    48 MB master. Raises for a file the stub routes do not take
+    (_container_boxes) or cannot read."""
+    with open(real_path, "rb") as f:
+        end = f.seek(0, 2)
+        out = []
+        for typ, pos, hdr, size in _container_boxes(f, end):
+            if typ in (b"jxlc", b"jxlp"):
+                f.seek(pos + hdr)
+                keep = min(size - hdr, _STUB_CODESTREAM_BYTES + (4 if typ == b"jxlp" else 0))
+                payload = f.read(keep)
+                out.append(struct.pack(">I4s", 8 + len(payload), typ) + payload)
+                continue
+            if drop_thumbnail and typ == b"uuid":
+                f.seek(pos + hdr)
+                if f.read(16) == THUMB_BOX_UUID:
+                    continue
+            f.seek(pos)
+            data = f.read(size)
+            if len(data) != size:
+                raise OSError("short read")
+            out.append(data)
+    Path(stub_path).write_bytes(b"".join(out))
+
+
+def _box_list(data):
+    """[(type, header bytes, payload memoryview)] of a container held in
+    memory, each box as its header declares it. Raises RuntimeError on a
+    chain that does not end exactly at the end of the data."""
+    view = memoryview(data)
+    end = len(data)
+    out, i = [], 0
+    while i < end:
+        if i + 8 > end:
+            raise RuntimeError(f"truncated box header at offset {i}")
+        size = int.from_bytes(data[i:i + 4], "big")
+        typ = bytes(data[i + 4:i + 8])
+        hdr = 8
+        if size == 1:
+            if i + 16 > end:
+                raise RuntimeError(f"truncated extended box header at offset {i}")
+            size = int.from_bytes(data[i + 8:i + 16], "big")
+            hdr = 16
+        elif size == 0:
+            size = end - i
+        if size < hdr or i + size > end:
+            raise RuntimeError(f"invalid box size {size} at offset {i}")
+        out.append((typ, bytes(data[i:i + hdr]), view[i + hdr:i + size]))
+        i += size
+    return out
+
+
+def _stub_assembly(real_f, real_end, stub_path):
+    """(type, header, payload) of the output of _assemble_from_stub, in
+    file order and before the reorder: the stub's boxes, each codestream box
+    carrying cjxl's payload from the open real file (_FilePayload). Raises
+    RuntimeError when the stub and the encode disagree."""
+    stub = _box_list(Path(stub_path).read_bytes())
+    real_cs = [(typ, pos + hdr, size - hdr)
+               for typ, pos, hdr, size in _container_boxes(real_f, real_end)
+               if typ in (b"jxlc", b"jxlp")]
+    stub_cs = [i for i, b in enumerate(stub) if b[0] in (b"jxlc", b"jxlp")]
+    if len(stub_cs) != len(real_cs):
+        raise RuntimeError("the stub and the encode disagree on the codestream boxes")
+    boxes = list(stub)
+    for k, i in enumerate(stub_cs):
+        typ, off, length = real_cs[k]
+        name, _header, head = stub[i]
+        if name != typ:
+            raise RuntimeError("a codestream box changed its type")
+        real_f.seek(off)
+        if real_f.read(len(head)) != bytes(head):
+            raise RuntimeError("the stub's codestream is not the encode's")
+        boxes[i] = (name, struct.pack(">I4s", 8 + length, name), _FilePayload(off, length))
+    return boxes
+
+
+def _assembled_size(real_path, stub_path) -> int:
+    """The size of the file _assemble_from_stub writes, before any thumbnail
+    box: the "small" rule of _add_explorer_thumbnail compares the thumbnail
+    with the file it goes into, which does not exist yet."""
+    with open(real_path, "rb") as f:
+        end = f.seek(0, 2)
+        return sum(len(h) + len(p) for _n, h, p in _stub_assembly(f, end, stub_path))
+
+
+def _assemble_from_stub(real_path, stub_path, jpeg, fingerprint) -> None:
+    """Write `real_path` ONCE (#675) from the stub after its exiftool writes:
+    the stub's boxes in reorder_jxl_boxes's order (_ordered_box_parts), each
+    codestream box carrying cjxl's payload, and the Explorer thumbnail box
+    (`jpeg` with `fingerprint`; None = none) right before the codestream —
+    what reorder_jxl_boxes and _write_thumbnail_box made in two rewrites.
+    Through a temp beside it and os.replace; raises before the replace when
+    the stub and the encode disagree (the file is then untouched)."""
+    real_path = Path(real_path)
+    tmp = real_path.parent / f"{uuid.uuid4().hex}_{real_path.name}.tmp"
+    try:
+        with open(real_path, "rb") as f:
+            end = f.seek(0, 2)
+            parts = _ordered_box_parts(_stub_assembly(f, end, stub_path))
+            thumb = b""
+            if jpeg is not None:
+                payload = (THUMB_BOX_UUID + THUMB_BOX_MARKER
+                           + fingerprint.encode("ascii") + b"\n" + jpeg)
+                thumb = struct.pack(">I4s", 8 + len(payload), b"uuid") + payload
+            with open(tmp, "wb") as out:
+                placed = False
+                for name, h, p in parts:
+                    if not placed and name in (b"jxlc", b"jxlp"):
+                        out.write(thumb)
+                        placed = True
+                    out.write(h)
+                    if isinstance(p, _FilePayload):
+                        f.seek(p.off)
+                        left = p.length
+                        while left:
+                            chunk = f.read(min(left, 1 << 22))
+                            if not chunk:
+                                raise OSError("short read of the codestream")
+                            out.write(chunk)
+                            left -= len(chunk)
+                    else:
+                        out.write(p)
+                if not placed:
+                    out.write(thumb)
+        os.replace(str(tmp), str(real_path))
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+
+
+def _thumbnail_for_assembly(g, real_path, tmp_dir, assembled_size):
+    """(jpeg, fingerprint) for _assemble_from_stub's thumbnail box, or
+    (None, None): the decisions of _add_explorer_thumbnail, with the size the
+    file will have before its box (`assembled_size`). Made from cjxl's file:
+    the codestream — all djxl and the fingerprint read — is the master's."""
+    fp = g._codestream_fingerprint(real_path)
+    if fp is None:
+        g.logger.warning(f"  >Explorer thumbnail skipped (not a JPEG XL container) "
+                         f"| {Path(real_path).name}")
+        return None, None
+    jpeg = g._make_explorer_thumbnail(real_path, tmp_dir)
+    if jpeg is None:
+        return None, None
+    import io
+    from PIL import Image
+    with Image.open(io.BytesIO(jpeg)) as im:
+        long_side = max(im.size)
+    if (long_side < int(g.EXPLORER_THUMBNAIL_SIZE)
+            or len(jpeg) > float(g.EXPLORER_THUMBNAIL_MAX_SHARE) * assembled_size):
+        return None, None
+    return jpeg, fp
 
 
 def has_jbrd_box(jxl_path: Path) -> bool:
