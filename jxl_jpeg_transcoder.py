@@ -824,6 +824,9 @@ def _argfile_via_stdin(*a, **k): return _common._argfile_via_stdin(_G, *a, **k)
 def _run_captured(*a, **k): return _common._run_captured(_G, *a, **k)
 
 
+def _run_to_memory(*a, **k): return _common._run_to_memory(_G, *a, **k)
+
+
 _stderr_tail = _common._stderr_tail
 
 
@@ -2270,26 +2273,29 @@ def _jxl_reconstruct_md5(jxl_path: Path) -> Optional[str]:
     Does NOT compare against any original: it answers "is the original JPEG
     recoverable at all, and what are its bytes", which is what the
     --repair-jbrd audit needs when the original may already be gone.
+
+    The JPEG is rebuilt into memory (_jxl_rebuilt_jpeg), never a temp file.
     """
+    data = _jxl_rebuilt_jpeg(jxl_path)
+    return hashlib.md5(data).hexdigest() if data else None
+
+
+def _jxl_rebuilt_jpeg(jxl_path: Path) -> Optional[bytes]:
+    """The bytes of the JPEG `djxl --reconstruct_jpeg` rebuilds from this JXL,
+    written to stdout and read into memory (#679: it used to go to a temp
+    file and be read back — the whole JPEG written once more per delete), or
+    None when the reconstruction fails, is empty or cannot run (djxl < 0.12).
+    djxl 0.12 and 0.13 give the same bytes on stdout as in a file."""
     if not _tool_at_least("djxl", 0, 12):
         return None
-    fd, tmp_name = tempfile.mkstemp(suffix=".jpg", prefix="jxlrec_", dir=TEMP_DIR)
-    os.close(fd)
-    tmp = Path(tmp_name)
     try:
-        r = _run_captured(
-            ["djxl", "--reconstruct_jpeg", str(jxl_path), str(tmp)],
-            CODEC_TIMEOUT)
-        if r.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
-            return None
-        return md5_of_file(tmp)
+        r = _run_to_memory(["djxl", "--reconstruct_jpeg", str(jxl_path), "-",
+                            "--output_format=jpeg"], CODEC_TIMEOUT)
     except Exception:
         return None
-    finally:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
+    if r.returncode != 0 or not r.stdout:
+        return None
+    return r.stdout
 
 
 def _jxl_reconstruct_ok(jxl_path: Path) -> bool:
@@ -2315,26 +2321,14 @@ def _jxl_reconstructs_to(jxl_path: Path, jpeg_path: Path) -> bool:
     empty reconstruction) returns False: this guards an irreversible delete,
     so it fails CLOSED.
     """
-    if not _tool_at_least("djxl", 0, 12):
-        return False
-    fd, tmp_name = tempfile.mkstemp(suffix=".jpg", prefix="jxlrec_", dir=TEMP_DIR)
-    os.close(fd)
-    tmp = Path(tmp_name)
-    try:
-        r = _run_captured(
-            ["djxl", "--reconstruct_jpeg", str(jxl_path), str(tmp)],
-            CODEC_TIMEOUT)
-        if r.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
-            return False
-        return md5_of_file(tmp) == md5_of_file(jpeg_path)
-    except Exception:
+    data = _jxl_rebuilt_jpeg(jxl_path)
+    if not data:
         # A proof that could not run is not a proof.
         return False
-    finally:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
+    try:
+        return hashlib.md5(data).hexdigest() == md5_of_file(jpeg_path)
+    except Exception:
+        return False
 
 
 def _adopt_reconstructed_archive(src_path: Path, jxl_path: Path,

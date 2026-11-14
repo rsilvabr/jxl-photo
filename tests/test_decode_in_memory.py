@@ -113,6 +113,42 @@ def test_verify_decode_raises_when_djxl_fails(tmp_path):
         enc._decode_jxl_for_verify(bad, tmp)
 
 
+@needs_tools
+def test_jbrd_gate_rebuilds_the_jpeg_in_memory(tmp_path, monkeypatch):
+    """#679: the delete gate's `djxl --reconstruct_jpeg` goes to stdout, into
+    memory; the verdicts are the same (the right JPEG yes, another no)."""
+    import hashlib
+    from PIL import Image
+    import jxl_jpeg_transcoder as tr
+    folder = tmp_path / HOSTILE
+    folder.mkdir(parents=True)
+    rng = np.random.default_rng(9)
+    for i, name in enumerate(("写真 (1).jpg", "別の 2.jpg")):
+        Image.fromarray(rng.integers(0, 255, (240, 320, 3), dtype=np.uint8)).save(
+            folder / name, quality=90)
+    jxl = folder / "写真 (1).jxl"
+    subprocess.run(["cjxl", str(folder / "写真 (1).jpg"), str(jxl), "--lossless_jpeg=1",
+                    "--jpeg_reconstruction_lfs=0", "-e", "1"], check=True, capture_output=True)
+    files = []
+    real = tr._run_captured
+
+    def spy(cmd, timeout, *a, **k):
+        files.append([str(c) for c in cmd])
+        return real(cmd, timeout, *a, **k)
+
+    monkeypatch.setattr(tr, "_run_captured", spy)
+    assert tr._jxl_reconstructs_to(jxl, folder / "写真 (1).jpg") is True
+    assert tr._jxl_reconstructs_to(jxl, folder / "別の 2.jpg") is False
+    want = hashlib.md5((folder / "写真 (1).jpg").read_bytes()).hexdigest()
+    assert tr._jxl_reconstruct_md5(jxl) == want
+    assert not [c for c in files if "--reconstruct_jpeg" in c], \
+        f"the JPEG was rebuilt into a file: {files}"
+    bad = folder / "壊れた.jxl"
+    bad.write_bytes(b"\x00\x00\x00\x0cJXL \r\n\x87\n" + b"\x00" * 64)
+    assert tr._jxl_reconstructs_to(bad, folder / "写真 (1).jpg") is False
+    assert tr._jxl_reconstruct_md5(bad) is None
+
+
 def test_pam_array_shapes_and_refusals():
     def hdr(w, h, d, m, t):
         return f"P7\nWIDTH {w}\nHEIGHT {h}\nDEPTH {d}\nMAXVAL {m}\nTUPLTYPE {t}\nENDHDR\n".encode()

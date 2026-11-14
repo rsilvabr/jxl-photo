@@ -340,6 +340,9 @@ _TEMP_PNG_ARGS = ["-define", "png:compression-level=0"]
 def _run_captured(*a, **k): return _common._run_captured(_G, *a, **k)
 
 
+def _run_to_memory(*a, **k): return _common._run_to_memory(_G, *a, **k)
+
+
 _stderr_tail = _common._stderr_tail
 
 
