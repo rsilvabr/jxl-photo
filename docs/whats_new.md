@@ -10,7 +10,8 @@ as [GitHub Releases](https://github.com/rsilvabr/jxl-photo/releases).
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.30.1](version_history.md#v2301)** | 2026-11-14 | The wizard's checks read every option the run gets; libjxl 0.13.0 supported: JPEG archives every libjxl rebuilds bit for bit, alpha channels kept |
+| **[v2.30.2-rc1](version_history.md#v2302-rc1)** | 2026-11-14 | Pre-release. Explorer thumbnails no longer write the whole photo to the temp folder: the same thumbnails, much faster when the temp folder sits on a slow disk |
+| [v2.30.1](version_history.md#v2301) | 2026-11-14 | The wizard's checks read every option the run gets; libjxl 0.13.0 supported: JPEG archives every libjxl rebuilds bit for bit, alpha channels kept |
 | [v2.30.1-rc2](version_history.md#v2301-rc2) | 2026-11-14 | Pre-release. Tested with libjxl 0.13.0: with it, a JPEG archive is still rebuilt bit for bit by every libjxl since 0.11, and a lossy encode keeps an all-opaque alpha channel; everything in v2.30.1-rc1 |
 | [v2.30.1-rc1](version_history.md#v2301-rc1) | 2026-11-13 | Pre-release (test releases are now named `-rcN`). The wizard's manifest check and delete preview read every option the run gets; a file row in mode 2 with an empty Destination runs; the count and the check as fast as before v2.30.0 |
 | [v2.30.0](version_history.md#v2300) | 2026-11-13 | Archiving a TIFF takes about half the time; flags must be written in full; the history names the libjxl version; modes 6/7 of the decoder and the transcoder with an output folder land next to the library's own export folder |
@@ -38,6 +39,15 @@ as [GitHub Releases](https://github.com/rsilvabr/jxl-photo/releases).
 | [v2.17.0](version_history.md#v2170) | 2026-10-24 | Film scans archived lossless and never recompressed lossy unless asked; they keep what their scanner software needs (whole XMP, private tags); thumbnail pages kept by default, except Capture One's |
 
 Every release since v1.0: [version_history.md](version_history.md#release-history).
+
+## v2.30.2-rc1
+
+2026-11-14. A test release (pre-release) of v2.30.2; the last stable release is [v2.30.1](#v2301). Nothing to do when upgrading.
+
+- **Explorer thumbnails no longer write the whole photo to the temp folder.** The full-size image a 768 px thumbnail is made from now stays in memory; it used to be a temporary file of about 270 MB for a 45 MP photo, once per output. The thumbnails come out byte for byte the same.
+- Much faster when the temp folder sits on a slow disk: six thumbnails took 7 s instead of 262 s on a SATA SSD that had slowed down to about 45 MB/s. On a fast drive the speed is the same, with about 270 MB less written to the SSD per photo.
+
+[Technical notes](version_history.md#v2302-rc1)
 
 ## v2.30.1
 

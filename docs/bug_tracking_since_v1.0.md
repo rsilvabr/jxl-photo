@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #671.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #672.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -30,6 +30,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-86 — the Explorer thumbnail's decode in memory](#round-86--the-explorer-thumbnails-decode-in-memory-2026-11-14) | 2026-11-14 | v2.30.2-rc1 | #671 (1) |
 | [Round-85 — libjxl 0.13: JPEG archives and alpha channels](#round-85--libjxl-013-jpeg-archives-and-alpha-channels-2026-11-14) | 2026-11-14 | v2.30.1-rc2 | #669–#670 (2) |
 | [Round-84 — the independent review of v2.30.0](#round-84--the-independent-review-of-v2300-2026-11-13) | 2026-11-13 | v2.30.1-rc1 | #663–#668 (6) |
 | [Round-83 — where each output goes: the wizard asks the scripts](#round-83--where-each-output-goes-the-wizard-asks-the-scripts-2026-11-13) | 2026-11-13 | v2.30.0 | #655–#662 (8) |
@@ -101,6 +102,18 @@ were never tagged and never shipped.
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
 
 ---
+
+## Round-86 — the Explorer thumbnail's decode in memory (2026-11-14)
+
+A rebuild of masters ran at 7 files a minute instead of 34: the SATA SSD that
+holds `TEMP_DIR` and the staging folder had slowed down to about 45 MB/s, and
+every output's Explorer thumbnail wrote its whole decoded image there first.
+The masters and the thumbnails were right; the decode was only an
+intermediate and never needed the disk.
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 671 | **The Explorer thumbnail wrote each output's whole decoded image to the temp folder** (since v2.16.0): djxl decoded the full image to `thumb.pam` (272 MB for a 45 MP 16-bit page) and ImageMagick read it back, once per output that gets a thumbnail (every output when jxl-thumb is installed). With `TEMP_DIR` on a SATA SSD writing at about 45 MB/s, six thumbnails took 262 s and a rebuild of masters ran at 7 files a minute instead of 34; on any SSD it cost about 270 MB of writes per photo | `jxl_photo_common.py` (the encoder, the recompressor) | ✅ Fixed — djxl writes the PAM to stdout, read into memory (`_run_to_memory`: no reader thread, a timeout that holds), and ImageMagick reads the samples raw from stdin (`_pam_raw_input`; it copies a PAM, PNG or MIFF given on stdin to a temp file first, raw samples it does not); a 12-bit PAM still goes through the file. The same thumbnails byte for byte on 114 real files; six thumbnails on that SSD 262.5 s → 7.4 s. `tests/test_thumbnail_in_memory.py` (real codecs; failed before) |
 
 ## Round-85 — libjxl 0.13: JPEG archives and alpha channels (2026-11-14)
 

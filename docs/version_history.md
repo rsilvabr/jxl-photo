@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.30.1](#v2301)** | 2026-11-14 | Everything in the two test releases: the wizard's checks read every option the run gets; libjxl 0.13.0 supported (JPEG archives every libjxl rebuilds bit for bit, alpha kept) |
+| **[v2.30.2-rc1](#v2302-rc1)** | 2026-11-14 | Pre-release. The Explorer thumbnail no longer writes the whole decoded image to the temp folder: the same thumbnails, much faster when the temp folder sits on a slow disk (round 86, 1 fix) |
+| [v2.30.1](#v2301) | 2026-11-14 | Everything in the two test releases: the wizard's checks read every option the run gets; libjxl 0.13.0 supported (JPEG archives every libjxl rebuilds bit for bit, alpha kept) |
 | [v2.30.1-rc2](#v2301-rc2) | 2026-11-14 | Pre-release. Tested with libjxl 0.13.0: with it, a lossless JPEG archive is still rebuilt bit for bit by every djxl since 0.11, and a lossy encode keeps an all-opaque alpha channel (round 85, 2 fixes) |
 | [v2.30.1-rc1](#v2301-rc1) | 2026-11-13 | Pre-release (test releases are now named `-rcN`). The wizard's manifest check and delete preview read every flag the run gets (resize, output folder name, expert flags); a file row in mode 2 with an empty Destination converts; the count and the check of a JPEG ↔ JXL run as fast as before v2.30.0 (round 84, 6 fixes) |
 | [v2.30.0](#v2300) | 2026-11-13 | Archiving a TIFF takes about half the time (one ExifTool process per file); everything else in v2.30.0_beta1 (flags written in full, the libjxl version in the history); the wizard asks the scripts where each output goes; modes 6/7 of the decoder and the transcoder with an output folder land next to the library's own export folder; `--help` with its output in a file (round 83, 8 fixes) |
@@ -106,6 +107,41 @@ GitHub release notes before v1.8.2:
 Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refactoring.md).
 
 ---
+
+## v2.30.2-rc1
+
+**Released 2026-11-14, a test release (pre-release) of v2.30.2**; the last
+stable release is [v2.30.1](#v2301). One fix (round 86, #671). Nothing to do
+when upgrading.
+
+- **Fixed — the Explorer thumbnail no longer writes the whole decoded image
+  to the temp folder (#671).** To make the 768 px thumbnail of an output,
+  djxl decoded the full image to a PAM in the run's temp folder (272 MB for a
+  45 MP 16-bit page) and ImageMagick read it back, once per output that gets
+  a thumbnail (every output when jxl-thumb is installed, the lossless ones
+  otherwise). With `TEMP_DIR` and the staging folder on a SATA SSD that had
+  slowed down to about 45 MB/s, those writes set the pace of a whole rebuild
+  of masters: 7 files a minute, against 34 with the same 13 workers and the
+  temp folder on an NVMe drive (2026-11-14). The PAM now goes from djxl's
+  stdout into memory (`_run_to_memory`, read in the calling thread like
+  `_run_captured`: no reader thread, a timeout that holds), and ImageMagick
+  reads the samples raw from stdin (`_pam_raw_input`). Given the PAM itself
+  on stdin, ImageMagick copies it to a temp file before decoding it — so it
+  does with a PNG or a MIFF, whatever `-limit` says (measured) — and raw
+  samples it reads as they come. ImageMagick starts once djxl has exited:
+  djxl writes the `--icc_out` profile after the image. A PAM the raw read
+  cannot carry exactly (a 12-bit MAXVAL, an unknown tuple type) still goes
+  through the file, the old route.
+- **The same thumbnails.** Byte for byte the old ones on 114 files: film
+  scans (8/16-bit gray, gray with alpha, RGB+IR, RGBA, no ICC profile,
+  84 MP), camera exports, phone PNGs, JPEG archives and 12-bit images (the
+  file route); djxl 0.11.2, 0.12.0 and 0.13.0 write the same PAM to stdout as
+  to a file. Six thumbnails of 45 MP masters with the temp folder on that
+  slow SSD: 262.5 s → 7.4 s. On an NVMe drive the time is the same (114
+  files alternated old/new: 65.9 s and 68.1 s). The decoded image sits in the
+  script for a moment (about 270 MB for a 45 MP 16-bit page, up to twice that
+  while it is read), within what each worker already reserves: its cjxl has
+  finished by then.
 
 ## v2.30.1
 
