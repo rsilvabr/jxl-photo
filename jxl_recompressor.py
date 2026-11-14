@@ -2547,6 +2547,7 @@ def _explorer_thumbnail_wanted(*a, **k): return _common._explorer_thumbnail_want
 
 
 _pam_raw_input = _common._pam_raw_input
+_pam_array = _common._pam_array
 
 
 def _make_explorer_thumbnail(*a, **k): return _common._make_explorer_thumbnail(_G, *a, **k)

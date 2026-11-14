@@ -2453,18 +2453,14 @@ _PAM_RAW_FORMATS = {(b"GRAYSCALE", 1): "gray", (b"GRAYSCALE_ALPHA", 2): "graya",
                     (b"RGB", 3): "rgb", (b"RGB_ALPHA", 4): "rgba"}
 
 
-def _pam_raw_input(data):
-    """(magick input arguments, pixel bytes) for the one PAM image in `data`
-    (djxl's output), or None when raw samples cannot carry it exactly: not a
-    P7 header followed by exactly its payload (a second frame, a short read),
-    a MAXVAL other than 255 or 65535 (raw samples are read as the full range:
-    a 12-bit 4095 would come out sixteen times too dark), an unknown tuple
-    type. The caller then hands magick the PAM itself, as before #671.
-
-    The settings of the raw read are reset right after it (+size +depth
-    +endian): -depth 16 stays in force otherwise and the JPEG came out with
-    other bytes. With the reset, the JPEG is byte for byte the one made from
-    the PAM file."""
+def _pam_header(data):
+    """(width, height, depth, maxval, tupltype, payload start) of the one
+    8- or 16-bit PAM image in `data` (djxl's output), or None when it is not
+    exactly that: not a P7 header followed by exactly its payload (a second
+    frame, a short read), a MAXVAL other than 255 or 65535 (a 12-bit 4095
+    read as the full range comes out sixteen times too dark), more than one
+    TUPLTYPE line. The callers then take the route through a file, as
+    before #671."""
     view = memoryview(data)
     head = bytes(view[:1024])
     end = head.find(b"\nENDHDR\n")
@@ -2485,15 +2481,50 @@ def _pam_raw_input(data):
         depth, maxval = int(fields[b"DEPTH"]), int(fields[b"MAXVAL"])
     except (KeyError, ValueError):
         return None
-    if len(tupltypes) != 1 or maxval not in (255, 65535) or w <= 0 or h <= 0:
+    if len(tupltypes) != 1 or maxval not in (255, 65535) or w <= 0 or h <= 0 or depth <= 0:
         return None
-    fmt = _PAM_RAW_FORMATS.get((tupltypes[0], depth))
-    width = 1 if maxval == 255 else 2
     start = end + len(b"\nENDHDR\n")
-    if fmt is None or len(view) - start != w * h * depth * width:
+    if len(view) - start != w * h * depth * (1 if maxval == 255 else 2):
         return None
-    return (["-size", f"{w}x{h}", "-depth", str(8 * width), "-endian", "MSB",
-             f"{fmt}:-", "+size", "+depth", "+endian"], view[start:])
+    return w, h, depth, maxval, tupltypes[0], start
+
+
+def _pam_raw_input(data):
+    """(magick input arguments, pixel bytes) for the one PAM image in `data`
+    (djxl's output), or None when raw samples cannot carry it exactly
+    (_pam_header's cases, or a tuple type with no raw format). The caller
+    then hands magick the PAM itself, as before #671.
+
+    The settings of the raw read are reset right after it (+size +depth
+    +endian): -depth 16 stays in force otherwise and the JPEG came out with
+    other bytes. With the reset, the JPEG is byte for byte the one made from
+    the PAM file."""
+    head = _pam_header(data)
+    if head is None:
+        return None
+    w, h, depth, maxval, tupltype, start = head
+    fmt = _PAM_RAW_FORMATS.get((tupltype, depth))
+    if fmt is None:
+        return None
+    return (["-size", f"{w}x{h}", "-depth", "8" if maxval == 255 else "16", "-endian", "MSB",
+             f"{fmt}:-", "+size", "+depth", "+endian"], memoryview(data)[start:])
+
+
+def _pam_array(data):
+    """The one PAM image in `data` as the array imagecodecs.png_decode gives
+    for the PNG djxl writes of the same file — (H, W) for one channel, else
+    (H, W, C); uint8 for MAXVAL 255, native uint16 for 65535; a writable copy
+    — or None for what _pam_header refuses (the caller decodes to a PNG, as
+    before #673)."""
+    head = _pam_header(data)
+    if head is None:
+        return None
+    w, h, depth, maxval, _tupltype, start = head
+    import numpy as np
+    a = np.frombuffer(data, dtype=np.uint8 if maxval == 255 else ">u2",
+                      count=w * h * depth, offset=start)
+    a = a.astype(np.uint8 if maxval == 255 else np.uint16)   # native, writable
+    return a.reshape(h, w) if depth == 1 else a.reshape(h, w, depth)
 
 
 def _make_explorer_thumbnail(g, jxl_path, tmp_dir):
@@ -4006,18 +4037,32 @@ def _decode_jxl_for_verify(g, jxl_path: Path, tmp_dir: Path,
 
     require_original_space: also raise when djxl did not return the pixels in
     the file's own colour space (a lossy ICC blob decodes to linear sRGB), so
-    a comparison against the SOURCE pixels says why it cannot run (#584)."""
-    png_path = tmp_dir / "verify.png"
+    a comparison against the SOURCE pixels says why it cannot run (#584).
+
+    The pixels come from a PAM djxl writes to stdout, read into memory
+    (#673): the same arrays as the PNG it used to write to tmp_dir (117 of
+    117 real masters), without the PNG — 236 MB written and 8.7 s of libpng
+    deflate inside djxl for a 45 MP page, most of a deleting run's time. A
+    PAM _pam_array cannot carry (a 12-bit file: the PNG holds it scaled to 16
+    bits) is decoded to the PNG, as before."""
     icc_args, out_icc, orig_icc = (g._djxl_icc_args(tmp_dir) if require_original_space
                                    else ([], None, None))
-    r = g._run_captured(["djxl", str(jxl_path), str(png_path)] + icc_args, g.CJXL_TIMEOUT)
-    if r.returncode != 0 or not png_path.exists():
+    r = g._run_to_memory(["djxl", str(jxl_path), "-", "--output_format=pam"] + icc_args,
+                         g.CJXL_TIMEOUT)
+    if r.returncode != 0 or not r.stdout:
         raise RuntimeError(f"djxl: {g._stderr_tail(r.stderr)}")
     if require_original_space and g._decoded_in_original_space(out_icc, orig_icc) is False:
         raise RuntimeError(
             "lossy ICC blob: djxl decodes it to linear sRGB, so the pixel check "
             "cannot compare it with the source — source kept "
             "(ICC_PNG_STRATEGY 'cautious' never writes such files)")
+    arr = g._pam_array(r.stdout)
+    if arr is not None:
+        return arr
+    png_path = tmp_dir / "verify.png"
+    r = g._run_captured(["djxl", str(jxl_path), str(png_path)] + icc_args, g.CJXL_TIMEOUT)
+    if r.returncode != 0 or not png_path.exists():
+        raise RuntimeError(f"djxl: {g._stderr_tail(r.stderr)}")
     # imagecodecs, never PIL: PIL silently quantises 16-bit RGB/RGBA PNGs to
     # 8-bit, which would make every lossless comparison fail for a reason that
     # has nothing to do with the encode. Checked up front in main().
