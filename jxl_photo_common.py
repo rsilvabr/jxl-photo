@@ -3477,7 +3477,12 @@ def _exiftool_batch(g, paths, head, label, on_data, on_no_output=None, on_error=
     a reader that reads a partial batch as unread); on_error(chunk, e) on any
     exception (a stall, a timeout, JSON cut short); on_done(chunk) after each
     chunk, whatever happened. progress=False: the reader reports its own
-    progress (in on_done), and the engine's lines stay out."""
+    progress (in on_done), and the engine's lines stay out.
+
+    A JXL container is read from a metadata stub (#676, _batch_on_stubs):
+    exiftool reads the whole JXL to answer any question (50 MB for a 48 MB
+    master, -fast or not), so a run with nothing to do read the library in
+    full (86 GB for one year of masters) before its first file."""
     if not paths:
         return
     _prog = g._batch_read_state(label, len(paths)) if progress else None
@@ -3485,33 +3490,107 @@ def _exiftool_batch(g, paths, head, label, on_data, on_no_output=None, on_error=
         chunk = paths[i:i + batch]
         if progress:
             g._batch_read_tick(_prog, i)
-        argfile = None
         try:
-            with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
-                                             dir=g.TEMP_DIR, encoding="utf-8",
-                                             newline=chr(10)) as af:
-                af.write(chr(10).join(list(head) + [str(p) for p in chunk]))
-                af.write(chr(10))
-                argfile = af.name
-            r = g._run_captured([g._get_exiftool_cmd(), "-@", argfile],
-                                g.EXIFTOOL_BATCH_TIMEOUT, text=True,
-                                stall=g.EXIFTOOL_BATCH_STALL)
-            if not r.stdout or (strict and r.returncode != 0):
-                if on_no_output is not None:
-                    on_no_output(chunk, r)
-                continue
-            on_data(chunk, r, json.loads(r.stdout))
+            stubbed = _batch_on_stubs(g, head, chunk)
+            if stubbed is not None:
+                r, data = stubbed
+            else:
+                r = _batch_exiftool(g, head, [str(p) for p in chunk])
+                if not r.stdout or (strict and r.returncode != 0):
+                    if on_no_output is not None:
+                        on_no_output(chunk, r)
+                    continue
+                data = json.loads(r.stdout)
+            on_data(chunk, r, data)
         except Exception as e:
             if on_error is not None:
                 on_error(chunk, e)
         finally:
             if on_done is not None:
                 on_done(chunk)
-            if argfile:
+
+
+def _batch_exiftool(g, head, names):
+    """One exiftool call of _exiftool_batch over `names` (an argfile: the
+    `head` lines, then the names), EXIFTOOL_BATCH_TIMEOUT in all and stopped
+    after EXIFTOOL_BATCH_STALL without new output."""
+    argfile = None
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
+                                         dir=g.TEMP_DIR, encoding="utf-8",
+                                         newline=chr(10)) as af:
+            af.write(chr(10).join(list(head) + list(names)))
+            af.write(chr(10))
+            argfile = af.name
+        return g._run_captured([g._get_exiftool_cmd(), "-@", argfile],
+                               g.EXIFTOOL_BATCH_TIMEOUT, text=True,
+                               stall=g.EXIFTOOL_BATCH_STALL)
+    finally:
+        if argfile:
+            try:
+                os.unlink(argfile)
+            except OSError:
+                pass
+
+
+def _batch_on_stubs(g, head, chunk):
+    """(r, entries) of one chunk of _exiftool_batch read from metadata stubs
+    (#676), each entry's SourceFile the file the reader asked about; None
+    when the chunk is read from its files exactly as before.
+
+    Each JXL container gets a stub in a folder of TEMP_DIR, named by its
+    place in the chunk (never after the file: a '%' or '[ ]' stays out of
+    it): every box but the Explorer thumbnail, the codestream cut to its
+    first bytes (_write_metadata_stub) — a few tens of KB. The batch readers
+    ask only for metadata boxes and the codestream's header (ImageWidth/
+    ImageHeight), never a file-system tag, and got the same answers from the
+    stubs (117 real masters, five question sets, 2 929 MB read -> 10 MB). A
+    file that cannot have one (not a well-formed container) is read itself in
+    the same call. Anything less than a clean answer for every stub — a
+    non-zero exit, an Error entry, a missing entry, a stall — returns None:
+    the readers' "cannot tell" stays about the files, never about a stub."""
+    stub_dir = None
+    try:
+        names, stub_of = [], {}
+        for k, p in enumerate(chunk):
+            s = str(p)
+            if s.lower().endswith(".jxl"):
+                if stub_dir is None:
+                    stub_dir = Path(tempfile.mkdtemp(prefix="jxlstub_", dir=g.TEMP_DIR))
+                stub = stub_dir / f"{k}.jxl"
                 try:
-                    os.unlink(argfile)
-                except OSError:
-                    pass
+                    _write_metadata_stub(s, stub, drop_thumbnail=True)
+                except Exception:
+                    names.append(s)
+                    continue
+                names.append(str(stub))
+                stub_of[os.path.normcase(str(stub))] = s
+            else:
+                names.append(s)
+        if not stub_of:
+            return None
+        try:
+            r = _batch_exiftool(g, head, names)
+            data = json.loads(r.stdout) if r.returncode == 0 and r.stdout else None
+        except Exception:
+            return None
+        if not isinstance(data, list):
+            return None
+        seen = set()
+        for entry in data:
+            source = entry.get("SourceFile") if isinstance(entry, dict) else None
+            key = os.path.normcase(str(Path(source))) if source else None
+            if key in stub_of:
+                if entry.get("Error"):
+                    return None
+                entry["SourceFile"] = stub_of[key]
+                seen.add(key)
+        if len(seen) != len(stub_of):
+            return None
+        return r, data
+    finally:
+        if stub_dir is not None:
+            shutil.rmtree(stub_dir, ignore_errors=True)
 
 
 # The head of the batches that read dc:Relation (and the charset lines the

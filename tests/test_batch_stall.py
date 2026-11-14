@@ -163,8 +163,10 @@ def _batch_exiftool_calls(script):
 
         def visit_Call(self, node):
             fn = self.stack[-1] if self.stack else ""
+            # The engine's one exiftool call lives in _batch_exiftool since
+            # #676 (shared by the stub read and the read of the files).
             is_batch = (fn.endswith("_batch") or fn in EXTRA_BATCH_FUNCS
-                        or fn == "_exiftool_batch")
+                        or fn in ("_exiftool_batch", "_batch_exiftool"))
             called = (getattr(node.func, "id", None)
                       or getattr(node.func, "attr", None))     # g._run_captured
             if (called == "_run_captured" and is_batch
