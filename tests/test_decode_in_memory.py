@@ -10,6 +10,7 @@ the PNG holds it scaled to 16 bits) still goes through the PNG.
 Real codecs: every JXL in a folder named with Japanese, brackets, a space and
 `100%off %d`; the temp folder has Japanese and a space.
 """
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -147,6 +148,45 @@ def test_jbrd_gate_rebuilds_the_jpeg_in_memory(tmp_path, monkeypatch):
     bad.write_bytes(b"\x00\x00\x00\x0cJXL \r\n\x87\n" + b"\x00" * 64)
     assert tr._jxl_reconstructs_to(bad, folder / "写真 (1).jpg") is False
     assert tr._jxl_reconstruct_md5(bad) is None
+
+
+@needs_tools
+@pytest.mark.parametrize("distance,png", [(0.0, False), (1.0, True)])
+def test_plain_recompression_decodes_a_png_only_for_the_skip_route(tmp_path, monkeypatch,
+                                                                   distance, png):
+    """#674: a source whose colour is an ICC profile is decoded only to read
+    djxl's two profile probes; the PNG is made only when the "skip" route
+    (a lossy re-encode of a profile with no native form) encodes it."""
+    from _icc_fixtures import romm_toe_icc
+    folder = tmp_path / HOSTILE
+    folder.mkdir(parents=True)
+    src = folder / "src.pam"
+    _pam(src, np.full((60, 80, 3), 30000, np.uint16)
+         + np.arange(80, dtype=np.uint16)[None, :, None] * 300, 65535, "RGB")
+    icc = folder / "romm.icc"
+    icc.write_bytes(romm_toe_icc())
+    jxl = folder / "走査 [1].jxl"
+    subprocess.run(["cjxl", str(src), str(jxl), "-d", "0", "-e", "1", "--container=1",
+                    "-x", f"icc_pathname={icc}"], check=True, capture_output=True, timeout=300)
+    assert rec._jxlinfo_colour(jxl)[0] != "enum"
+    seen = []
+    real = rec._run_captured
+
+    def spy(cmd, timeout, *a, **k):
+        seen.append([str(c) for c in cmd])
+        return real(cmd, timeout, *a, **k)
+
+    monkeypatch.setattr(rec, "_run_captured", spy)
+    monkeypatch.setattr(rec, "CJXL_DISTANCE", distance)
+    monkeypatch.setattr(rec, "CJXL_EFFORT", 1)
+    rec.setup_logger()
+    out = folder / "out.jxl"
+    route, skip_icc = rec._recompress_encode(jxl, out)
+    assert route == "encoded" and out.exists()
+    pngs = [c for c in seen if os.path.basename(c[0]).lower().startswith("djxl")
+            and any(a.endswith(".png") for a in c)]
+    assert bool(pngs) is png, seen
+    assert (skip_icc is not None) is png
 
 
 def test_pam_array_shapes_and_refusals():
