@@ -4403,25 +4403,26 @@ def _decode_jxl_for_verify(g, jxl_path: Path, tmp_dir: Path,
     117 real masters), without the PNG — 236 MB written and 8.7 s of libpng
     deflate inside djxl for a 45 MP page, most of a deleting run's time. A
     PAM _pam_array cannot carry (a 12-bit file: the PNG holds it scaled to 16
-    bits) is decoded to the PNG, as before."""
+    bits) is decoded to the PNG, as before — and so is a file djxl writes no
+    PAM for at all (32-bit float samples, #683): only the PNG decode's own
+    failure raises, as it did before #673."""
     icc_args, out_icc, orig_icc = (g._djxl_icc_args(tmp_dir) if require_original_space
                                    else ([], None, None))
     r = g._run_to_memory(["djxl", str(jxl_path), "-", "--output_format=pam"] + icc_args,
                          g.CJXL_TIMEOUT)
-    if r.returncode != 0 or not r.stdout:
-        raise RuntimeError(f"djxl: {g._stderr_tail(r.stderr)}")
+    arr = g._pam_array(r.stdout) if r.returncode == 0 and r.stdout else None
+    if arr is None:
+        png_path = tmp_dir / "verify.png"
+        r = g._run_captured(["djxl", str(jxl_path), str(png_path)] + icc_args, g.CJXL_TIMEOUT)
+        if r.returncode != 0 or not png_path.exists():
+            raise RuntimeError(f"djxl: {g._stderr_tail(r.stderr)}")
     if require_original_space and g._decoded_in_original_space(out_icc, orig_icc) is False:
         raise RuntimeError(
             "lossy ICC blob: djxl decodes it to linear sRGB, so the pixel check "
             "cannot compare it with the source — source kept "
             "(ICC_PNG_STRATEGY 'cautious' never writes such files)")
-    arr = g._pam_array(r.stdout)
     if arr is not None:
         return arr
-    png_path = tmp_dir / "verify.png"
-    r = g._run_captured(["djxl", str(jxl_path), str(png_path)] + icc_args, g.CJXL_TIMEOUT)
-    if r.returncode != 0 or not png_path.exists():
-        raise RuntimeError(f"djxl: {g._stderr_tail(r.stderr)}")
     # imagecodecs, never PIL: PIL silently quantises 16-bit RGB/RGBA PNGs to
     # 8-bit, which would make every lossless comparison fail for a reason that
     # has nothing to do with the encode. Checked up front in main().

@@ -2744,6 +2744,12 @@ def _recompress_encode(jxl_path: Path, write_path: Path) -> tuple:
         tmp = Path(tmp)
         dec = tmp / "dec.png"
         icc_args, out_icc, orig_icc = _djxl_icc_args(tmp)
+
+        def _decode_png():
+            r = _run_captured(["djxl", str(jxl_path), str(dec)] + icc_args, CJXL_TIMEOUT)
+            if r.returncode != 0 or not dec.exists():
+                raise RuntimeError(f"djxl: {_stderr_tail(r.stderr)}")
+
         # This decode answers the two profile probes (#674): djxl writes them
         # whatever its output, so the pixels go to memory and are dropped. In
         # two of the three outcomes nothing reads them (cjxl reads the JXL
@@ -2751,9 +2757,13 @@ def _recompress_encode(jxl_path: Path, write_path: Path) -> tuple:
         # 45 MP file — is written below only for the "skip" route.
         r = _run_to_memory(["djxl", str(jxl_path), "-", "--output_format=pam"] + icc_args,
                            CJXL_TIMEOUT)
-        if r.returncode != 0 or not r.stdout:
-            raise RuntimeError(f"djxl: {_stderr_tail(r.stderr)}")
+        probed = r.returncode == 0 and bool(r.stdout)
         del r
+        if not probed:
+            # djxl writes no PAM for some files (32-bit float samples, #683):
+            # the PNG decode of before #674 answers the probes then, and only
+            # its own failure raises.
+            _decode_png()
         same = _decoded_in_original_space(out_icc, orig_icc)
         if same is False:
             return "blob", None
@@ -2766,9 +2776,8 @@ def _recompress_encode(jxl_path: Path, write_path: Path) -> tuple:
         if CJXL_DISTANCE == 0 or _icc_has_native_form(icc, grey):
             _cjxl(jxl_path)
             return "encoded", None
-        r = _run_captured(["djxl", str(jxl_path), str(dec)] + icc_args, CJXL_TIMEOUT)
-        if r.returncode != 0 or not dec.exists():
-            raise RuntimeError(f"djxl: {_stderr_tail(r.stderr)}")
+        if not dec.exists():
+            _decode_png()
         skip_png = tmp / "skip.png"
         _png_without_colour_chunks(dec, skip_png)
         _cjxl(skip_png)
