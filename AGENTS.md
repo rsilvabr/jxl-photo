@@ -250,7 +250,10 @@
   (230 MB and 8.6 s of libpng deflate per 45 MP page). djxl writes a PAM/PPM
   at the FILE's depth whatever `--bits_per_sample` says (0.12 and 0.13; only
   its PNG writer obeys), so every reader checks MAXVAL (255/65535 only, a
-  12-bit file keeps the PNG) and a route that asks another depth keeps the PNG
+  12-bit file keeps the PNG), a decode that gets no PAM at all keeps the PNG
+  too (djxl writes none for 32-bit float samples, #683: a failed PAM decode
+  never raises before the PNG route has run), and a route that asks another
+  depth keeps the PNG
   (a full-size 8-bit JPEG of a 16-bit master: fed 16-bit samples, its pixels
   came out up to 46 levels apart). A derivative takes the memory route only
   for an RGB/RGBA master with its ICC in XMP decoded in its own space
