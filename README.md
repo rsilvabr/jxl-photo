@@ -188,7 +188,7 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 | [docs/behavior_and_limitations.md](docs/behavior_and_limitations.md) | Defaults, limits and viewer quirks worth knowing before a large batch |
 | [docs/why_jxl.md](docs/why_jxl.md) | Why JPEG XL: sizes, the grain tests and the measurements behind the settings |
 | [docs/file_sizes.md](docs/file_sizes.md) | File sizes per camera and for film scans, and what effort 9 buys |
-| [docs/performance.md](docs/performance.md) | How the toolkit stays fast on large libraries: the design choices and what each release changed, measured |
+| [docs/performance.md](docs/performance.md) | How the toolkit stays fast on large libraries, in short; every change and its measurements in [performance_details.md](docs/performance_details.md) |
 | [docs/metadata_written.md](docs/metadata_written.md) | Every field the toolkit writes into your photos, and what it reveals |
 | [docs/jxl_color_internals.md](docs/jxl_color_internals.md) | Deep dive: XYB, ICC blobs vs primaries, troubleshooting |
 | [docs/related_projects.md](docs/related_projects.md) | The Windows program, Explorer thumbnails, the TIFF-only alternative, the backup script |

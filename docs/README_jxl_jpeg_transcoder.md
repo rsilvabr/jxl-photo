@@ -1092,7 +1092,7 @@ py jxl_jpeg_transcoder.py "F:\Masters\JXL" --force-convert --to-srgb --quality 9
 | --- | --- |
 | Workers | Match CPU thread count (tested up to 32 on a Ryzen 9 5950X) |
 | Staging | Set `TEMP2_DIR` to SSD when source is on HDD — avoids I/O contention |
-| RAM mode | Nothing to set. Colour-converted and resized copies decode in memory where they can (since v2.30.2), otherwise through a temporary PNG; a plain decode has djxl write the file itself ([how](performance.md#decodes-that-stay-in-memory)). `--ram`/`--no-ram` are accepted and have no effect |
+| RAM mode | Nothing to set. Colour-converted and resized copies decode in memory where they can (since v2.30.2), otherwise through a temporary PNG; a plain decode has djxl write the file itself ([how](performance_details.md#decodes-that-stay-in-memory)). `--ram`/`--no-ram` are accepted and have no effect |
 | Effort | Keep at 7 for JPEG transcoding; higher efforts yield marginal gains |
 
 * * *
