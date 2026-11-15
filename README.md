@@ -188,6 +188,7 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 | [docs/behavior_and_limitations.md](docs/behavior_and_limitations.md) | Defaults, limits and viewer quirks worth knowing before a large batch |
 | [docs/why_jxl.md](docs/why_jxl.md) | Why JPEG XL: sizes, the grain tests and the measurements behind the settings |
 | [docs/file_sizes.md](docs/file_sizes.md) | File sizes per camera and for film scans, and what effort 9 buys |
+| [docs/performance.md](docs/performance.md) | How the toolkit stays fast on large libraries: the design choices and what each release changed, measured |
 | [docs/metadata_written.md](docs/metadata_written.md) | Every field the toolkit writes into your photos, and what it reveals |
 | [docs/jxl_color_internals.md](docs/jxl_color_internals.md) | Deep dive: XYB, ICC blobs vs primaries, troubleshooting |
 | [docs/related_projects.md](docs/related_projects.md) | The Windows program, Explorer thumbnails, the TIFF-only alternative, the backup script |
@@ -215,7 +216,7 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ## About this project
 
-I am sharing these scripts because getting all of this to work correctly was unexpectedly difficult: preserving 16-bit depth through the conversion pipeline, embedding EXIF so it is visible in IrfanView and other applications, handling the ICC profiles of Capture One exports (sRGB, AdobeRGB, ProPhoto RGB), fixing an XMP overwrite bug that destroyed original metadata and an EXIF extraction that produced corrupted data, a sync mode that reconverts only re-exported photos, and performance (RAM usage, parallelism, staging). Several of those bugs appear because of the specific combination of programs I use (Capture One, cjxl, exiftool, IrfanView); they and their fixes are documented in [`docs/bugs_fixes_explained.md`](docs/bugs_fixes_explained.md).
+I am sharing these scripts because getting all of this to work correctly was unexpectedly difficult: preserving 16-bit depth through the conversion pipeline, embedding EXIF so it is visible in IrfanView and other applications, handling the ICC profiles of Capture One exports (sRGB, AdobeRGB, ProPhoto RGB), fixing an XMP overwrite bug that destroyed original metadata and an EXIF extraction that produced corrupted data, a sync mode that reconverts only re-exported photos, and performance ([RAM usage, parallelism, staging](docs/performance.md)). Several of those bugs appear because of the specific combination of programs I use (Capture One, cjxl, exiftool, IrfanView); they and their fixes are documented in [`docs/bugs_fixes_explained.md`](docs/bugs_fixes_explained.md).
 
 Related projects, all mine ([more on each](docs/related_projects.md)):
 

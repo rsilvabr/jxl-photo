@@ -978,6 +978,14 @@ must-fix / should-fix items and a commit verdict.
   libjxl 0.12.0, 2026-10-30. The README's size table is its summary (the
   same table is in `docs/why_jxl.md`) — update the three together, and never
   name the owner's shoots or folders there
+- `docs/performance.md` — how the toolkit stays fast: the design it started
+  with (worker threads around the codec processes, the image handed to cjxl
+  in memory, staging, smart sync, effort 7), then every speed and memory
+  change by theme, with an "At a glance" table by version and the numbers
+  each release measured. A change made for speed or memory adds its row
+  there and its paragraph in the same change (the full detail stays in
+  `docs/version_history.md`); never name the owner's shoots, folders or
+  presets there
 - `docs/metadata_written.md` — every field the toolkit writes into a photo
   (CreatorTool ICC, encode record, each `jxlphoto-*` token, xmpMM:History)
   and what it reveals. A new token or a new written field goes there in the
