@@ -493,8 +493,9 @@ Options:
                   finished outputs may be waiting there for their folder)
   --effort 1-10      cjxl effort (default: 7)
   --distance 0-25    JXL butteraugli distance for lossy encoding (default: 1.0)
-  --ram              Use RAM pipeline (faster, default: True)
-  --no-ram           Use disk pipeline (slower, less memory)
+  --ram              Accepted for compatibility; no effect (the transcoder
+                  picks the route itself: see Performance below)
+  --no-ram           Accepted for compatibility; no effect
   --output-name NAME Output folder name for convert mode (default: "converted")
   --output-suffix SFX Suffix for converted files (default: none — flat output)
    --rename-from PAT  Literal substring to replace in filenames (not regex).
@@ -1091,7 +1092,7 @@ py jxl_jpeg_transcoder.py "F:\Masters\JXL" --force-convert --to-srgb --quality 9
 | --- | --- |
 | Workers | Match CPU thread count (tested up to 32 on a Ryzen 9 5950X) |
 | Staging | Set `TEMP2_DIR` to SSD when source is on HDD — avoids I/O contention |
-| RAM mode | Not applicable (decode currently always uses temporary files; `--ram`/`--no-ram` accepted but without effect) |
+| RAM mode | Nothing to set. Colour-converted and resized copies decode in memory where they can (since v2.30.2), otherwise through a temporary PNG; a plain decode has djxl write the file itself ([how](performance.md#decodes-that-stay-in-memory)). `--ram`/`--no-ram` are accepted and have no effect |
 | Effort | Keep at 7 for JPEG transcoding; higher efforts yield marginal gains |
 
 * * *
