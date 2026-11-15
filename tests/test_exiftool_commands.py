@@ -10,6 +10,7 @@ _run_captured, every command runs in its own process as before.
 
 Real exiftool, in a folder with Japanese, brackets, a space and %.
 """
+import json
 import shutil
 import subprocess
 import sys
@@ -132,34 +133,70 @@ def test_a_prefetched_read_answers_exactly_like_its_own_run(tmp_path, monkeypatc
     assert enc._EXIFTOOL_PREFETCH.results == {}
 
 
-def test_copy_metadata_runs_every_command_when_a_cleanup_fails(tmp_path, monkeypatch):
-    """The decoder's copy_metadata on the one-process-per-command path (an
-    exiftool older than 12.15, or a test double): a cosmetic clean-up that
-    fails never stops the commands after it (stop_at_failure=False, review
-    V2) — the three reads the next step decides from still run, the
-    provenance write still runs, and the copy is not failed for it, as when
-    each was a call of its own."""
-    calls = []
-
-    def fake(args, timeout=60):
-        args = [str(a) for a in args]
-        calls.append(args)
-        if "-ifd1:Software=" in args:
-            return subprocess.CompletedProcess(args, 1, "", "Error: cosmetic")
-        if "-XMP-dc:Relation" in args and "-j" in args:
-            return subprocess.CompletedProcess(args, 0, '[{"SourceFile": "x"}]', "")
-        if "-IFD0:Software" in args or "-ImageDescription" in args:
-            return subprocess.CompletedProcess(args, 0, "", "")
-        return subprocess.CompletedProcess(args, 0, "    1 image files updated\n", "")
+def _copy_metadata_doubles(monkeypatch, fake):
     monkeypatch.setattr(dec, "_run_exiftool_argfile", fake)
     monkeypatch.setattr(dec, "_exiftool_source", lambda p, tmp: str(p))
     monkeypatch.setattr(dec, "_xmp_block_args", lambda p, tmp: ["-tagsfromfile", str(p), "-XMP"])
     monkeypatch.setattr(dec, "_orientation_reset_args", lambda p: [])
     dec.setup_logger()
+
+
+def test_copy_metadata_runs_every_command_when_a_cleanup_fails(tmp_path, monkeypatch):
+    """The decoder's copy_metadata on the one-process-per-command path (an
+    exiftool older than 12.15, or a test double): a cosmetic clean-up that
+    fails never stops the commands after it (stop_at_failure=False, review
+    V2) — here the second process's IFD0 Software clean-up (the read says
+    tifffile's default is still there): the provenance write after it still
+    runs, and the copy is not failed for it, as when each was a call of its
+    own. (Until #682 the failing clean-up was the preview page's
+    `-ifd1:Software=`, which no longer runs.)"""
+    calls = []
+
+    def fake(args, timeout=60):
+        args = [str(a) for a in args]
+        calls.append(args)
+        if "-IFD0:Software=" in args:
+            return subprocess.CompletedProcess(args, 1, "", "Error: cosmetic")
+        if "-XMP-dc:Relation" in args and "-j" in args:
+            return subprocess.CompletedProcess(args, 0, '[{"SourceFile": "x"}]', "")
+        if "-IFD0:Software" in args:
+            return subprocess.CompletedProcess(args, 0, "tifffile.py\n", "")
+        if "-ImageDescription" in args:
+            return subprocess.CompletedProcess(args, 0, "", "")
+        return subprocess.CompletedProcess(args, 0, "    1 image files updated\n", "")
+    _copy_metadata_doubles(monkeypatch, fake)
     folder = tmp_path / HOSTILE
     ok = dec.copy_metadata(folder / "a (1).jxl", folder / "a (1).tif", tmp_path)
     assert ok is True
+    cleanup = [i for i, c in enumerate(calls) if "-IFD0:Software=" in c]
+    history = [i for i, c in enumerate(calls)
+               if any(a.startswith("-XMP-xmpMM:History+=") for a in c)]
+    assert len(cleanup) == 1, calls                          # the clean-up was tried
+    assert history and history[0] > cleanup[0], "the last write never ran after it"
+
+
+def test_copy_metadata_runs_the_rest_when_the_exif_copy_fails(tmp_path, monkeypatch):
+    """The first process too (stop_at_failure=False): a failed EXIF copy is
+    the file's error (False), but the three reads after it and the
+    provenance write still run, as when each command was a call of its own."""
+    calls = []
+
+    def fake(args, timeout=60):
+        args = [str(a) for a in args]
+        calls.append(args)
+        if "-exif:all" in args:
+            return subprocess.CompletedProcess(args, 1, "", "Error: corrupt tag")
+        if "-XMP-dc:Relation" in args and "-j" in args:
+            return subprocess.CompletedProcess(args, 0, '[{"SourceFile": "x"}]', "")
+        if "-IFD0:Software" in args or "-ImageDescription" in args:
+            return subprocess.CompletedProcess(args, 0, "", "")
+        return subprocess.CompletedProcess(args, 0, "    1 image files updated\n", "")
+    _copy_metadata_doubles(monkeypatch, fake)
+    folder = tmp_path / HOSTILE
+    ok = dec.copy_metadata(folder / "a (1).jxl", folder / "a (1).tif", tmp_path)
+    assert ok is False
     assert sum("-IFD0:Software" in c for c in calls) == 1        # the reads ran
+    assert sum("-ImageDescription" in c for c in calls) == 1
     assert sum("-j" in c and "-XMP-dc:Relation" in c for c in calls) == 1
     assert any(any(a.startswith("-XMP-xmpMM:History+=") for a in c) for c in calls), \
         "the last write never ran"
@@ -258,9 +295,9 @@ def test_the_encoder_writes_a_file_s_metadata_in_one_process(tmp_path, monkeypat
 
 @needs_tools
 def test_the_decoder_copies_a_tiff_s_metadata_in_two_processes(tmp_path, monkeypatch):
-    """copy_metadata: the EXIF/XMP copies, the IFD1 clean-ups and three reads
-    in one process, the clean-ups they decide in a second. The TIFF comes
-    back with the XMP and without the master's internal markers."""
+    """copy_metadata: the EXIF/XMP copies and three reads in one process, the
+    clean-ups they decide in a second. The TIFF comes back with the XMP and
+    without the master's internal markers."""
     folder = tmp_path / HOSTILE
     src = _tif(folder / "DSC_0001 (2).tif")
     r = subprocess.run([sys.executable, str(REPO / "jxl_tiff_encoder.py"), str(folder),
@@ -277,7 +314,7 @@ def test_the_decoder_copies_a_tiff_s_metadata_in_two_processes(tmp_path, monkeyp
     real = common._exiftool_one_process
 
     def counting(g, commands, timeout):
-        batches.append(len(commands))
+        batches.append([[str(a) for a in c] for c in commands])
         return real(g, commands, timeout)
     monkeypatch.setattr(common, "_exiftool_one_process", counting)
     monkeypatch.setattr(dec, "_EXIFTOOL_BATCH", {})
@@ -290,8 +327,59 @@ def test_the_decoder_copies_a_tiff_s_metadata_in_two_processes(tmp_path, monkeyp
         assert e.code in (0, None)
     tif = folder / "tif" / "DSC_0001 (2).tif"
     assert tif.is_file()
-    # the probe, then copy_metadata's first process (copies, clean-ups, reads)
-    assert batches[0] == 1 and max(batches[1:]) >= 5, batches
+    # the probe, then copy_metadata's first process: the two copies and the
+    # three reads (no `-ifd1:` clean-up since #682)
+    assert len(batches[0]) == 1, batches
+    first = [b for b in batches if any("-exif:all" in c for c in b)]
+    assert len(first) == 1 and len(first[0]) == 5, first
     assert _tag(tif, "XMP-dc:Title") == "写真 [2]"
     rel = _tag(tif, "XMP-dc:Relation")
     assert "jxlphoto-page:" not in rel and "jxlphoto-depth:" not in rel, rel
+
+
+@needs_tools
+def test_682_the_decoder_runs_no_empty_ifd1_cleanup(tmp_path, monkeypatch):
+    """#682: every page the decoder writes goes out without tifffile's
+    Software and shaped-JSON ImageDescription (metadata=None, software='';
+    the JPEG preview page too, #681), and ExifTool writes a whole temporary
+    copy of a TIFF for any command, even one that changes nothing (241 MB and
+    0.7 s for a 45 MP page, measured). So no `-ifd1:` clean-up runs — and
+    the preview page (IFD1) still comes out without those two tags, page 0
+    without tifffile's."""
+    folder = tmp_path / HOSTILE
+    src = _tif(folder / "DSC_0001 (2).tif")
+    r = subprocess.run([sys.executable, str(REPO / "jxl_tiff_encoder.py"), str(folder),
+                        str(folder / "jxl"), "--mode", "2", "--distance", "0",
+                        "--workers", "1"], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", timeout=600,
+                       stdin=subprocess.DEVNULL)
+    assert r.returncode == 0, (r.stdout + r.stderr)[-3000:]
+    jxl = folder / "jxl" / "DSC_0001 (2).jxl"
+    src.unlink()
+    seen = []
+    real = common._exiftool_one_process
+
+    def recording(g, commands, timeout):
+        seen.extend([str(a) for a in c] for c in commands)
+        return real(g, commands, timeout)
+    monkeypatch.setattr(common, "_exiftool_one_process", recording)
+    monkeypatch.setattr(dec, "_EXIFTOOL_BATCH", {})
+    monkeypatch.setattr(sys, "argv", ["jxl_tiff_decoder.py", str(jxl), str(folder / "tif"),
+                                      "--workers", "1"])
+    monkeypatch.setenv("JXLPHOTO_LOG_DIR", str(tmp_path / "logs"))
+    try:
+        dec.main()
+    except SystemExit as e:
+        assert e.code in (0, None)
+    tif = folder / "tif" / "DSC_0001 (2).tif"
+    assert tif.is_file()
+    assert any("-exif:all" in c for c in seen), seen         # copy_metadata ran batched
+    ifd1 = [c for c in seen if any(a.lower().startswith("-ifd1:") for a in c)]
+    assert ifd1 == [], ifd1
+    out = enc._run_exiftool_argfile(["-j", "-G1", "-IFD1:all", "-IFD0:Software",
+                                     "-IFD0:ImageDescription", str(tif)], timeout=60)
+    tags = json.loads(out.stdout)[0]
+    assert "IFD1:SubfileType" in tags, tags                  # the preview page is there
+    assert "IFD1:Software" not in tags and "IFD1:ImageDescription" not in tags, tags
+    assert "tifffile" not in str(tags.get("IFD0:Software", "")), tags
+    assert not str(tags.get("IFD0:ImageDescription", "")).startswith('{"shape"'), tags

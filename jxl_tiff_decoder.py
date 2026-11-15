@@ -1830,7 +1830,7 @@ def _note_minor_metadata(r, tiff_path) -> None:
                        f"parse the maker notes and carried them over as they are")
 
 
-def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
+def copy_metadata(jxl_path, tiff_path, tmp_dir,
                   provenance_sources=None, pixel_sum=None):
     """Copy metadata from JXL to TIFF using exiftool.
 
@@ -1859,12 +1859,10 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
         # A '%' in the JXL's name would be expanded by -tagsfromfile and
         # the TIFF would get no metadata at all (#550).
         _src = _exiftool_source(jxl_path, tmp_dir)
-        # Two exiftool processes per TIFF (refactor F6): first the copies, the
-        # IFD1 clean-ups and the three reads the clean-ups below decide from
-        # (they read tags no clean-up touches, so reading them before the
-        # clean-ups gives the same answers); then those clean-ups. Each
-        # command keeps its own verdict, and a failed one never stops the
-        # next — as when each was a call of its own.
+        # Two exiftool processes per TIFF (refactor F6): first the copies and
+        # the three reads the clean-ups below decide from; then those
+        # clean-ups. Each command keeps its own verdict, and a failed one
+        # never stops the next — as when each was a call of its own.
         first = [
             # #623: a codestream orientation is already applied to the decoded
             # pixels: the EXIF Orientation copied from the Exif box is reset to 1.
@@ -1880,14 +1878,14 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
             ["-overwrite_original"] + _xmp_block_args(jxl_path, tmp_dir)
             + ["-tagsfromfile", _src, "-iptc:all", str(tiff_path)],
         ]
-        # Fix Software and ImageDescription tags that tifffile may have written
-        # on IFD0 or IFD1. For single-page TIFFs with a JPEG preview, only the
-        # preview page (IFD1) needs these defaults cleared; the main image keeps
-        # its metadata from the JXL. For multi-page TIFFs, IFD1 is a real page
-        # and must keep its metadata, so we only clear on single-page files.
-        if not is_multipage:
-            first += [["-overwrite_original", "-ifd1:Software=", str(tiff_path)],
-                      ["-overwrite_original", "-ifd1:ImageDescription=", str(tiff_path)]]
+        # No clean-up of the JPEG preview page (IFD1) any more (#682): every page
+        # this decoder writes, the preview included, goes out without tifffile's
+        # default Software and shaped-JSON ImageDescription (metadata=None,
+        # software='', see _preview_page_kwargs), so the two `-ifd1:` deletions
+        # found nothing — and ExifTool writes a whole temporary copy of a TIFF
+        # even for a command that changes nothing (241 MB and 0.7 s for a 45 MP
+        # page, measured). A clean-up that may find nothing waits for a read, as
+        # the two in `second` below do.
         first += [["-s", "-s", "-s", "-IFD0:Software", str(tiff_path)],
                   ["-ImageDescription", str(tiff_path)],
                   ["-j", "-XMP-dc:Relation", str(tiff_path)]]
@@ -2217,9 +2215,9 @@ def _preview_page_kwargs(jpeg_arr) -> dict:
         'compression': 'jpeg',
         'subfiletype': 1,  # Marks as thumbnail/reduced resolution
         # Without tifffile's default Software and shaped-JSON ImageDescription
-        # (#681): copy_metadata's two `-ifd1:` clean-ups then find nothing to
-        # remove and leave the file as it is — each one rewrote the whole TIFF
-        # (251 MB for a 45 MP page) to delete two short tags.
+        # (#681): copy_metadata runs no clean-up of this page (#682). Keep it
+        # so: ExifTool rewrites the whole TIFF for any command, even one that
+        # finds nothing to change.
         'metadata': None,
         'software': '',
     }
@@ -3035,7 +3033,7 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
             meta_ok = True
             if strategy != 'none':
                 # Full metadata copy (order: preview already added above)
-                if copy_metadata(main_jxl, write_path, tmp_dir, is_multipage=is_multipage,
+                if copy_metadata(main_jxl, write_path, tmp_dir,
                                  provenance_sources=[e[0] for e in page_entries],
                                  pixel_sum=_pixsum) is False:
                     meta_ok = False
