@@ -7293,8 +7293,8 @@ Examples:
                         help="cjxl effort 1-10")
 
     # Convert specific
-    parser.add_argument("--ram", action="store_true", default=True, help="Accepted for CLI compatibility; decode currently always uses temporary files (no in-RAM pipeline yet)")
-    parser.add_argument("--no-ram", dest="ram", action="store_false", help="Use disk")
+    parser.add_argument("--ram", action="store_true", default=True, help="Accepted for CLI compatibility; no effect. The transcoder picks the route itself: colour-converted and resized copies decode in memory where they can (since v2.30.2), otherwise through a temporary PNG")
+    parser.add_argument("--no-ram", dest="ram", action="store_false", help="Accepted for CLI compatibility; no effect (see --ram)")
     parser.add_argument("--dry-run", action="store_true", help="Show what would happen")
     parser.add_argument("--summary-json", action="store_true",
                         help=argparse.SUPPRESS)  # internal: machine-readable summary for jxl_photo.py

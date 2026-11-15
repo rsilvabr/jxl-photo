@@ -3351,8 +3351,8 @@ REGISTRY: Tuple[Opt, ...] = (
 NOT_OFFERED: Dict[str, str] = {
     "jxl_tiff_encoder:--icc-cache-dir": "Phase 4 (machine setting)",
     "jxl_tiff_encoder:--embed-thumbnail": "deprecated",
-    "jxl_jpeg_transcoder:--ram": "no effect: accepted for compatibility (decode uses temp files)",
-    "jxl_jpeg_transcoder:--no-ram": "no effect: accepted for compatibility (decode uses temp files)",
+    "jxl_jpeg_transcoder:--ram": "no effect: accepted for compatibility (the transcoder picks memory or a temp file itself)",
+    "jxl_jpeg_transcoder:--no-ram": "no effect: accepted for compatibility (the transcoder picks memory or a temp file itself)",
     "jxl_jpeg_transcoder:--to-srgb": "alias of --icc-profile sRGB, which the wrapper uses",
     # Never passed: the run's own answer is given another way.
     "jxl_tiff_encoder:--version": "not a run option",
