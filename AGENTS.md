@@ -261,8 +261,12 @@
   exiftool process (`_source_tags`: keyed by path, size and mtime_ns, only for
   a file unchanged for 5 s). The decoder writes the JPEG preview as page 1 of
   its FIRST TiffWriter (`_jpeg_preview_array`; `_preview_page_kwargs` passes
-  `metadata=None, software=''`, so the `-ifd1:` clean-ups find nothing) —
-  never rebuild the finished TIFF for it again. A grey image on the
+  `metadata=None, software=''`, like every page, so `copy_metadata` runs no
+  `-ifd1:` clean-up, #682) — never rebuild the finished TIFF for it again.
+  ExifTool writes a whole temporary copy of a TIFF for ANY command, even one
+  that changes nothing (measured 2026-11-15: 241 MB, 0.7 s per 45 MP TIFF):
+  never add an exiftool command on a TIFF just in case; a clean-up that may
+  find nothing waits for a read, as the IFD0 Software/ImageDescription ones do. A grey image on the
   transcoder's ImageMagick route gets `+profile "!icc,*"` (#672): without a
   profile step ImageMagick keeps the codec's EXIF/XMP from djxl's PNG, and a
   master's XMP over 64 KB becomes a broken APP1 that turns every later

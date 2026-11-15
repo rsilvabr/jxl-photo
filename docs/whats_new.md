@@ -10,7 +10,8 @@ as [GitHub Releases](https://github.com/rsilvabr/jxl-photo/releases).
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.30.2-rc2](version_history.md#v2302-rc2)** | 2026-11-14 | Pre-release. Copies, decoded TIFFs and the check before a delete without a full-size temporary image; each master written once; planning reads a few KB per JXL; the same files byte for byte |
+| **[v2.30.2](version_history.md#v2302)** | 2026-11-15 | Copies and decodes take between half and a third of the time for a 45 MP photo; far less written to the disk (archiving a 45 MP photo: 79 MB instead of 520 MB); the same files byte for byte |
+| [v2.30.2-rc2](version_history.md#v2302-rc2) | 2026-11-14 | Pre-release. Copies, decoded TIFFs and the check before a delete without a full-size temporary image; each master written once; planning reads a few KB per JXL; the same files byte for byte |
 | [v2.30.2-rc1](version_history.md#v2302-rc1) | 2026-11-14 | Pre-release. Explorer thumbnails no longer write the whole photo to the temp folder: the same thumbnails, much faster when the temp folder sits on a slow disk |
 | [v2.30.1](version_history.md#v2301) | 2026-11-14 | The wizard's checks read every option the run gets; libjxl 0.13.0 supported: JPEG archives every libjxl rebuilds bit for bit, alpha channels kept |
 | [v2.30.1-rc2](version_history.md#v2301-rc2) | 2026-11-14 | Pre-release. Tested with libjxl 0.13.0: with it, a JPEG archive is still rebuilt bit for bit by every libjxl since 0.11, and a lossy encode keeps an all-opaque alpha channel; everything in v2.30.1-rc1 |
@@ -41,13 +42,23 @@ as [GitHub Releases](https://github.com/rsilvabr/jxl-photo/releases).
 
 Every release since v1.0: [version_history.md](version_history.md#release-history).
 
+## v2.30.2
+
+2026-11-15. Everything in the two test releases, rc1 and rc2, plus one more saving in the decoder. Nothing to do when upgrading.
+
+- **Copies and decodes take between half and a third of the time.** For a 45 MP photo: a resized JPEG copy 4.5 s instead of 14.1 s, an sRGB JXL copy 10.7 s instead of 20.2 s, decoding back to TIFF 5.6 s instead of 15.8 s. A run with nothing to do reads a few KB of each JXL instead of the whole file.
+- **Far less written to the disk.** Archiving a 45 MP photo writes 79 MB instead of 520 MB, a resized JPEG copy 2.5 MB instead of 209 MB, decoding it back to TIFF 1.2 GB instead of 2.4 GB: the photo goes from one program to the next in memory instead of through a temporary image, and the master is written once.
+- The files come out byte for byte the same. One fix: a resized black-and-white JPEG copy (the infrared page of a film scan) is now marked as a copy, so the next run no longer refuses it.
+
+[Technical notes](version_history.md#v2302)
+
 ## v2.30.2-rc2
 
 2026-11-14. The second test release (pre-release) of v2.30.2; the last stable release is [v2.30.1](#v2301). Nothing to do when upgrading. Everything in [v2.30.2-rc1](#v2302-rc1) is in it.
 
-- **Less written to the temp folder, faster runs.** Resized copies, sRGB JXL copies, decoded TIFFs and the check before a delete no longer write a full-size temporary image (about 230 MB for a 45 MP photo): JPG MOBILE took 91 s instead of 137 s on 99 photos, the decoder about half the time.
-- The encoder writes each master once instead of seven times, and planning reads a few KB of each JXL instead of the whole file, so a sync with nothing to do starts much sooner.
-- The files come out byte for byte the same. One fix: a resized grey JPEG copy (the infrared page of a film scan) is now marked as a copy, so the next run no longer refuses it.
+- **Copies and decodes are faster.** Making a smaller copy of a master (a resized JPEG, a resized JXL, a JXL converted to sRGB), decoding a master back to TIFF and checking a master before a TIFF is deleted no longer save the whole photo as a temporary image first (about 230 MB for a 45 MP photo): resized JPEGs took 91 s instead of 137 s on 99 photos, decoding to TIFF about half the time.
+- Less written to the disk when archiving: a new 48 MB master costs about 100 MB of disk writes instead of 340 MB. A sync with nothing to do starts much sooner: the scripts read a few KB of each JXL instead of the whole file.
+- The files come out byte for byte the same. One fix: a resized black-and-white JPEG copy (the infrared page of a film scan) is now marked as a copy, so the next run no longer refuses it.
 
 [Technical notes](version_history.md#v2302-rc2)
 

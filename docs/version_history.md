@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.30.2-rc2](#v2302-rc2)** | 2026-11-14 | Pre-release. Resized copies, decoded TIFFs and deleting runs no longer write a full-size temporary image per photo; a new master is written once instead of seven times; planning reads a few KB of each JXL instead of the whole file — the same files, byte for byte; a grey resized JPEG copy is marked as one (round 87, 8 fixes) |
+| **[v2.30.2](#v2302)** | 2026-11-15 | Everything in the two test releases: copies, decodes to TIFF and the check before a delete take between half and a third of the time for a 45 MP photo; far less written to the disk (archiving a 45 MP photo: 79 MB instead of 520 MB); planning reads a few KB per JXL; the same files byte for byte; a grey resized JPEG copy marked as one |
+| [v2.30.2-rc2](#v2302-rc2) | 2026-11-14 | Pre-release. Resized copies, decoded TIFFs and deleting runs no longer write a full-size temporary image per photo; a new master is written once instead of seven times; planning reads a few KB of each JXL instead of the whole file — the same files, byte for byte; a grey resized JPEG copy is marked as one (round 87, 8 fixes) |
 | [v2.30.2-rc1](#v2302-rc1) | 2026-11-14 | Pre-release. The Explorer thumbnail no longer writes the whole decoded image to the temp folder: the same thumbnails, much faster when the temp folder sits on a slow disk (round 86, 1 fix) |
 | [v2.30.1](#v2301) | 2026-11-14 | Everything in the two test releases: the wizard's checks read every option the run gets; libjxl 0.13.0 supported (JPEG archives every libjxl rebuilds bit for bit, alpha kept) |
 | [v2.30.1-rc2](#v2301-rc2) | 2026-11-14 | Pre-release. Tested with libjxl 0.13.0: with it, a lossless JPEG archive is still rebuilt bit for bit by every djxl since 0.11, and a lossy encode keeps an all-opaque alpha channel (round 85, 2 fixes) |
@@ -109,10 +110,59 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.30.2
+
+**Released 2026-11-15.** Supersedes v2.30.2-rc1 and v2.30.2-rc2; the last
+stable release before it is v2.30.1. The code is v2.30.2-rc2's plus one more
+saving in the decoder (round 88, #682). Nothing to do when upgrading.
+
+- From [v2.30.2-rc1](#v2302-rc1) (round 86, #671): the Explorer thumbnail is
+  made from a decode in memory, not a 270 MB temporary image per output.
+- From [v2.30.2-rc2](#v2302-rc2) (round 87, #672–#676, #679–#681): resized
+  copies, sRGB copies, decoded TIFFs, the round-trip check before a delete
+  and the JPEG archive's delete gate decode into memory instead of a
+  full-size 16-bit PNG in the temp folder; the encoder writes each master
+  once instead of seven times; planning hands exiftool a metadata stub of
+  each JXL instead of the whole file. Every output the same byte for byte,
+  except a grey resized JPEG copy, now marked as a copy (#672).
+- **Measured for this release**, the released code against v2.30.1 on one
+  45 MP photo (a 241 MB Z8 TIFF, its 39 MB master at d=0.05), one at a time,
+  NVMe, libjxl 0.13.0, Explorer thumbnails on (`JXLPHOTO_JXL_THUMB=1`).
+  Bytes from each process's own write counter (every child in its own job
+  object, the Fable's `iomon.py` of round 87), bytes fed through a pipe left
+  out. Written to disk: archiving 520 → 79 MB (275 → 79 MB without the
+  thumbnail), the round-trip check before a delete 206 → 0 MB, a resized
+  JPEG 209 → 2.5 MB, a resized JXL 241 → 19 MB, an sRGB JXL 734 → 282 MB
+  (489 → 282 MB without the thumbnail), decoding to TIFF 2,376 → 1,205 MB
+  (1,687 MB with rc2's code, before #682). Time: resized JPEG 14.1 → 4.5 s,
+  resized JXL 13.9 → 4.4 s, sRGB JXL 20.2 → 10.7 s, decoding 15.8 → 5.6 s,
+  archiving with `--delete-source` 17.5 → 8.0 s. v2.30.0 behaves as v2.30.1
+  on all of these.
+- **New in the final — decoding skips two ExifTool commands that found
+  nothing to change (#682).** The decoder wrote the whole TIFF once per
+  ExifTool command, six times; two of them deleted tifffile's default
+  `Software` and `ImageDescription` from the JPEG preview page, which #681
+  already writes without them (like every page: `metadata=None,
+  software=''`). ExifTool writes a whole temporary copy of a TIFF even for a
+  command that changes nothing (measured: "0 image files updated", 241 MB
+  written, 0.7 s for a 45 MP page), so those two cost 482 MB and 1.4 s per
+  TIFF for nothing. They are gone; the four that remain each change the file
+  (the EXIF copy, the XMP block with IPTC, the Relation clear, the markers
+  with the History). Proven on the owner's real photos (25 real masters and
+  25 lossless round trips: the old and new decoders' TIFFs byte for byte the
+  same, the lossless ones pixel for pixel the originals, with the same ICC
+  profile, byte order, IPTC and XMP) and on the fixtures (93 TIFFs, the
+  default strategy and `--basic`).
+- Checked for this release: rc2 rebuilt a real library of 8,438 masters
+  from their TIFFs, its JPEG-only archives and part of its sRGB copies with
+  no error, about 25% more files a minute than the previous full rebuild
+  (2026-11-09, an earlier release) with 15–16 workers instead of 18–19.
+
 ## v2.30.2-rc2
 
-**Released 2026-11-14, the second test release (pre-release) of v2.30.2**;
-the last stable release is [v2.30.1](#v2301), and everything in
+**Released 2026-11-14, the second test release (pre-release) of v2.30.2**,
+superseded by [v2.30.2](#v2302) the next day; the last stable release is
+[v2.30.1](#v2301), and everything in
 [v2.30.2-rc1](#v2302-rc1) is in it. The fixes of an audit of what each step
 writes and reads on disk (round 87, #672–#676, #679–#681; the Fable's
 measurements, the code here). Nothing to do when upgrading. Every file the
@@ -167,7 +217,8 @@ JPEG copy (#672, a fix).
   its first writer instead of rebuilding the finished TIFF (2 × 251 MB read
   and written for a 45 MP page), and writes that page without tifffile's
   default tags, so the two exiftool clean-ups that each rewrote the whole TIFF
-  find nothing to do.
+  find nothing to do (ExifTool still wrote a temporary copy of the TIFF for
+  each; v2.30.2 leaves them out, #682).
 - **The delete checks.** The round-trip check before a delete (#673) decodes
   into memory: the same arrays, without the 236 MB PNG and its 8.7 s, most of
   a deleting run. The JPEG archive's delete gate (#679) rebuilds the JPEG in

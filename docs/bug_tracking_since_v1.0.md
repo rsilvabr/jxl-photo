@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #682.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #683.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -32,6 +32,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-88 — the decoder's empty clean-ups](#round-88--the-decoders-empty-clean-ups-2026-11-15) | 2026-11-15 | v2.30.2 | #682 (1) |
 | [Round-87 — what each step writes and reads on disk](#round-87--what-each-step-writes-and-reads-on-disk-2026-11-14) | 2026-11-14 | v2.30.2-rc2 | #672–#676, #679–#681 (8) |
 | [Round-86 — the Explorer thumbnail's decode in memory](#round-86--the-explorer-thumbnails-decode-in-memory-2026-11-14) | 2026-11-14 | v2.30.2-rc1 | #671 (1) |
 | [Round-85 — libjxl 0.13: JPEG archives and alpha channels](#round-85--libjxl-013-jpeg-archives-and-alpha-channels-2026-11-14) | 2026-11-14 | v2.30.1-rc2 | #669–#670 (2) |
@@ -105,6 +106,21 @@ were never tagged and never shipped.
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
 
 ---
+
+## Round-88 — the decoder's empty clean-ups (2026-11-15)
+
+Measured while preparing v2.30.2 (each process's own write counter, one 45 MP
+photo): the decoder still wrote the whole TIFF once per ExifTool command, six
+times, and two of those commands had nothing left to do since #681. ExifTool
+writes a whole temporary copy of a TIFF even for a command that changes
+nothing ("0 image files updated": 241 MB written, 0.7 s). Proven on the owner's
+real photos (25 real masters and 25 lossless round trips, old and new decoders
+byte for byte the same; the lossless TIFFs pixel for pixel the originals) and
+on the fixtures (93 TIFFs, default and `--basic`).
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 682 | **The decoder rewrote every single-page TIFF twice for nothing** (since v2.30.2-rc2): `copy_metadata` kept its two `-ifd1:` clean-ups (`Software`, `ImageDescription` on the JPEG preview page) after #681 stopped writing those tags, and ExifTool writes a whole temporary copy of a TIFF for a command that changes nothing — 2 × 241 MB and 1.4 s per 45 MP TIFF | decoder | ✅ Fixed — the two commands are gone (and `copy_metadata`'s `is_multipage`, which only chose whether they ran); every page is still written with `metadata=None, software=''`; TIFFs byte for byte the same; `test_682_the_decoder_runs_no_empty_ifd1_cleanup` (failed before) |
 
 ## Round-87 — what each step writes and reads on disk (2026-11-14)
 
