@@ -114,7 +114,8 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 **Released 2026-11-15.** Supersedes v2.30.2-rc1 and v2.30.2-rc2; the last
 stable release before it is v2.30.1. The code is v2.30.2-rc2's plus one more
-saving in the decoder (round 88, #682). Nothing to do when upgrading.
+saving in the decoder (round 88, #682) and one fix from a review held before
+the release (round 89, #683). Nothing to do when upgrading.
 
 - From [v2.30.2-rc1](#v2302-rc1) (round 86, #671): the Explorer thumbnail is
   made from a decode in memory, not a 270 MB temporary image per output.
@@ -153,6 +154,16 @@ saving in the decoder (round 88, #682). Nothing to do when upgrading.
   same, the lossless ones pixel for pixel the originals, with the same ICC
   profile, byte order, IPTC and XMP) and on the fixtures (93 TIFFs, the
   default strategy and `--basic`).
+- **Also new in the final — a JXL with floating-point samples decodes through
+  the PNG again (#683).** The release went back to draft for a review of
+  rounds 86–88, which found that two of the decodes rc2 moved into memory did
+  not fall back to the PNG when djxl writes no PAM at all — as it does for
+  32-bit float samples (`JxlDecoderSetImageOutBitDepth failed`): the
+  recompressor's `--verify-roundtrip` failed on every float source (its check
+  before a delete kept the source), and a plain recompression of a float file
+  whose colour is an ICC profile failed. Both decode to the PNG again in that
+  case, as in v2.30.1; every other file decodes exactly as before (side by
+  side with rc2 and A/B on real files: the same bytes).
 - Checked for this release: rc2 rebuilt a real library of 8,438 masters
   from their TIFFs, its JPEG-only archives and part of its sRGB copies with
   no error, about 25% more files a minute than the previous full rebuild

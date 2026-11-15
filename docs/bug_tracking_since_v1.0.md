@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #683.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #684.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -32,6 +32,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-89 — the review before v2.30.2](#round-89--the-review-before-v2302-2026-11-15) | 2026-11-15 | v2.30.2 | #683 (1) |
 | [Round-88 — the decoder's empty clean-ups](#round-88--the-decoders-empty-clean-ups-2026-11-15) | 2026-11-15 | v2.30.2 | #682 (1) |
 | [Round-87 — what each step writes and reads on disk](#round-87--what-each-step-writes-and-reads-on-disk-2026-11-14) | 2026-11-14 | v2.30.2-rc2 | #672–#676, #679–#681 (8) |
 | [Round-86 — the Explorer thumbnail's decode in memory](#round-86--the-explorer-thumbnails-decode-in-memory-2026-11-14) | 2026-11-14 | v2.30.2-rc1 | #671 (1) |
@@ -106,6 +107,20 @@ were never tagged and never shipped.
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
 
 ---
+
+## Round-89 — the review before v2.30.2 (2026-11-15)
+
+v2.30.2 went back to draft an hour after its release for an independent review
+of rounds 86–88: the fallbacks of every decode moved into memory, the delete
+gates, the master assembled in one pass, the planning stubs, `_source_tags`,
+`_run_to_memory`, the decoder's preview page, hostile paths. One bug, in two
+places; it was in v2.30.2-rc2 (a test release), and v2.30.2 is published with
+the fix. Every other file decodes as in rc2 (side by side with rc2, A/B on real
+files).
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 683 | **A JXL that djxl writes no PAM for lost the PNG route** (since v2.30.2-rc2): djxl writes no PAM for 32-bit float samples (`JxlDecoderSetImageOutBitDepth failed`, to stdout or to a file) while its PNG writer takes them. #673 and #674 kept the PNG route for a PAM they cannot carry (12-bit) but raised when there was no PAM at all: the recompressor's `--verify-roundtrip` failed on every float source (its check before a `--delete-skipped` delete kept the source), and a plain recompression of a float file whose colour is an ICC profile failed with "djxl: …" — v2.30.1 did all three | `jxl_photo_common.py`, `jxl_recompressor.py` | ✅ Fixed — `_decode_jxl_for_verify` and `_recompress_encode`'s profile probe decode to the PNG, as before #673/#674, when djxl returns no PAM; only that decode's own failure raises (the gates still fail closed). `tests/test_float_samples_png_route.py` (real codecs; 7 of 8 failed before, all pass on v2.30.1) |
 
 ## Round-88 — the decoder's empty clean-ups (2026-11-15)
 
