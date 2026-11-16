@@ -42,7 +42,8 @@ Typical sizes in MB of ProPhoto exports from Capture One (median of 10–20 phot
 - **JPEG ↔ JXL**: lossless, with the bit-exact JPEG back on demand.
 - **Copies made from the masters**: lighter 16-bit JXLs and JPEG/PNG for sharing, with colour conversion, resize and output sharpening fitted to Capture One's presets.
 - **The right distance for each file**: in one run, 8-bit TIFFs and film scans are archived lossless while the rest gets your distance.
-- **Batch work**: folder modes for flat, recursive and Capture One / Lightroom export layouts, parallel workers, SSD staging, [manifests](docs/README_manifest.md) and presets that run unattended.
+- **Batch work**: folder modes for flat, recursive and Capture One / Lightroom export layouts, [manifests](docs/README_manifest.md) and presets that run unattended.
+- **Built for large libraries**: almost all of a run's time goes to the codec — parallel workers capped to the free memory, SSD staging, smart sync that redoes only re-exported photos, images handed between programs in memory and each output written once ([how](docs/performance.md)).
 - **Archive and replace, safely**: `--delete-source` deletes a source only after its output is written, checked and decoded back to the same pixels; every output records which source made it.
 - **Fast Explorer thumbnails in the right colours**, with [jxl-thumb](https://github.com/rsilvabr/jxl-thumb).
 
