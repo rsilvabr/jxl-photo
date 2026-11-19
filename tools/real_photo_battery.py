@@ -2546,6 +2546,38 @@ def header_orientation_check():
           f"bad={bad[:3]}")
 
 
+def verify_each_page_checks(folders):
+    """photo-backup's encode command (its JP-2: --verify-roundtrip, never
+    deleting, its distances) on every TIFF fixture that converts: since
+    v2.31.0 each page is decoded and compared with its TIFF page before it
+    takes its final name. No such TIFF may fail the check, and every JXL
+    written must have been checked (one "Round-trip verified" line each)."""
+    section("Every page verified (--verify-roundtrip without --delete-source)")
+    srcs = [p for folder in folders for p in sorted(folder.rglob("*.tif")) if p.is_file()]
+    vp = B / "verify_each"
+    for i, s in enumerate(srcs):
+        cp(s, vp / f"{i:03d} {s.name}")       # one name may repeat across folders
+    rc, out = run("verify_each", [ENC, vp, "--mode", "1", "--distance", "0.05",
+                                  "--scan-distance", "0", "--eight-bit-distance", "0",
+                                  "--effort", "3", "--no-preflight", "--verify-roundtrip"])
+    jxls = sorted((vp / "converted_jxl").glob("*.jxl"))
+    m = re.search(r"Log saved to: (.+?\.log)\s*$", out, re.M)
+    log = (Path(m.group(1)).read_text(encoding="utf-8", errors="replace")
+           if m and Path(m.group(1)).is_file() else "")
+    verified = [ln for ln in log.splitlines() if "Round-trip verified page" in ln]
+    failed = [ln.split("| ERROR |", 1)[-1].strip() for ln in log.splitlines()
+              if "round-trip verification FAILED" in ln]
+    lossless = sum("(pixel-identical)" in ln for ln in verified)
+    check(f"every page of {len(srcs)} TIFF fixtures passes the check (photo-backup's "
+          f"command, d=0.05/scans d=0/8-bit d=0)",
+          rc == 0 and not failed and len(jxls) >= len(srcs),
+          f"rc={rc} {len(jxls)} JXL, failed={failed[:3]}")
+    check("every JXL written was decoded and compared first (one verified line each)",
+          bool(log) and len(verified) == len(jxls),
+          f"{len(verified)} verified ({lossless} pixel-identical, "
+          f"{len(verified) - lossless} lossy) for {len(jxls)} JXL")
+
+
 def main():
     global B, LOGS
     # The scratch folder's name is Japanese; a redirected console is cp1252.
@@ -2637,6 +2669,12 @@ def main():
                 plan.append((fn, (args.fixtures / folder,), "par"))
             else:
                 print(f"\n(no {folder}/: {what} checks skipped)")
+        # v2.31.0: photo-backup's --verify-roundtrip on every TIFF that converts.
+        plan.append((verify_each_page_checks,
+                     ([args.fixtures / f for f in ("TIFF16", "raw_scan", "TIFF16_varied",
+                                                   "TIFF_scans_varied", "silverfast_xmp",
+                                                   "TIFF_tagless", "TIFF_camera_thumb")
+                       if (args.fixtures / f).is_dir()],), "par"))
         _run_plan(plan, args.jobs)
         # Last: it reads every JXL the sections above wrote.
         header_orientation_check()

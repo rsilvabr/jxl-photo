@@ -449,15 +449,20 @@ def test_verify_checks_every_page_of_a_split(tmp_path, monkeypatch):
     assert src.exists()
 
 
-def test_verify_without_delete_is_a_no_op_with_a_warning(tmp_path):
+def test_verify_without_delete_checks_every_page(tmp_path):
+    """Until v2.30.x this was a no-op with a warning. Since v2.31.0 the flag
+    typed without --delete-source checks every page it writes (photo-backup's
+    encode command; tests/test_verify_each_page.py has the details)."""
     _tiff(tmp_path / "a.tif")
     r = subprocess.run(
         [sys.executable, str(REPO / "jxl_tiff_encoder.py"), str(tmp_path),
          "--mode", "0", "--distance", "0", "--verify-roundtrip"],
         capture_output=True, text=True, timeout=300, stdin=subprocess.DEVNULL)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "no effect without --delete-source" in r.stdout
+    assert "no effect without --delete-source" not in r.stdout
+    assert "Round-trip verification of every page written" in r.stdout
     assert (tmp_path / "a.tif").exists()
+    assert len(list(tmp_path.rglob("*.jxl"))) == 1
 
 
 def test_wrapper_emits_verify_only_alongside_delete(menu, launched, monkeypatch):
@@ -469,7 +474,8 @@ def test_wrapper_emits_verify_only_alongside_delete(menu, launched, monkeypatch)
 
     menu.execute_workflow(_wf(3, advanced_options={"verify_roundtrip": True}), STATUS)
     assert "--verify-roundtrip" not in launched[-1], (
-        "the flag is a delete gate; without --delete-source it must not be sent")
+        "the wizard sends the flag only with --delete-source: without it the "
+        "child would check every page (v2.31.0), and the presets would get slower")
 
 
 # ---------------------------------------------------------------------------

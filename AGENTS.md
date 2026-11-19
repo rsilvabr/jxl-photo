@@ -126,13 +126,17 @@
 The sibling repo `photo-backup` (since its v0.14.0-rc2; JPEG since rc3) runs
 jxl-photo to keep a TIFF or a JPEG as JXL in a backup and to make it again on
 restore, and it reads the marks this repo writes. What it needs is written
-down, item by item (JP-1 to JP-17), in `../photo-backup/docs/jxlphoto_contract.md`
+down, item by item (JP-1 to JP-19), in `../photo-backup/docs/jxlphoto_contract.md`
 (仕様書). In short:
 - `jxl_photo.py encode --version` prints `jxl-photo X.Y.Z` (JP-1); photo-backup
   refuses a version older than its `JXLPHOTO_MIN_VERSION` (2.30.0, the first
   whose `jxl_photo.py` has `_BACKEND_COMMANDS`).
 - `jxl_photo.py encode <TIFF> <folder> --mode 0 --distance D --scan-distance S
-  --eight-bit-distance E --effort N --workers 1 --verify-roundtrip` (JP-2): one
+  --eight-bit-distance E --effort N --workers 1 --verify-roundtrip` (JP-2):
+  every page decoded and compared with its TIFF page before it takes its final
+  name (since v2.31.0, `_VERIFY_EACH_PAGE`: `--verify-roundtrip` without
+  `--delete-source`; a page that fails or cannot be checked is an error and
+  gets no JXL; a deleting run checks in its delete gate only); one
   `.jxl` per page, page 0 `<stem>.jxl` (JP-3); an uncompressed `xml ` box
   before the codestream (JP-4); `jxlphoto-srcsum` = the first 16 hex of the
   SHA-256 of the TIFF's raw SHA-256 digest (JP-5: NEVER change this formula —
@@ -149,6 +153,14 @@ down, item by item (JP-1 to JP-17), in `../photo-backup/docs/jxlphoto_contract.m
   alone in its folder (no `checksums.md5`), rebuilds the original JPEG byte for
   byte (JP-16) — photo-backup keeps a JPEG's JXL only after checking that
   SHA-256, so never put marks into a JPEG's JXL.
+- libjxl's own djxl, stdin to stdout (`djxl - - --output_format jpeg`), rebuilds
+  that JPEG from the transcoder's JXL (JP-18: photo-backup's proof right after
+  JP-15 and its restore of a JPEG — the jbrd archive must be what a plain djxl
+  rebuilds, #669). `jxl_photo.py encode|decode|transcode ARGS` is the backend
+  script run as the main program (`_BACKEND_COMMANDS`, `_run_backend`), and
+  each backend does the same when Python runs it with `runpy.run_module` from
+  its folder (JP-19: photo-backup starts the scripts that way, with its own
+  bytecode cache).
 - `jxl_photo.py decode <folder> <out> --mode 0 --workers 1 --depth-policy
   preserve_original --no-preview` gives exactly one TIFF with the original's
   pages and bit depths (JP-10) and leaves its input alone (JP-11).

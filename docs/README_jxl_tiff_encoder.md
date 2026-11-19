@@ -25,9 +25,10 @@ exiftool     →  https://exiftool.org
 magick       →  https://imagemagick.org (the Explorer thumbnail inside the JXL)
 ```
 
-djxl decodes each output for the round-trip check (`VERIFY_ROUNDTRIP`, on by
-default) and for the Explorer thumbnail; without ImageMagick the thumbnail is
-left out, nothing else changes.
+djxl decodes each output for the round-trip check (before a deletion:
+`VERIFY_ROUNDTRIP`, on by default; or every page with `--verify-roundtrip`) and
+for the Explorer thumbnail; without ImageMagick the thumbnail is left out,
+nothing else changes.
 
 Download, PATH and the checks: [install.md](install.md) — the same tools serve all four scripts.
 
@@ -553,18 +554,28 @@ Options:
                   well: the marker proves the pairing, the round-trip proves
                   the pixels
   --verify-roundtrip
-                  Before deleting a source, decode its JXL and compare it with
-                  the source page. --distance 0: the pixels must match exactly.
-                  Lossy: a brightness + PSNR sanity check that catches a black or
+                  Decode each JXL and compare it with its TIFF page.
+                  --distance 0: the pixels must match exactly. Lossy: a
+                  brightness + PSNR sanity check that catches a black or
                   scrambled encode -- NOT a quality check, since quality loss is
-                  what you asked for. A lossy master that stores its profile
-                  as an ICC blob (ICC_PNG_STRATEGY always/heuristic) cannot be
-                  compared — djxl returns it in linear sRGB — so its TIFF is
-                  kept, and the log says why. Roughly doubles the run. Needs
-                  djxl and imagecodecs. Only affects --delete-source. ON by default
-                  since v2.18.0 (VERIFY_ROUNDTRIP = True): a run that deletes
-                  TIFFs always verifies; set VERIFY_ROUNDTRIP = False at the
-                  top of the script for the old structure-only gate
+                  what you asked for.
+                  Without --delete-source (since v2.31.0): every page is checked
+                  before it takes its final name, and a page that fails, or
+                  cannot be checked, is an error and gets no JXL (an existing
+                  one is left as it was). About a fifth more time on a TIFF run
+                  (+18 % measured on 69 real TIFFs). Until v2.30.x the flag did
+                  nothing without --delete-source.
+                  With --delete-source: the same check gates the deletion.
+                  A lossy master that stores its profile as an ICC blob
+                  (ICC_PNG_STRATEGY always/heuristic) cannot be compared — djxl
+                  returns it in linear sRGB — so the check fails for it (its
+                  TIFF kept, or no JXL without --delete-source), and the log says
+                  why. Needs djxl; imagecodecs too with --delete-source, and
+                  otherwise only for 12-bit and float pages. The delete gate's
+                  check is ON by default since v2.18.0 (VERIFY_ROUNDTRIP =
+                  True): a run that deletes TIFFs always verifies; set
+                  VERIFY_ROUNDTRIP = False at the top of the script for the old
+                  structure-only gate
   --delete-confirm-off  Skip the interactive delete confirmation (for wrappers/
                    automation that already asked the user)
   --export-subfolder NAME

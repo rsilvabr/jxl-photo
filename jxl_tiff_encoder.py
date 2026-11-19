@@ -602,10 +602,11 @@ CLEANUP_XMP_ICC_MARKER = False
 VERIFY_ROUNDTRIP = True
 # Extra gate before DELETE_SOURCE removes a source TIFF: decode the JXL that
 # was just written and compare it against the source page. Costs one full
-# decode per output, so it roughly doubles a DELETING run — worth it exactly
-# when the original is about to stop existing. On by default since v2.18.0
-# (it used to be opt-in); runs that delete nothing never pay for it. False
-# brings back the old, structure-only gate.
+# decode per output (kept in memory since #673: about a fifth more time on a
+# TIFF run, measured 2026-11-19) — worth it exactly when the original is
+# about to stop existing. On by default since v2.18.0 (it used to be
+# opt-in); runs that delete nothing never pay for it. False brings back the
+# old, structure-only gate.
 #
 # _verify_jxl_integrity, which always runs, proves the file is a well-formed,
 # untruncated container with a codestream. It does NOT prove the pixels came
@@ -619,8 +620,13 @@ VERIFY_ROUNDTRIP = True
 #                    cjxl emit near-black images that pass every structural
 #                    check, and that is precisely the failure this catches.
 #
-# Has no effect without DELETE_SOURCE (it is a delete gate); a run that sets it
-# alone says so and carries on. Requires djxl and imagecodecs.
+# This setting is the DELETE gate's switch. Typing --verify-roundtrip WITHOUT
+# --delete-source is another thing (v2.31.0; photo-backup's encode command,
+# its JP-2): every page the run writes is decoded and compared the same way
+# BEFORE it takes its final name, and a page that fails, or cannot be
+# checked, is an error that leaves no JXL (_VERIFY_EACH_PAGE). Requires djxl;
+# imagecodecs too when deleting, otherwise only for a page djxl returns no
+# PAM for (12-bit, float: the PNG route), which fails closed without it.
 
 VERIFY_LOSSY_MIN_MEAN_RATIO = 0.7
 # [VERIFY_ROUNDTRIP, distance > 0] Decoded mean / source mean must stay within
@@ -3789,6 +3795,12 @@ _content_id_cache = {}
 # _mark_sync_same_bytes before anything reads _would_skip; run-scoped.
 _SYNC_SAME_BYTES: set = set()
 
+# True when this run checks every page it writes in convert_one, before the
+# page takes its final name: --verify-roundtrip typed without --delete-source
+# (a deleting run checks in its delete gate instead, never twice). Run state,
+# not a setting: assigned by _configure_run at every run (v2.31.0).
+_VERIFY_EACH_PAGE = False
+
 
 def _sync_same_bytes(tiff_path, final_path) -> bool:
     """Did this run prove that `final_path` was made from the bytes `tiff_path`
@@ -4723,6 +4735,23 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             # (The except handler deletes it via output_dirty.)
             if not _verify_jxl_integrity(write_path):
                 raise RuntimeError("cjxl returned 0 but the output failed the JXL integrity check")
+
+            # --verify-roundtrip without a deletion (_VERIFY_EACH_PAGE, v2.31.0):
+            # the bytes in write_path are the ones that take the final name
+            # (the assembled master, or the temp of the old route; a staging
+            # move later does not change them), so the page is decoded and
+            # compared with its TIFF page HERE, before the swap. A page that
+            # fails — or cannot be checked: _verify_roundtrip_page reads
+            # "could not tell" as a failure — is an error like any other: the
+            # handler below removes the partial output, the TIFF gets no JXL.
+            if _VERIFY_EACH_PAGE:
+                _page_ok, _page_detail = _verify_roundtrip_page(
+                    tiff_path, page_idx, write_path, _dist)
+                if not _page_ok:
+                    raise RuntimeError(f"round-trip verification FAILED on page "
+                                       f"{page_idx}: {_page_detail}")
+                logger.debug(f"  >Round-trip verified page {page_idx} ({_page_detail}) "
+                             f"| {tiff_path.name}")
 
             if _promote_local:
                 # Atomic same-folder swap (see the _promote_local note above):
@@ -6119,13 +6148,17 @@ def build_parser():
                              "marker names the source file, it does not compare the "
                              "pixels.")
     parser.add_argument("--verify-roundtrip", action="store_true",
-                        help="Before deleting a source, decode its JXL and compare it "
-                             "against the source page: pixel-identical for --distance 0, "
-                             "or a brightness+PSNR sanity check for lossy (catches a "
-                             "black/scrambled encode, not quality loss). Roughly doubles "
-                             "the run. Needs djxl and imagecodecs. Only affects "
-                             "--delete-source. On by default (VERIFY_ROUNDTRIP = True); "
-                             "set it to False at the top of the script to turn it off.")
+                        help="Decode each JXL and compare it with its TIFF page: "
+                             "pixel-identical for --distance 0, or a brightness+PSNR "
+                             "sanity check for lossy (catches a black/scrambled encode, "
+                             "not quality loss). Without --delete-source every page is "
+                             "checked before it takes its final name, and a page that "
+                             "fails or cannot be checked is an error (no JXL); with "
+                             "--delete-source the check gates the deletion. One more "
+                             "decode per page. Needs djxl (and imagecodecs when "
+                             "deleting). The delete gate's check is on by default "
+                             "(VERIFY_ROUNDTRIP = True); set it to False at the top of "
+                             "the script to turn it off.")
     parser.add_argument("--delete-confirm-off", action="store_true",
                         help="Skip the interactive delete confirmation. For automation/"
                              "wrappers that already asked the user (DELETE_CONFIRM stays "
@@ -6239,6 +6272,7 @@ def _configure_run(parser, args):
     global MULTIPAGE_TIFF_MODE, OVERWRITE, OVERWRITE_GUARD, PROVENANCE_CHECK
     global SCAN_DISTANCE, SCAN_SCOPE, TEMP2_DIR, THUMBNAIL_MODE, THUMBNAIL_SUFFIX
     global USE_RAM_FOR_PNG, VERIFY_ROUNDTRIP, WARN_DISCARDED_THUMBNAILS
+    global _VERIFY_EACH_PAGE
     if args.input is None:
         parser.error("the following arguments are required: input")
 
@@ -6581,18 +6615,38 @@ def _configure_run(parser, args):
             "passes the structural check. Nothing decodes the archive itself: add "
             "--verify-roundtrip to compare its pixels before the delete.")
 
+    # --verify-roundtrip typed WITHOUT a deletion (photo-backup's encode
+    # command, its JP-2): convert_one decodes every page it writes and
+    # compares it with its TIFF page before the page takes its final name
+    # (v2.31.0). A deleting run checks in its delete gate instead, never
+    # twice; the setting alone (VERIFY_ROUNDTRIP, on by default) gates
+    # deletions only, so a run that deletes nothing never pays for a decode.
+    _VERIFY_EACH_PAGE = bool(args.verify_roundtrip) and not DELETE_SOURCE
+
     # --verify-roundtrip needs tools the rest of the encoder does not. Checked
     # up front, and fatally: a verification that silently could not run would
     # be worse than no verification at all — it gates an irreversible delete.
     _needs_decode = VERIFY_ROUNDTRIP or (PROVENANCE_CHECK == "adopt" and ADOPT_SCAN)
     if _needs_decode and not args.dry_run:
         if not DELETE_SOURCE:
-            # Only for the flag typed by hand: the setting is on by default,
-            # and a run that deletes nothing simply does not need it.
-            if args.verify_roundtrip:
-                logger.warning("--verify-roundtrip has no effect without --delete-source: "
-                               "it is a gate in front of the deletion, not a standalone "
-                               "check. Nothing will be verified.")
+            # The setting alone is not a reason to decode anything here; the
+            # flag typed by hand is: every page is checked (_VERIFY_EACH_PAGE).
+            # Without djxl every page would fail, so it is said once, before
+            # any file. Not imagecodecs: the pages come back as a PAM in
+            # memory (#673); only a page djxl writes no PAM for (12-bit,
+            # float) takes the PNG route that needs it, and that page fails
+            # closed ("could not verify") instead of every TIFF of the run.
+            if _VERIFY_EACH_PAGE:
+                if shutil.which("djxl") is None:
+                    logger.error("This run needs djxl in PATH: --verify-roundtrip decodes "
+                                 "each page it writes to compare it with its TIFF page.")
+                    sys.exit(1)
+                logger.info(
+                    "Round-trip verification of every page written: a lossless page must "
+                    "decode pixel-identical; a lossy one must hold the same image (mean "
+                    f"ratio within {VERIFY_LOSSY_MIN_MEAN_RATIO}x, PSNR >= "
+                    f"{VERIFY_LOSSY_MIN_PSNR} dB). A page that fails, or cannot be "
+                    "checked, is an error and gets no JXL.")
         else:
             if shutil.which("djxl") is None:
                 logger.error("This run needs djxl in PATH: --verify-roundtrip and the "
