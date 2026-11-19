@@ -122,6 +122,47 @@
 - `jxl_photo_common.py` — not a script: the helpers the five share, one copy
   each. It must sit next to them (see "The common module").
 
+## photo-backup depends on this repo (the contract)
+The sibling repo `photo-backup` (since its v0.14.0-rc2; JPEG since rc3) runs
+jxl-photo to keep a TIFF or a JPEG as JXL in a backup and to make it again on
+restore, and it reads the marks this repo writes. What it needs is written
+down, item by item (JP-1 to JP-17), in `../photo-backup/docs/jxlphoto_contract.md`
+(仕様書). In short:
+- `jxl_photo.py encode --version` prints `jxl-photo X.Y.Z` (JP-1); photo-backup
+  refuses a version older than its `JXLPHOTO_MIN_VERSION` (2.30.0, the first
+  whose `jxl_photo.py` has `_BACKEND_COMMANDS`).
+- `jxl_photo.py encode <TIFF> <folder> --mode 0 --distance D --scan-distance S
+  --eight-bit-distance E --effort N --workers 1 --verify-roundtrip` (JP-2): one
+  `.jxl` per page, page 0 `<stem>.jxl` (JP-3); an uncompressed `xml ` box
+  before the codestream (JP-4); `jxlphoto-srcsum` = the first 16 hex of the
+  SHA-256 of the TIFF's raw SHA-256 digest (JP-5: NEVER change this formula —
+  backups already made check it; add a new mark instead); `jxlphoto-pages`,
+  `jxlphoto-page`, `jxlphoto-mpg` on every page of a multipage TIFF (JP-6); the
+  distances by class (JP-7); the TIFF untouched (JP-8); no JXL claiming a TIFF
+  it could not encode (JP-9); the class marks `jxlphoto-scan:` (a scan) and
+  `jxlphoto-origin:tiff8|tiff16`, in the order scan > 8-bit > the rest (JP-17:
+  photo-backup derives from them whether a TIFF's JXL is lossless).
+- `jxl_photo.py transcode <JPEG> <folder> --mode 0 --workers 1 --effort N
+  --force-transcode` writes one `<stem>.jxl`, a lossless JPEG recompression, and
+  exits non-zero for a JPEG it cannot keep losslessly (JP-15); `jxl_photo.py
+  transcode <JXL> <folder> --mode 0 --workers 1 --format jpeg`, with the JXL
+  alone in its folder (no `checksums.md5`), rebuilds the original JPEG byte for
+  byte (JP-16) — photo-backup keeps a JPEG's JXL only after checking that
+  SHA-256, so never put marks into a JPEG's JXL.
+- `jxl_photo.py decode <folder> <out> --mode 0 --workers 1 --depth-policy
+  preserve_original --no-preview` gives exactly one TIFF with the original's
+  pages and bit depths (JP-10) and leaves its input alone (JP-11).
+- With `JXLPHOTO_LOG_DIR` set, nothing is written next to the scripts (JP-12):
+  a backup keeps a copy of this folder's top-level `.py` files (+ README,
+  LICENSE, docs) and runs it from there on restore, so every runtime file must
+  be one of those (JP-13).
+**After changing the encoder, the decoder, the JPEG transcoder, the marks or
+`_BACKEND_COMMANDS`:**
+run photo-backup's contract test against this checkout — `set
+PHOTOBACKUP_JXLPHOTO=<this repo>\jxl_photo.py`, then, in photo-backup,
+`python -m pytest tests/test_jxlphoto_contract.py -v` (about 30 s). A failure
+names its item. A change on purpose to an item: photo-backup changes first.
+
 ## Settings are never hardcoded
 - Every script's user-editable settings live at the TOP of the script
   (`EXPORT_MARKER`, `EXPORT_*_FOLDER`, `DELETE_CONFIRM`, `TEMP2_DIR`, ...).
