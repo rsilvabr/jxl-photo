@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.30.2** (2026-11-15) · [What's new](#whats-new-in-v2302) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.31.0-rc1** (2026-11-20, pre-release; last stable: [v2.30.2](docs/version_history.md#v2302)) · [What's new](#whats-new-in-v2310-rc1) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 **Windows program, no Python needed:** [jxl-photo-exe](https://github.com/rsilvabr/jxl-photo-exe/releases/latest) — unzip and double-click; cjxl/djxl, ExifTool, ImageMagick and jxl-thumb included.
 
@@ -203,15 +203,14 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## What's new in v2.30.2
+## What's new in v2.31.0-rc1
 
-2026-11-15. Everything in the two test releases, rc1 and rc2, plus one more saving in the decoder. Nothing to do when upgrading.
+2026-11-20. A test release (pre-release) of v2.31.0; the last stable release is [v2.30.2](docs/version_history.md#v2302).
 
-- **Copies and decodes take between half and a third of the time.** For a 45 MP photo: a resized JPEG copy 4.5 s instead of 14.1 s, an sRGB JXL copy 10.7 s instead of 20.2 s, decoding back to TIFF 5.6 s instead of 15.8 s. A run with nothing to do reads a few KB of each JXL instead of the whole file.
-- **Far less written to the disk.** Archiving a 45 MP photo writes 79 MB instead of 520 MB, a resized JPEG copy 2.5 MB instead of 209 MB, decoding it back to TIFF 1.2 GB instead of 2.4 GB: the photo goes from one program to the next in memory instead of through a temporary image, and the master is written once.
-- The files come out byte for byte the same. One fix: a resized black-and-white JPEG copy (the infrared page of a film scan) is now marked as a copy, so the next run no longer refuses it.
+- **`--verify-roundtrip` now also checks when nothing is deleted.** In a TIFF → JXL run without `--delete-source`, every page is decoded and compared with its TIFF page before it gets its final name; a page that does not match, or cannot be checked, gets no JXL and the run reports an error. Until now the flag checked only before a deletion and otherwise did nothing. [photo-backup](docs/related_projects.md) uses it for every TIFF it keeps as JXL.
+- **Nothing changes** for runs without the flag, for deleting runs, or for the wizard and its presets. A command line of your own that passes `--verify-roundtrip` without deleting now takes about a fifth longer on TIFFs and needs djxl: see [upgrading](docs/upgrading.md).
 
-[Technical notes](docs/version_history.md#v2302) · [earlier releases, in short](docs/whats_new.md) · [every release](docs/version_history.md#release-history)
+[Technical notes](docs/version_history.md#v2310-rc1) · [earlier releases, in short](docs/whats_new.md) · [every release](docs/version_history.md#release-history)
 
 ---
 

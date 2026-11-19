@@ -1100,8 +1100,10 @@ must-fix / should-fix items and a commit verdict.
 - Commits carry the repo owner's authorship only — **no `Co-Authored-By` or
   `Claude-Session` trailers** (AI assistance is credited in the README's
   Acknowledgments instead, and more than one assistant is used).
-- **Every jxl-photo release updates jxl-photo-exe too** (owner's rule,
-  2026-10-22), in the sibling repo `../jxl-photo-exe`: `JXLPHOTO_TAG` in its
+- **Every STABLE jxl-photo release updates jxl-photo-exe too** (owner's rule,
+  2026-10-22; since 2026-11-20 a test release `-rcN` gets no exe, the owner's
+  call: its notes still point to the latest stable exe), in the sibling repo
+  `../jxl-photo-exe`: `JXLPHOTO_TAG` in its
   `build.py` set to the new tag and `PACKAGE_REVISION` back to 1, its README
   "Current version" line and `docs/version_history.md`, then a tag
   `vX.Y.Z-exe1`: GitHub Actions builds the zip with a build attestation and

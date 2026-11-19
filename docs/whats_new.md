@@ -10,7 +10,8 @@ as [GitHub Releases](https://github.com/rsilvabr/jxl-photo/releases).
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.30.2](version_history.md#v2302)** | 2026-11-15 | Copies and decodes take between half and a third of the time for a 45 MP photo; far less written to the disk (archiving a 45 MP photo: 79 MB instead of 520 MB); the same files byte for byte |
+| **[v2.31.0-rc1](version_history.md#v2310-rc1)** | 2026-11-20 | Pre-release. `--verify-roundtrip` also checks when nothing is deleted: every page of a TIFF → JXL run is compared with its TIFF before it gets its final name |
+| [v2.30.2](version_history.md#v2302) | 2026-11-15 | Copies and decodes take between half and a third of the time for a 45 MP photo; far less written to the disk (archiving a 45 MP photo: 79 MB instead of 520 MB); the same files byte for byte |
 | [v2.30.2-rc2](version_history.md#v2302-rc2) | 2026-11-14 | Pre-release. Copies, decoded TIFFs and the check before a delete without a full-size temporary image; each master written once; planning reads a few KB per JXL; the same files byte for byte |
 | [v2.30.2-rc1](version_history.md#v2302-rc1) | 2026-11-14 | Pre-release. Explorer thumbnails no longer write the whole photo to the temp folder: the same thumbnails, much faster when the temp folder sits on a slow disk |
 | [v2.30.1](version_history.md#v2301) | 2026-11-14 | The wizard's checks read every option the run gets; libjxl 0.13.0 supported: JPEG archives every libjxl rebuilds bit for bit, alpha channels kept |
@@ -41,6 +42,13 @@ as [GitHub Releases](https://github.com/rsilvabr/jxl-photo/releases).
 | [v2.17.0](version_history.md#v2170) | 2026-10-24 | Film scans archived lossless and never recompressed lossy unless asked; they keep what their scanner software needs (whole XMP, private tags); thumbnail pages kept by default, except Capture One's |
 
 Every release since v1.0: [version_history.md](version_history.md#release-history).
+
+## v2.31.0-rc1
+
+2026-11-20. A test release (pre-release) of v2.31.0; the last stable release is [v2.30.2](#v2302).
+
+- **`--verify-roundtrip` now also checks when nothing is deleted.** In a TIFF → JXL run without `--delete-source`, every page is decoded and compared with its TIFF page before it gets its final name; a page that does not match, or cannot be checked, gets no JXL and the run reports an error. Until now the flag checked only before a deletion and otherwise did nothing. [photo-backup](related_projects.md) uses it for every TIFF it keeps as JXL.
+- **Nothing changes** for runs without the flag, for deleting runs, or for the wizard and its presets. A command line of your own that passes `--verify-roundtrip` without deleting now takes about a fifth longer on TIFFs and needs djxl: see [upgrading](upgrading.md).
 
 ## v2.30.2
 

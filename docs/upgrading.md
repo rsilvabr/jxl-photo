@@ -11,6 +11,22 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
+## v2.31.0: `--verify-roundtrip` without `--delete-source` checks every page
+
+- **The TIFF encoder's `--verify-roundtrip`, given without `--delete-source`,
+  now checks.** Up to v2.30.x it logged "has no effect without
+  --delete-source" and checked nothing. From v2.31.0 every page the run
+  writes is decoded and compared with its TIFF page before it takes its final
+  name (lossless: the same pixels; lossy: the same image, by brightness and
+  PSNR). A page that fails, or cannot be checked, is an error: the run exits
+  1 and that page gets no JXL (one already there is left as it was).
+- **What to check:** your own command lines, `.bat` files, scheduled tasks
+  and the wizard's expert flags that pass `--verify-roundtrip` without
+  deleting. They now take about a fifth longer on TIFFs and need djxl on
+  PATH. The wizard sends the flag only together with `--delete-source`, so
+  its presets do not change, and runs that delete are checked exactly as
+  before.
+
 ## v2.30.0: flags are written in full; a PNG named `.jpg` is refused; modes 6/7 with an output folder
 
 - **A shortened flag is refused.** Python's command-line reader used to

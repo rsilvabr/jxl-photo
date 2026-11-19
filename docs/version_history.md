@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.30.2](#v2302)** | 2026-11-15 | Everything in the two test releases: copies, decodes to TIFF and the check before a delete take between half and a third of the time for a 45 MP photo; far less written to the disk (archiving a 45 MP photo: 79 MB instead of 520 MB); planning reads a few KB per JXL; the same files byte for byte; a grey resized JPEG copy marked as one |
+| **[v2.31.0-rc1](#v2310-rc1)** | 2026-11-20 | Pre-release. `--verify-roundtrip` without `--delete-source` checks every page of a TIFF → JXL run before it takes its final name (it used to check only before a deletion); photo-backup's encode command relies on it |
+| [v2.30.2](#v2302) | 2026-11-15 | Everything in the two test releases: copies, decodes to TIFF and the check before a delete take between half and a third of the time for a 45 MP photo; far less written to the disk (archiving a 45 MP photo: 79 MB instead of 520 MB); planning reads a few KB per JXL; the same files byte for byte; a grey resized JPEG copy marked as one |
 | [v2.30.2-rc2](#v2302-rc2) | 2026-11-14 | Pre-release. Resized copies, decoded TIFFs and deleting runs no longer write a full-size temporary image per photo; a new master is written once instead of seven times; planning reads a few KB of each JXL instead of the whole file — the same files, byte for byte; a grey resized JPEG copy is marked as one (round 87, 8 fixes) |
 | [v2.30.2-rc1](#v2302-rc1) | 2026-11-14 | Pre-release. The Explorer thumbnail no longer writes the whole decoded image to the temp folder: the same thumbnails, much faster when the temp folder sits on a slow disk (round 86, 1 fix) |
 | [v2.30.1](#v2301) | 2026-11-14 | Everything in the two test releases: the wizard's checks read every option the run gets; libjxl 0.13.0 supported (JPEG archives every libjxl rebuilds bit for bit, alpha kept) |
@@ -109,6 +110,42 @@ GitHub release notes before v1.8.2:
 Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refactoring.md).
 
 ---
+
+## v2.31.0-rc1
+
+**Released 2026-11-20, a test release (pre-release) of v2.31.0**; the last
+stable release is [v2.30.2](#v2302). One change, in the TIFF encoder. When
+upgrading, only command lines that pass `--verify-roundtrip` without
+`--delete-source` behave differently ([upgrading.md](upgrading.md)).
+
+- **`--verify-roundtrip` without `--delete-source` checks every page.** Up to
+  v2.30.x the flag was only the delete gate's pixel check: given without a
+  deletion, the encoder logged "has no effect without --delete-source …
+  Nothing will be verified" and wrote the JXL unchecked. photo-backup's
+  encode command (its contract item JP-2: `--mode 0 … --workers 1
+  --verify-roundtrip`, never deleting) counted on that check. Now
+  `convert_one` decodes each page it writes (djxl, the PAM in memory, #673)
+  and compares it with its TIFF page before the page takes its final name
+  (`_VERIFY_EACH_PAGE`), with the delete gate's own `_verify_roundtrip_page`:
+  identical pixels for a lossless page; for a lossy one the source's
+  brightness (mean ratio between 0.7 and 1/0.7) and a PSNR of at least
+  20 dB. A page that fails, or cannot be checked (djxl fails, a lossy ICC
+  blob, a 12-bit or float page without imagecodecs), is an error: its partial
+  output is removed, a JXL already there is not replaced, and the run exits
+  1. A deleting run still checks in its gate only, never twice; a run without
+  the flag decodes nothing; the wizard sends the flag only together with
+  `--delete-source`, so its presets do not change.
+- **What it needs:** djxl, checked once before any file (exit 1 without it).
+  imagecodecs is not required up front: only a page djxl writes no PAM for
+  (12-bit, float) takes the PNG route that needs it, and such a page fails
+  closed instead of every TIFF of the run.
+- **Measured** (2026-11-19, 69 real TIFFs — camera exports and film scans —
+  8 at a time, effort 7): the check adds 18 % to the TIFFs' time, and all
+  73 pages pass (28 lossless with identical pixels; 45 lossy, PSNR 49.7 to
+  70.3 dB). The real-photo battery now runs photo-backup's command on every
+  TIFF fixture (91 TIFFs, 107 pages, all verified), and photo-backup ran a
+  backup and a restore of 20 real two-page TIFFs with this code, plus a
+  forced failure.
 
 ## v2.30.2
 
