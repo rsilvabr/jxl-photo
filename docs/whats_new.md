@@ -10,7 +10,8 @@ as [GitHub Releases](https://github.com/rsilvabr/jxl-photo/releases).
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.31.0-rc1](version_history.md#v2310-rc1)** | 2026-11-20 | Pre-release. `--verify-roundtrip` also checks when nothing is deleted: every page of a TIFF → JXL run is compared with its TIFF before it gets its final name |
+| **[v2.31.0-rc2](version_history.md#v2310-rc2)** | 2026-11-20 | Pre-release. sRGB copies converted without ImageMagick or a temporary image: 8–38 % faster depending on the temp folder's disk, the same copies; everything in v2.31.0-rc1 |
+| [v2.31.0-rc1](version_history.md#v2310-rc1) | 2026-11-20 | Pre-release. `--verify-roundtrip` also checks when nothing is deleted: every page of a TIFF → JXL run is compared with its TIFF before it gets its final name |
 | [v2.30.2](version_history.md#v2302) | 2026-11-15 | Copies and decodes take between half and a third of the time for a 45 MP photo; far less written to the disk (archiving a 45 MP photo: 79 MB instead of 520 MB); the same files byte for byte |
 | [v2.30.2-rc2](version_history.md#v2302-rc2) | 2026-11-14 | Pre-release. Copies, decoded TIFFs and the check before a delete without a full-size temporary image; each master written once; planning reads a few KB per JXL; the same files byte for byte |
 | [v2.30.2-rc1](version_history.md#v2302-rc1) | 2026-11-14 | Pre-release. Explorer thumbnails no longer write the whole photo to the temp folder: the same thumbnails, much faster when the temp folder sits on a slow disk |
@@ -42,6 +43,15 @@ as [GitHub Releases](https://github.com/rsilvabr/jxl-photo/releases).
 | [v2.17.0](version_history.md#v2170) | 2026-10-24 | Film scans archived lossless and never recompressed lossy unless asked; they keep what their scanner software needs (whole XMP, private tags); thumbnail pages kept by default, except Capture One's |
 
 Every release since v1.0: [version_history.md](version_history.md#release-history).
+
+## v2.31.0-rc2
+
+2026-11-20. The second test release (pre-release) of v2.31.0; the last stable release is [v2.30.2](#v2302). Nothing to do when upgrading. Everything in [v2.31.0-rc1](#v2310-rc1) is in it.
+
+- **sRGB copies are faster.** A colour-converted copy of a master (`--output-icc`, such as the sRGB copy) no longer goes through ImageMagick and a temporary image of up to 270 MB per photo: for the usual working spaces (sRGB, AdobeRGB, ProPhoto) the recompressor converts the colour itself, with the same math. On 60 photos: 8 % faster with the temp folder on a fast SSD, about a third faster on a slower one.
+- **The copies are the same:** at most 1 level apart in 65 535, the same quality and size. Copies you already have are not redone. Other profiles, resized or sharpened copies keep ImageMagick; `FAST_COLOR_CONVERSION = False` uses it for everything.
+
+[Technical notes](version_history.md#v2310-rc2)
 
 ## v2.31.0-rc1
 

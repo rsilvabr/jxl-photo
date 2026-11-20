@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.31.0-rc1** (2026-11-20, pre-release; last stable: [v2.30.2](docs/version_history.md#v2302)) · [What's new](#whats-new-in-v2310-rc1) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.31.0-rc2** (2026-11-20, pre-release; last stable: [v2.30.2](docs/version_history.md#v2302)) · [What's new](#whats-new-in-v2310-rc2) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 **Windows program, no Python needed:** [jxl-photo-exe](https://github.com/rsilvabr/jxl-photo-exe/releases/latest) — unzip and double-click; cjxl/djxl, ExifTool, ImageMagick and jxl-thumb included.
 
@@ -45,7 +45,8 @@ Typical sizes in MB of ProPhoto exports from Capture One (median of 10–20 phot
 - **Batch work**: folder modes for flat, recursive and Capture One / Lightroom export layouts, [manifests](docs/README_manifest.md) and presets that run unattended.
 - **Built for large libraries**: almost all of a run's time goes to the codec — parallel workers capped to the free memory, SSD staging, smart sync that redoes only re-exported photos, images handed between programs in memory and each output written once ([how](docs/performance.md)).
 - **Archive and replace, safely**: `--delete-source` deletes a source only after its output is written, checked and decoded back to the same pixels; every output records which source made it.
-- **Fast Explorer thumbnails in the right colours**, with [jxl-thumb](https://github.com/rsilvabr/jxl-thumb).
+- **Explorer thumbnails at once, in the right colours**, with [jxl-thumb](https://github.com/rsilvabr/jxl-thumb): the masters and copies made here carry a small preview that it shows instantly, even for a lossless 45 MP master; the wizard adds one to the JXLs you already have.
+- **A backup made for these files**, with [photo-backup](https://github.com/rsilvabr/photo-backup): it backs up the JXL masters, the originals and your edits, leaves out the copies jxl-photo can make again, and can keep TIFFs and JPEGs as JXL in the backup — each one checked before it counts, a JPEG back byte for byte.
 
 | Script | What it does |
 |--------|--------------|
@@ -203,14 +204,14 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## What's new in v2.31.0-rc1
+## What's new in v2.31.0-rc2
 
-2026-11-20. A test release (pre-release) of v2.31.0; the last stable release is [v2.30.2](docs/version_history.md#v2302).
+2026-11-20. The second test release (pre-release) of v2.31.0; the last stable release is [v2.30.2](docs/version_history.md#v2302).
 
-- **`--verify-roundtrip` now also checks when nothing is deleted.** In a TIFF → JXL run without `--delete-source`, every page is decoded and compared with its TIFF page before it gets its final name; a page that does not match, or cannot be checked, gets no JXL and the run reports an error. Until now the flag checked only before a deletion and otherwise did nothing. [photo-backup](docs/related_projects.md) uses it for every TIFF it keeps as JXL.
-- **Nothing changes** for runs without the flag, for deleting runs, or for the wizard and its presets. A command line of your own that passes `--verify-roundtrip` without deleting now takes about a fifth longer on TIFFs and needs djxl: see [upgrading](docs/upgrading.md).
+- **sRGB copies are faster.** A colour-converted copy of a master (`--output-icc`, such as the sRGB copy) no longer goes through ImageMagick and a temporary image of up to 270 MB per photo: for the usual working spaces (sRGB, AdobeRGB, ProPhoto) the recompressor converts the colour itself, with the same math. On 60 photos: 8 % faster with the temp folder on a fast SSD, about a third faster on a slower one. The copies are the same — at most 1 level apart in 65 535, the same quality and size — and the ones you already have are not redone.
+- **`--verify-roundtrip` now also checks when nothing is deleted** (since v2.31.0-rc1). In a TIFF → JXL run without `--delete-source`, every page is compared with its TIFF page before it gets its final name. Runs without the flag, deleting runs and the wizard's presets do not change; a command line of your own that passes it without deleting takes about a fifth longer on TIFFs and needs djxl: see [upgrading](docs/upgrading.md).
 
-[Technical notes](docs/version_history.md#v2310-rc1) · [earlier releases, in short](docs/whats_new.md) · [every release](docs/version_history.md#release-history)
+[Technical notes](docs/version_history.md#v2310-rc2) · [earlier releases, in short](docs/whats_new.md) · [every release](docs/version_history.md#release-history)
 
 ---
 
@@ -221,9 +222,9 @@ I am sharing these scripts because getting all of this to work correctly was une
 Related projects, all mine ([more on each](docs/related_projects.md)):
 
 - [jxl-photo-exe](https://github.com/rsilvabr/jxl-photo-exe) — this toolkit as a Windows program, no Python needed. The scripts inside are byte for byte those of a release; the Python version here is the one I run every day and remains the more tested.
-- [jxl-thumb](https://github.com/rsilvabr/jxl-thumb) — fast, colour-managed JXL thumbnails in Windows Explorer.
+- [jxl-thumb](https://github.com/rsilvabr/jxl-thumb) — fast, colour-managed JXL thumbnails in Windows Explorer; it shows the preview this toolkit stores in each file.
 - [tiff-workflow](https://github.com/rsilvabr/tiff-workflow) — a simpler, TIFF-only alternative: lossless ZIP recompression, no libjxl needed, much less compression.
-- [photo-backup](https://github.com/rsilvabr/photo-backup) — backs up what this toolkit leaves you with: the JXL masters, the originals of the exported photos and your edits.
+- [photo-backup](https://github.com/rsilvabr/photo-backup) — backs up what this toolkit leaves you with: the JXL masters, the originals of the exported photos and your edits. It runs jxl-photo to keep TIFFs and JPEGs as JXL in the backup and to give them back on restore ([how much smaller](https://github.com/rsilvabr/photo-backup#smaller-with-jxl-photo)).
 
 ---
 

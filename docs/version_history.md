@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.31.0-rc1](#v2310-rc1)** | 2026-11-20 | Pre-release. `--verify-roundtrip` without `--delete-source` checks every page of a TIFF → JXL run before it takes its final name (it used to check only before a deletion); photo-backup's encode command relies on it |
+| **[v2.31.0-rc2](#v2310-rc2)** | 2026-11-20 | Pre-release. sRGB copies (`--output-icc`) converted in Python and handed to cjxl in memory: 8–38 % faster depending on the temp folder's disk, the same copies; everything in v2.31.0-rc1 |
+| [v2.31.0-rc1](#v2310-rc1) | 2026-11-20 | Pre-release. `--verify-roundtrip` without `--delete-source` checks every page of a TIFF → JXL run before it takes its final name (it used to check only before a deletion); photo-backup's encode command relies on it |
 | [v2.30.2](#v2302) | 2026-11-15 | Everything in the two test releases: copies, decodes to TIFF and the check before a delete take between half and a third of the time for a 45 MP photo; far less written to the disk (archiving a 45 MP photo: 79 MB instead of 520 MB); planning reads a few KB per JXL; the same files byte for byte; a grey resized JPEG copy marked as one |
 | [v2.30.2-rc2](#v2302-rc2) | 2026-11-14 | Pre-release. Resized copies, decoded TIFFs and deleting runs no longer write a full-size temporary image per photo; a new master is written once instead of seven times; planning reads a few KB of each JXL instead of the whole file — the same files, byte for byte; a grey resized JPEG copy is marked as one (round 87, 8 fixes) |
 | [v2.30.2-rc1](#v2302-rc1) | 2026-11-14 | Pre-release. The Explorer thumbnail no longer writes the whole decoded image to the temp folder: the same thumbnails, much faster when the temp folder sits on a slow disk (round 86, 1 fix) |
@@ -111,9 +112,70 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.31.0-rc2
+
+**Released 2026-11-20, the second test release (pre-release) of v2.31.0**;
+the last stable release is [v2.30.2](#v2302). Everything in
+[v2.31.0-rc1](#v2310-rc1) is in it. One change, in the recompressor; nothing
+to do when upgrading.
+
+- **An sRGB copy's colour is converted in Python.** An `--output-icc`
+  derivative was converted by ImageMagick, which wrote a 16-bit PNG of up to
+  270 MB per 45 MP master into `TEMP_DIR` for cjxl to read back: 35 % of an
+  sRGB run's CPU, and on a slow temp disk that PNG set the pace of the whole
+  run. Now, when the
+  master's profile and the target are both plain matrix/shaper profiles (a
+  3×3 matrix with gamma or sRGB-form curves — `curv` with 0 or 1 entry,
+  `para` types 0 and 3, no LUT tag: Pillow's sRGB, AdobeRGB, ProPhoto and
+  the other working spaces), `_derive_pixels` converts the decoded master
+  itself with littleCMS's own math for such a pair — what ImageMagick runs
+  for `-intent Relative -black-point-compensation`, each curve evaluated as
+  cmsgamma.c does — and hands the PNG to cjxl on its standard input
+  (`make_png_bytes`, the encoder's, now in the common module). Profiles it
+  does not reproduce (table curves, scanner LUT profiles, curves that do not
+  start at black), a resize, a sharpening, a grey master and a lossy ICC
+  blob keep ImageMagick. `FAST_COLOR_CONVERSION = False` (top of
+  `jxl_recompressor.py`, or the settings overlay) uses ImageMagick for
+  everything. The end of the run says how many copies took each route
+  (`Colour conversion: N in Python, M with ImageMagick`).
+- **How it stays fast inside 25 workers** — three choices, each measured:
+  the target curve is read from a table of 2^20 entries indexed by the square
+  root of the linear value (a `pow` per sample made the run slower than
+  ImageMagick: the threads waited on each other); the tables are built once
+  per run and shared by every worker (built per file, 24 workers' copies did
+  not fit in the CPU's cache and the run gained nothing); the image is
+  converted in chunks of 65 536 pixels with its buffers allocated once. The
+  PNG a worker holds while it waits for a cjxl slot counts in the memory
+  budget (8 bytes per pixel).
+- **The same copies.** On 60 real masters the conversion is never more than
+  1 apart in 65 535 from ImageMagick's (1.56 % of 6.8 billion samples at 1).
+  The encoded copies have the same quality (PSNR against the reference
+  conversion equal to 0.01 dB) and the same size (43 939 KB against
+  43 940 KB on 5 masters). Near black, a colour outside the target's gamut
+  converted to a pure-gamma target (AdobeRGB) can differ by 2 or 3 levels,
+  where ImageMagick's own result strays from the exact computation too; an
+  sRGB target is not affected. Copies already made are not redone: the
+  recipe they record is the same.
+- **Measured** (60 masters of a real library, sRGB copies at d=0.7 e7,
+  30 workers asked, 23–28 after the memory cap; rc1 and rc2 one after the
+  other): 133 → 123 s with the temp folder on an NVMe drive (−8 %),
+  176–196 → 121 s on a SATA SSD (−31 to −38 %), 16 % less CPU. ImageMagick's
+  CPU fell from 1 370 to 210 s (what is left is the Explorer thumbnails), the
+  Python process's rose from 55 to 400 s, and cjxl took 9 % more (it shares
+  the memory and the caches with the conversion).
+- **Tests:** `tests/test_fast_colour_conversion.py` (36: the profiles
+  accepted and refused; the conversion against ImageMagick on every 16-bit
+  value and on the whole out-of-gamut RGB cube; chunking; real runs both
+  ways at d=0 and d=1; alpha; the fallback to ImageMagick after a failure;
+  the tables built once per run; the memory budget). The real-photo battery
+  converts real masters both ways and compares them (182 checks).
+
+AGENTS.md now names photo-backup's contract items JP-1 to JP-21.
+
 ## v2.31.0-rc1
 
-**Released 2026-11-20, a test release (pre-release) of v2.31.0**; the last
+**Released 2026-11-20, a test release (pre-release) of v2.31.0**,
+superseded by [v2.31.0-rc2](#v2310-rc2) the same day; the last
 stable release is [v2.30.2](#v2302). One change, in the TIFF encoder. When
 upgrading, only command lines that pass `--verify-roundtrip` without
 `--delete-source` behave differently ([upgrading.md](upgrading.md)).

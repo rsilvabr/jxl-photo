@@ -53,6 +53,7 @@ story by theme.
 | [v2.30.1](version_history.md#v2301-rc1) | The wizard's JPEG ↔ JXL count: one `lstat` per file, each folder resolved once | as fast as before v2.30.0: 80 000 files, 9.0 → 2.4 s |
 | [v2.30.2](version_history.md#v2302-rc2) | Full-size decodes stay in memory: the thumbnail, copies, decoded TIFFs, the checks before a delete | resized JPEG copy of a 45 MP master: 14.1 → 4.5 s |
 | [v2.30.2](version_history.md#v2302) | A new master written once instead of seven times; planning reads a stub of each JXL; a decoded TIFF rewritten fewer times | archiving writes 79 MB instead of 520; decoding 15.8 → 5.6 s |
+| [v2.31.0-rc2](version_history.md#v2310-rc2) | sRGB derivative: colour converted in Python, image to cjxl in memory | 60 masters, sRGB copies at d=0.7 e7: 133 → 123 s (temp folder on an NVMe drive), 176–196 → 121 s (on a SATA SSD); 16 % less CPU |
 
 ## The starting design
 
@@ -271,6 +272,29 @@ With the temp folder on an SSD that had slowed to about 45 MB/s, the thumbnail's
 decode alone held a rebuild of masters to 7 photos a minute, against 34 with the
 temp folder on an NVMe drive; six thumbnails took 262.5 s, now 7.4 s. On the
 NVMe drive their time did not change.
+
+### The sRGB copy's colour conversion in Python
+
+In an sRGB derivative run (`--output-icc`) ImageMagick took 35 % of the CPU,
+and its temporary 16-bit PNG (up to 270 MB per 45 MP master) set the pace of
+the whole run when the temp folder was on a slow SSD. Since v2.31.0-rc2, when
+the master's profile and the target are both plain matrix/shaper profiles
+(gamma or sRGB-form curves: ProPhoto, AdobeRGB, sRGB), the conversion runs in
+numpy inside the worker with littleCMS's own math and the PNG goes to cjxl on
+its standard input. Three choices were each measured: the target curve is read
+from a table indexed by the square root of the linear value (`pow` per sample
+made the run slower than ImageMagick); the tables are built once per run and
+shared by every worker (per file, 24 workers' copies did not fit in the CPU
+cache); the image is converted in chunks of 65 536 pixels (smaller chunks made
+the threads wait on the GIL). The result is never more than 1 apart in 65 535
+from ImageMagick's on real photos. Other profiles, a resize or a sharpening keep
+ImageMagick. Measured on 60 real masters, sRGB copies at d=0.7 e7 (30 workers
+asked, 23–28 after the memory cap), v2.31.0-rc1 and rc2 one after the other:
+133 → 123 s with the temp folder on an NVMe drive (−8 %), 176–196 → 121 s on a
+SATA SSD (−31 to −38 %), 16 % less CPU; the same quality (40.894 dB against the
+reference conversion, both) and the same sizes. ImageMagick's share fell from
+1 370 to 210 CPU-seconds (the Explorer thumbnails); cjxl took 9 % more, sharing
+the memory and the caches with the conversion.
 
 ### A master written once
 

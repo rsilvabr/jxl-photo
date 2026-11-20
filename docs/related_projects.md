@@ -8,7 +8,7 @@ This Python version, the one I run on my own archive every day, remains by far t
 
 ## Fast JXL thumbnails in Explorer
 
-[jxl-thumb](https://github.com/rsilvabr/jxl-thumb) is a Windows thumbnail provider for the archives this toolkit writes (and any other JPEG XL). It reads only the small 1:8 image a lossy JXL stores at the start of the file and converts it to sRGB, so Explorer thumbnails come out about 40× faster than with the Microsoft extension on 25–45 MP masters (the preview pane about 14×), with the right colours for ProPhoto and Adobe RGB. Existing files work as they are; install is per user, no admin rights.
+[jxl-thumb](https://github.com/rsilvabr/jxl-thumb) is a Windows thumbnail provider for the archives this toolkit writes (and any other JPEG XL). It reads only the small 1:8 image a lossy JXL stores at the start of the file and converts it to sRGB, so Explorer thumbnails come out about 40× faster than with the Microsoft extension on 25–45 MP masters (the preview pane about 14×), with the right colours for ProPhoto and Adobe RGB. Existing files work as they are; install is per user, no admin rights. The two are made to work together: when jxl-thumb is installed, the masters and copies this toolkit writes carry a small sRGB preview in their own box, which jxl-thumb shows at once — a lossless master, which has no small image of its own, included — and the wizard's menu 6 adds that preview to JXLs you already have.
 
 ## A simpler, TIFF-only alternative
 
@@ -31,5 +31,7 @@ A 45 MP photo (medians, MB):
 ## Selective backup (photo-backup)
 
 [photo-backup](https://github.com/rsilvabr/photo-backup) backs up what this toolkit leaves you with. For every folder that has an export folder it copies the exports (the JXL master instead of the TIFF), the originals of the exported photos (RAW, camera JPEG, sidecars) and your Capture One / NX Studio edits, mirroring the folder tree on the destination. It leaves out the outtakes and the copies jxl-photo can make again from the master (sRGB, phone). The source is only read, nothing on the destination is ever deleted, and a later run can verify that the backup still matches.
+
+It also runs jxl-photo itself: a developed TIFF, a film scan or a JPEG that stays as it is on your disk can be kept as JXL in the backup, each one proven before it counts (every TIFF page decoded and compared, a JPEG rebuilt byte for byte), and the restore gives the original formats back with the copy of jxl-photo the backup keeps. What photo-backup relies on is written down item by item (its contract, JP-1 to JP-21) and tested against every jxl-photo change. [How much smaller the backup gets](https://github.com/rsilvabr/photo-backup#smaller-with-jxl-photo).
 
 It was written around one folder layout: the originals beside an export folder (`_EXPORT`, `Lightroom_Export`, … — any name containing "export"), the exports inside it. Run its dry-run first and read what it would copy; a different layout may need its settings, or the script, adapted.
