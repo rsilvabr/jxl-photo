@@ -38,6 +38,7 @@ import sys
 import tempfile
 import time
 import uuid
+import zlib
 from datetime import datetime
 from pathlib import Path
 
@@ -2737,6 +2738,309 @@ def _pam_array(data):
                       count=w * h * depth, offset=start)
     a = a.astype(np.uint8 if maxval == 255 else np.uint16)   # native, writable
     return a.reshape(h, w) if depth == 1 else a.reshape(h, w, depth)
+
+
+# Rows filtered and compressed at a time by make_png_bytes (#569).
+_PNG_BLOCK_ROWS = 256
+
+
+def make_png_bytes(img, icc_bytes=None):
+    """Encodes a 16-bit numpy array as PNG in memory (pure Python, no temp file)."""
+    import numpy as np
+
+    if img.dtype.kind == 'f':
+        raise ValueError(f"Unsupported TIFF dtype: {img.dtype}. Float TIFFs are not supported by make_png_bytes.")
+    if img.dtype not in (np.uint8, np.uint16):
+        raise ValueError(f"Unsupported TIFF dtype: {img.dtype}. Expected uint8 or uint16.")
+
+    if img.ndim == 2:
+        img = img[:, :, np.newaxis]
+    if img.ndim != 3:
+        raise ValueError(f"Unsupported image shape: {img.shape}. Expected 2D or 3D array.")
+
+    h, w, c = img.shape
+    if c == 1:
+        color_type = 0
+    elif c == 2:
+        color_type = 4  # gray + alpha (LA)
+    elif c == 3:
+        color_type = 2
+    elif c == 4:
+        color_type = 6
+    else:
+        raise ValueError(f"Unsupported channel count: {c}. Expected 1, 2 (LA), 3, or 4.")
+
+    def chunk(name, data):
+        p = name + data
+        return struct.pack(">I", len(data)) + p + struct.pack(">I", zlib.crc32(p) & 0xFFFFFFFF)
+
+    # Write PNG at the input bit depth. The main encode path passes uint16 data;
+    # the cautious ICC test passes uint8 data and needs a true 8-bit PNG to test
+    # the 8-bit path.
+    bit_depth = 8 if img.dtype == np.uint8 else 16
+
+    # Streamed (#569): rows go through ONE zlib stream block by block, so
+    # neither the big-endian copy of the image nor the raw filtered buffer
+    # ever exists whole, and the file is assembled with a single join. The
+    # bytes are identical to zlib.compress(raw, 0) over the whole buffer —
+    # 45 MP used to cost ~1-1.4 GB of transient Python memory per worker.
+    # One compress() call per block, the filter byte (0) and the big-endian
+    # samples laid out by numpy: a Python loop per row held the GIL and made
+    # four parallel workers 2.5x slower than one (measured on 45 MP).
+    # Level 0 (stored), not 1: the PNG only carries the pixels to cjxl, and
+    # 16-bit photo data barely compresses (5.93 vs 6.00 bytes per pixel on a
+    # 43 MP Z8 export) while level 1 cost 6.55 s of Python per file against
+    # 0.40 s; peak memory 11.97 vs 12.12 B/px, inside _PYTHON_BYTES_PER_PIXEL
+    # (a page of 4 channels peaks higher: _python_bytes_per_pixel)
+    # (refactor B2, measured 2026-11-13).
+    comp = zlib.compressobj(0)
+    idat = []
+    row_bytes = w * c * (2 if bit_depth == 16 else 1)
+    for y in range(0, h, _PNG_BLOCK_ROWS):
+        block = img[y:y + _PNG_BLOCK_ROWS]
+        n = block.shape[0]
+        filtered = np.empty((n, row_bytes + 1), dtype=np.uint8)
+        filtered[:, 0] = 0
+        samples = block.astype(">u2") if bit_depth == 16 else block
+        filtered[:, 1:] = np.ascontiguousarray(samples).reshape(n, -1).view(np.uint8)
+        piece = comp.compress(filtered)
+        if piece:
+            idat.append(piece)
+    idat.append(comp.flush())
+    idat_len = sum(len(p) for p in idat)
+    idat_crc = zlib.crc32(b"IDAT")
+    for piece in idat:
+        idat_crc = zlib.crc32(piece, idat_crc)
+
+    parts = [b"\x89PNG\r\n\x1a\n",
+             chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, bit_depth, color_type, 0, 0, 0))]
+    if icc_bytes:
+        parts.append(chunk(b"iCCP", b"ICC Profile\x00\x00" + zlib.compress(icc_bytes)))
+    parts.append(struct.pack(">I", idat_len) + b"IDAT")
+    parts.extend(idat)
+    parts.append(struct.pack(">I", idat_crc & 0xFFFFFFFF))
+    parts.append(chunk(b"IEND", b""))
+    return b"".join(parts)
+
+
+# ── Matrix/shaper colour conversion (plan 261120 srgb-fast) ──────────────────
+# The recompressor's --output-icc conversion without ImageMagick, for two RGB
+# display profiles made of a 3x3 matrix and analytic tone curves (Pillow's
+# sRGB, the toolkit's AdobeRGB, ProPhoto/Elle working spaces). The math is
+# littleCMS's for such a pair -- what ImageMagick runs for
+# `-intent Relative -black-point-compensation` -- each curve evaluated as
+# cmsgamma.c does. Measured 2026-11-20 against ImageMagick 7.1.2 Q16-HDRI on
+# real masters: never more than 1 apart in 65535. Anything this code does not
+# reproduce returns None and the caller keeps ImageMagick: a table curve, a
+# LUT tag, another curve form, a curve that does not start at black
+# (black-point compensation would move it). Never widen what is accepted
+# without the same proof against ImageMagick.
+
+_ICC_LUT_TAGS = frozenset(("A2B0", "A2B1", "A2B2", "B2A0", "B2A1", "B2A2",
+                           "D2B0", "D2B1", "D2B2", "D2B3",
+                           "B2D0", "B2D1", "B2D2", "B2D3"))
+
+# Pixels converted at a time by _convert_matrix_shaper (measured with 24
+# threads converting at once: smaller chunks made them wait on the GIL,
+# larger ones missed the CPU cache).
+_CONVERT_CHUNK_PIXELS = 65536
+
+# The target curve is read from a table of 2**_INVERSE_TABLE_BITS entries
+# indexed by sqrt(linear): pow() per sample cost ~4x the CPU and made the
+# workers wait on each other (plan 261120 srgb-fast, measured).
+_INVERSE_TABLE_BITS = 20
+
+
+def _icc_tag_table(icc: bytes):
+    """{signature: tag bytes} of an ICC profile, or None when the tag table
+    or a tag does not fit inside it."""
+    if len(icc) < 132:
+        return None
+    count = struct.unpack(">I", icc[128:132])[0]
+    if count > 1000 or 132 + 12 * count > len(icc):
+        return None
+    tags = {}
+    for i in range(count):
+        sig, off, size = struct.unpack(">4sII", icc[132 + 12 * i:144 + 12 * i])
+        if size < 8 or off + size > len(icc):
+            return None
+        tags[sig.decode("latin-1")] = icc[off:off + size]
+    return tags
+
+
+def _icc_s15(raw: bytes) -> float:
+    return struct.unpack(">i", raw)[0] / 65536.0
+
+
+def _icc_analytic_curve(tag: bytes):
+    """(littleCMS curve type, parameters) of a tone-curve tag this code
+    reproduces, or None. A curv with no entry is the identity and with one
+    entry a gamma (u8Fixed8): littleCMS type 1. A para of ICC function type 0
+    is a gamma (type 1), of type 3 the sRGB form (type 4: (aX+b)^g for X >= d,
+    cX below). Tables and the other para forms: None."""
+    kind = tag[:4]
+    if kind == b"curv" and len(tag) >= 12:
+        n = struct.unpack(">I", tag[8:12])[0]
+        if n == 0:
+            return 1, (1.0,)
+        if n == 1 and len(tag) >= 14:
+            return 1, (struct.unpack(">H", tag[12:14])[0] / 256.0,)
+        return None
+    if kind == b"para" and len(tag) >= 12:
+        ftype = struct.unpack(">H", tag[8:10])[0]
+        count = {0: 1, 3: 5}.get(ftype)
+        if count is None or len(tag) < 12 + 4 * count:
+            return None
+        params = tuple(_icc_s15(tag[12 + 4 * i:16 + 4 * i]) for i in range(count))
+        return (1 if ftype == 0 else 4), params
+    return None
+
+
+def _lcms_curve_forward(kind, p, x):
+    """A tone curve from encoded to linear, as cmsgamma.c evaluates its
+    types 1 and 4 (x: a float array in [0, 1])."""
+    import numpy as np
+    if kind == 1:
+        return np.power(x, p[0])
+    e = p[1] * x + p[2]
+    return np.where(x >= p[4], np.power(np.maximum(e, 0.0), p[0]), x * p[3])
+
+
+def _lcms_curve_inverse(kind, p, y):
+    """The inverse of _lcms_curve_forward, as cmsgamma.c evaluates its types
+    -1 and -4 (y: a float array already clipped to [0, 1])."""
+    import numpy as np
+    if kind == 1:
+        return np.power(y, 1.0 / p[0])
+    e = p[1] * p[4] + p[2]
+    disc = 0.0 if e < 0 else e ** p[0]
+    return np.where(y >= disc, (np.power(y, 1.0 / p[0]) - p[2]) / p[1], y / p[3])
+
+
+def _matrix_shaper_profile(icc: bytes):
+    """(RGB->XYZ matrix, three (kind, params) curves) of an RGB display
+    profile made of colorants and analytic tone curves only, or None (see the
+    block comment above). Never raises."""
+    import numpy as np
+    try:
+        if (len(icc) < 132 or icc[36:40] != b"acsp" or icc[16:20] != b"RGB "
+                or icc[20:24] != b"XYZ "):
+            return None
+        tags = _icc_tag_table(icc)
+        if tags is None or _ICC_LUT_TAGS & set(tags):
+            return None
+        cols = []
+        for sig in ("rXYZ", "gXYZ", "bXYZ"):
+            tag = tags.get(sig)
+            if tag is None or tag[:4] != b"XYZ " or len(tag) < 20:
+                return None
+            cols.append([_icc_s15(tag[8 + 4 * i:12 + 4 * i]) for i in range(3)])
+        curves = []
+        for sig in ("rTRC", "gTRC", "bTRC"):
+            tag = tags.get(sig)
+            curve = _icc_analytic_curve(tag) if tag is not None else None
+            if curve is None:
+                return None
+            kind, p = curve
+            if not np.isfinite(p).all() or p[0] <= 0:
+                return None
+            if kind == 4 and (p[1] <= 0 or p[3] <= 0 or p[4] < 0):
+                return None
+            if float(_lcms_curve_forward(kind, p, np.zeros(1))[0]) != 0.0:
+                return None
+            curves.append(curve)
+        matrix = np.array(cols, dtype=np.float64).T
+        if not np.isfinite(matrix).all() or abs(np.linalg.det(matrix)) < 1e-6:
+            return None
+        return matrix, curves
+    except (struct.error, ValueError, IndexError, OverflowError, ZeroDivisionError):
+        return None
+
+
+def _lcms_inverse_table(kind, p):
+    """The target curve as a uint16 table: entry i is the 16-bit level of the
+    linear value (i / (N - 1))**2, N = 2**_INVERSE_TABLE_BITS, rounded half up
+    like ImageMagick's 16-bit export. Read at int(sqrt(linear) * (N - 1) + 0.5)
+    (_convert_matrix_shaper): measured on real masters, never more than 1 apart
+    from ImageMagick's own result."""
+    import numpy as np
+    n = 1 << _INVERSE_TABLE_BITS
+    s = np.arange(n, dtype=np.float64) / (n - 1)
+    x = _lcms_curve_inverse(kind, p, s * s)
+    return np.clip(np.floor(x * 65535.0 + 0.5), 0, 65535).astype(np.uint16)
+
+
+def _matrix_shaper_transform(src_icc: bytes, dst_icc: bytes):
+    """What _convert_matrix_shaper needs to take 16-bit samples from the
+    profile src_icc into dst_icc -- (float32 matrix already multiplied by the
+    square of the target tables' index scale, float32 tables of the source
+    curves, uint16 tables of the target curves) -- or None when either profile
+    is not one _matrix_shaper_profile accepts. A curve shared by the three
+    channels is tabulated once. Build it once per run and share it (the
+    recompressor's _colour_transform): ~2.3 MB of tables that every worker
+    reads, which must stay in the CPU cache."""
+    import numpy as np
+    src, dst = _matrix_shaper_profile(src_icc), _matrix_shaper_profile(dst_icc)
+    if src is None or dst is None:
+        return None
+    top = float((1 << _INVERSE_TABLE_BITS) - 1)
+    matrix = (np.linalg.inv(dst[0]) @ src[0] * (top * top)).astype(np.float32)
+    x = np.arange(65536, dtype=np.float64) / 65535.0
+    forward, inverse = {}, {}
+    for curve in src[1]:
+        if curve not in forward:
+            forward[curve] = _lcms_curve_forward(curve[0], curve[1], x).astype(np.float32)
+    for curve in dst[1]:
+        if curve not in inverse:
+            inverse[curve] = _lcms_inverse_table(curve[0], curve[1])
+    return (matrix, [forward[c] for c in src[1]], [inverse[c] for c in dst[1]])
+
+
+def _convert_matrix_shaper(pixels, width: int, height: int, channels: int, transform):
+    """The image (height, width, channels) uint16 of `pixels` -- big-endian
+    16-bit samples of RGB or RGBA, as in a PAM payload -- converted with
+    `transform` (_matrix_shaper_transform). A 4th channel (alpha) is copied.
+    Each colour channel: source table, matrix, clipped, square root (the
+    matrix carries the table's scale), target table. In chunks of
+    _CONVERT_CHUNK_PIXELS with every buffer allocated once: each step is one
+    numpy call that releases the GIL."""
+    import numpy as np
+    matrix, forward, inverse = transform
+    top = float((1 << _INVERSE_TABLE_BITS) - 1)
+    limit = np.float32(top * top)
+    half = np.float32(0.5)
+    count = width * height
+    chunk = _CONVERT_CHUNK_PIXELS
+    src = np.frombuffer(pixels, dtype=">u2", count=count * channels).reshape(count, channels)
+    out = np.empty((count, channels), dtype=np.uint16)
+    block = np.empty((chunk, channels), dtype=np.uint16)
+    lin = [np.empty(chunk, dtype=np.float32) for _ in range(3)]
+    acc = np.empty(chunk, dtype=np.float32)
+    tmp = np.empty(chunk, dtype=np.float32)
+    idx = np.empty(chunk, dtype=np.int32)
+    res = np.empty(chunk, dtype=np.uint16)
+    for start in range(0, count, chunk):
+        n = min(count, start + chunk) - start
+        b = block[:n]
+        np.copyto(b, src[start:start + n])
+        for i in range(3):
+            np.take(forward[i], b[:, i], out=lin[i][:n], mode="clip")
+        for i in range(3):
+            a, t = acc[:n], tmp[:n]
+            np.multiply(lin[0][:n], matrix[i, 0], out=a)
+            np.multiply(lin[1][:n], matrix[i, 1], out=t)
+            a += t
+            np.multiply(lin[2][:n], matrix[i, 2], out=t)
+            a += t
+            np.clip(a, 0.0, limit, out=a)
+            np.sqrt(a, out=a)
+            a += half
+            np.copyto(idx[:n], a, casting="unsafe")
+            np.take(inverse[i], idx[:n], out=res[:n], mode="clip")
+            out[start:start + n, i] = res[:n]
+        if channels == 4:
+            out[start:start + n, 3] = b[:, 3]
+    return out.reshape(height, width, channels)
 
 
 def _make_explorer_thumbnail(g, jxl_path, tmp_dir):

@@ -491,10 +491,14 @@ Utility; archived as `<name>_page1.jxl`): a page other than the first that is
 at most 160 px on its long side gets no derivative (v2.28.0).
 
 `--output-icc sRGB|AdobeRGB|<path to .icc>` converts the master: it is decoded
-at 16 bits, converted with ImageMagick from its own profile (fixed **relative
+at 16 bits, converted from its own profile (fixed **relative
 colorimetric + black point compensation**) and re-encoded at the requested
 `--distance` — still **16 bits** (8-bit lossy JXL was measured to be no
-smaller, so there is no 8-bit option). Use it to make light delivery copies
+smaller, so there is no 8-bit option). Plain matrix/shaper profiles (a 3×3
+matrix with gamma or sRGB-form curves: sRGB, AdobeRGB, ProPhoto and the other
+working spaces) are converted in Python, without a temporary PNG; any other
+profile, a resize or a sharpening goes through ImageMagick
+(`FAST_COLOR_CONVERSION`, below). Use it to make light delivery copies
 from the masters, e.g. a ~4 MB sRGB file to replace a JPEG:
 
 ```
@@ -979,6 +983,13 @@ SCANNER_SOFTWARE = (...)     # Software names that mark a film scan (same
                              # list as the encoder's)
 JBRD_POLICY = "copy"         # copy/skip/convert
 KEEP_SMALLER = True          # Verbatim copy when the re-encode is not smaller
+FAST_COLOR_CONVERSION = True # --output-icc: plain matrix/shaper profiles are
+                             # converted in Python (littleCMS's math, never
+                             # more than 1 in 65535 from ImageMagick on real
+                             # photos) and the image goes to cjxl in memory:
+                             # no ImageMagick, no temporary PNG. Any other
+                             # profile, a resize or a sharpening keeps
+                             # ImageMagick. False = always ImageMagick
 REDERIVE_ON_ENCODE_CHANGE = True
                              # Derivatives: a sync run re-derives when the
                              # recorded distance/effort differ (also

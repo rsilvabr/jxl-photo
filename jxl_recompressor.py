@@ -564,11 +564,23 @@ OUTPUT_ICC = None
 #   "sRGB"      -> built-in sRGB (Pillow/LittleCMS)
 #   "AdobeRGB"  -> built-in Adobe RGB (1998)-compatible matrix/TRC profile
 #   <path>      -> any RGB .icc/.icm file
-# The pixels are decoded at 16 bits, converted with ImageMagick (relative
-# colorimetric + black point compensation) and re-encoded at CJXL_DISTANCE,
-# still 16 bits. A derivative is a separate, disposable copy: it is never
-# written in place, never deletes anything, and never proves that the
+# The pixels are decoded at 16 bits, converted (relative colorimetric + black
+# point compensation: in Python for plain matrix/shaper profiles, see
+# FAST_COLOR_CONVERSION, else with ImageMagick) and re-encoded at
+# CJXL_DISTANCE, still 16 bits. A derivative is a separate, disposable copy: it
+# is never written in place, never deletes anything, and never proves that the
 # original TIFF is archived (its jxlphoto-src/srcsum markers are removed).
+
+FAST_COLOR_CONVERSION = True
+# --output-icc only. True -> when the master's profile and the target are
+# both plain matrix/shaper profiles (a 3x3 matrix with gamma or sRGB-form
+# curves: Pillow's sRGB, AdobeRGB, ProPhoto and the other working spaces),
+# the colour is converted in Python with littleCMS's own math and the image
+# goes to cjxl in memory: no ImageMagick and no temporary PNG (up to 270 MB
+# per 45 MP master in TEMP_DIR). Never more than 1 apart in 65535 from
+# ImageMagick's result (measured on real masters). Any other profile, a
+# resize or a sharpening keeps ImageMagick. False -> always ImageMagick (as
+# up to v2.31.0-rc1).
 
 REDERIVE_ON_ENCODE_CHANGE = True
 # Derivatives only (--output-icc / --resize-* / --sharpen). Each derivative
@@ -751,6 +763,7 @@ _OVERLAY_SETTINGS = {
     "SCANNER_SOFTWARE": ("strs",),
     "JBRD_POLICY": ("choice", "copy", "skip", "convert"),
     "KEEP_SMALLER": ("bool",),
+    "FAST_COLOR_CONVERSION": ("bool",),
     "EXPLORER_THUMBNAIL": ("choice", "auto", "on", "off"),
     "EXPLORER_THUMBNAIL_SIZE": ("int", 64, 2048),
     "EXPLORER_THUMBNAIL_MAX_SHARE": ("float", 0.0, 1.0),
@@ -805,6 +818,33 @@ _OUTPUT_ICC_BYTES = None
 _OUTPUT_ICC_PATH = None      # the profile written once to a temp file for magick
 _SRGB_ICC_PATH = None        # assigned to sources that decode without any profile (A3)
 _FORCE_REDERIVE = set()      # final paths whose derived marker names another target
+
+# --output-icc: how this run's colour conversions were done, for the line at
+# the end of the run (D8 of plan 261120 srgb-fast). Reset at the top of main().
+_COLOUR_ROUTES = {"python": 0, "magick": 0}
+_COLOUR_ROUTES_LOCK = threading.Lock()
+
+
+def _count_colour_route(route: str) -> None:
+    with _COLOUR_ROUTES_LOCK:
+        _COLOUR_ROUTES[route] += 1
+
+
+# --output-icc: the Python colour conversion's tables, built once per run and
+# per source profile and shared by every worker (plan 261120 srgb-fast: built
+# per file, 24 workers' copies did not fit in the CPU cache and the run got
+# slower). None = that profile keeps ImageMagick. Reset at the top of main().
+_COLOUR_TRANSFORMS = {}
+_COLOUR_TRANSFORMS_LOCK = threading.Lock()
+
+
+def _colour_transform(src_icc: bytes):
+    """The run's shared _matrix_shaper_transform from src_icc to the
+    --output-icc profile, or None (built once, under the lock)."""
+    with _COLOUR_TRANSFORMS_LOCK:
+        if src_icc not in _COLOUR_TRANSFORMS:
+            _COLOUR_TRANSFORMS[src_icc] = _matrix_shaper_transform(src_icc, _OUTPUT_ICC_BYTES)
+        return _COLOUR_TRANSFORMS[src_icc]
 
 # --resize-*/--sharpen runtime state, reset at the top of main() like the
 # --output-icc trio above (the test suite runs several main()s in one process).
@@ -968,6 +1008,19 @@ _UNKNOWN_IMAGE_PIXELS = 60_000_000
 # of them: a worker runs one at a time.
 _SIDE_STEP_BYTES_PER_PIXEL = 40
 
+# Bytes per pixel of the PNG the Python colour conversion hands to cjxl
+# (FAST_COLOR_CONVERSION): it stays in memory while its worker waits for a
+# cjxl slot and while cjxl reads it, where the ImageMagick route's conv.png
+# waited on disk. 16-bit RGBA = 8.
+_FAST_PNG_BYTES_PER_PIXEL = 8
+
+
+def _fast_colour_possible() -> bool:
+    """Can a file of this run take the Python colour conversion? (The run's
+    flags only; each file still passes _fast_colour_png's own checks.)"""
+    return bool(FAST_COLOR_CONVERSION and OUTPUT_ICC and not RESIZE_MODE
+                and SHARPEN == "none")
+
 # How many full-size cjxl encodes may run at once (_run_cjxl_full); None = no
 # limit. Set by main() from _memory_capped_pipeline for the length of the
 # pool, then cleared.
@@ -982,16 +1035,18 @@ def _set_cjxl_slots(n):
     _CJXL_SEMAPHORE = threading.BoundedSemaphore(n) if n else None
 
 
-def _run_cjxl_full(cmd):
+def _run_cjxl_full(cmd, input=None):
     """_run_captured for a full-size cjxl encode, holding one of the cjxl slots
     while it runs (see _memory_capped_pipeline). The wait happens before the
-    process starts, so CJXL_TIMEOUT never counts it."""
+    process starts, so CJXL_TIMEOUT never counts it. `input`: bytes for cjxl's
+    stdin (the Python colour conversion's PNG), else None."""
+    extra = {} if input is None else {"input": input}
     sem = _CJXL_SEMAPHORE
     if sem is None:
-        return _run_captured(cmd, CJXL_TIMEOUT)
+        return _run_captured(cmd, CJXL_TIMEOUT, **extra)
     sem.acquire()
     try:
-        return _run_captured(cmd, CJXL_TIMEOUT)
+        return _run_captured(cmd, CJXL_TIMEOUT, **extra)
     finally:
         sem.release()
 
@@ -1060,6 +1115,9 @@ def _memory_capped_pipeline(requested, max_pixels, distance, effort,
     `cjxl_pixels` is the largest image cjxl will really ENCODE when that is
     smaller than the source (a resized derivative: a 2048 px copy of a 45 MP
     master is ~3 MP); the side steps still decode the full `max_pixels`.
+    A run that converts colour in Python (_fast_colour_possible) adds the PNG
+    it holds in memory while it waits for its slot (_FAST_PNG_BYTES_PER_PIXEL)
+    to the cjxl budget.
     """
     if WORKER_MEMORY_FRACTION <= 0:
         return requested, None
@@ -1070,6 +1128,8 @@ def _memory_capped_pipeline(requested, max_pixels, distance, effort,
     enc_pixels = (min(cjxl_pixels, pixels) if cjxl_pixels and cjxl_pixels > 0
                   else pixels)
     per_cjxl = enc_pixels * _cjxl_bytes_per_pixel(distance, effort, buffering)
+    if _fast_colour_possible():
+        per_cjxl += enc_pixels * _FAST_PNG_BYTES_PER_PIXEL
     per_side = pixels * _SIDE_STEP_BYTES_PER_PIXEL
     avail, budget = _available_memory_bytes()
     if avail is None:
@@ -2549,6 +2609,9 @@ def _explorer_thumbnail_wanted(*a, **k): return _common._explorer_thumbnail_want
 _pam_header = _common._pam_header
 _pam_raw_input = _common._pam_raw_input
 _pam_array = _common._pam_array
+make_png_bytes = _common.make_png_bytes
+_matrix_shaper_transform = _common._matrix_shaper_transform
+_convert_matrix_shaper = _common._convert_matrix_shaper
 
 
 def _make_explorer_thumbnail(*a, **k): return _common._make_explorer_thumbnail(_G, *a, **k)
@@ -3006,6 +3069,37 @@ def _read_origin_inputs(*a, **k): return _common._read_origin_inputs(_G, *a, **k
 _origin_for_output = _common._origin_for_output
 
 
+def _fast_colour_png(jxl_path: Path, mem, src_icc: bytes):
+    """(PNG bytes for cjxl's stdin, skip_icc) of the memory route's pixels
+    converted to --output-icc in Python (FAST_COLOR_CONVERSION), or None when
+    this file keeps ImageMagick: a profile _matrix_shaper_transform does not
+    reproduce (_colour_transform), pixels that are not 16-bit RGB/RGBA, or a
+    failure (warned). skip_icc is the R1 decision of _derive_pixels, taken on the target
+    profile itself: a lossy encode of a profile with no native JXL form is
+    written tagged sRGB with the profile in XMP."""
+    (w, h), pixels = mem[2], mem[1]
+    channels, rest = divmod(len(pixels), w * h * 2)
+    if rest or channels not in (3, 4):
+        return None
+    transform = _colour_transform(src_icc)
+    if transform is None:
+        return None
+    try:
+        native = (CJXL_DISTANCE <= 0
+                  or _icc_has_native_form(_OUTPUT_ICC_BYTES, False))
+        img = _convert_matrix_shaper(pixels, w, h, channels, transform)
+        png = make_png_bytes(img, _OUTPUT_ICC_BYTES if native else None)
+    except Exception as e:
+        logger.warning(f"  >Colour conversion in Python failed ({e}): using "
+                       f"ImageMagick | {jxl_path.name}")
+        return None
+    if not native:
+        logger.info(f"  >Profile with no native JXL form: derivative encoded "
+                    f"tagged sRGB with the profile kept in XMP | {jxl_path.name}")
+    logger.debug(f"  >Colour converted in Python (matrix/shaper) | {jxl_path.name}")
+    return png, (None if native else _OUTPUT_ICC_BYTES)
+
+
 def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
     """Decode at 16 bits, apply the derivative recipe, re-encode.
 
@@ -3061,11 +3155,13 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
         grey = mem is None and _png_is_grayscale(dec_png)
         converted = False
         size = None
+        fast = None
         if grey and not blob and not (RESIZE_MODE or SHARPEN != "none"):
             logger.info(f"  >Grayscale image: encoded without colour conversion | {jxl_path.name}")
             enc_in = dec_png
         else:
             args = []
+            src_icc = None
             out_profile = None
             magick_in = dec_png
             if blob:
@@ -3179,25 +3275,35 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
                 # B2: `-colorspace Lab ... -colorspace sRGB` drops the ICC
                 # profile; re-assign the one that describes the pixels now.
                 args += ["-profile", str(out_profile)]
-            if mem is None:
-                cmd = (["magick", str(magick_in)] + args
-                       + ["-depth", "16"] + _TEMP_PNG_ARGS + ["png:" + _magick_out_path(conv_png)])
-                r = _run_captured(cmd, CJXL_TIMEOUT)
+            if (FAST_COLOR_CONVERSION and mem is not None and converted and src_icc
+                    and not blob and not grey and not RESIZE_MODE and SHARPEN == "none"):
+                fast = _fast_colour_png(jxl_path, mem, src_icc)
+            if fast is not None:
+                mem = None          # the converted image is in the PNG now
+                enc_in = None
             else:
-                cmd = (["magick"] + mem[0] + args
-                       + ["-depth", "16"] + _TEMP_PNG_ARGS + ["png:" + _magick_out_path(conv_png)])
-                r = _run_captured(cmd, CJXL_TIMEOUT, input=mem[1])
-                mem = None          # the pixels are ImageMagick's now
-            if r.returncode != 0 or not conv_png.exists():
-                raise RuntimeError(f"magick: {_stderr_tail(r.stderr)}")
-            if (not grey or blob) and "iCCP" not in _png_chunk_types(conv_png):
-                # Traps A1/A2: without the profile cjxl would silently tag the
-                # converted pixels as sRGB. Never let that reach the archive.
-                raise RuntimeError("ImageMagick wrote the converted image without its ICC "
-                                   "profile — refusing to encode it as the wrong colour space")
-            enc_in = conv_png
+                if mem is None:
+                    cmd = (["magick", str(magick_in)] + args
+                           + ["-depth", "16"] + _TEMP_PNG_ARGS + ["png:" + _magick_out_path(conv_png)])
+                    r = _run_captured(cmd, CJXL_TIMEOUT)
+                else:
+                    cmd = (["magick"] + mem[0] + args
+                           + ["-depth", "16"] + _TEMP_PNG_ARGS + ["png:" + _magick_out_path(conv_png)])
+                    r = _run_captured(cmd, CJXL_TIMEOUT, input=mem[1])
+                    mem = None          # the pixels are ImageMagick's now
+                if r.returncode != 0 or not conv_png.exists():
+                    raise RuntimeError(f"magick: {_stderr_tail(r.stderr)}")
+                if (not grey or blob) and "iCCP" not in _png_chunk_types(conv_png):
+                    # Traps A1/A2: without the profile cjxl would silently tag the
+                    # converted pixels as sRGB. Never let that reach the archive.
+                    raise RuntimeError("ImageMagick wrote the converted image without its ICC "
+                                       "profile — refusing to encode it as the wrong colour space")
+                enc_in = conv_png
         skip_icc = None
-        if CJXL_DISTANCE > 0:
+        stdin_png = None
+        if fast is not None:
+            stdin_png, skip_icc = fast
+        elif CJXL_DISTANCE > 0:
             _icc_in = _png_iccp(enc_in)
             if _icc_in and not _icc_has_native_form(
                     _icc_in, bytes(_icc_in[16:20]) == b"GRAY"):
@@ -3212,13 +3318,18 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
                 skip_icc = _icc_in
                 logger.info(f"  >Profile with no native JXL form: derivative encoded "
                             f"tagged sRGB with the profile kept in XMP | {jxl_path.name}")
-        cjxl_cmd = ([_get_cjxl_cmd() or "cjxl", str(enc_in), str(write_path),
+        cjxl_cmd = ([_get_cjxl_cmd() or "cjxl",
+                     "-" if stdin_png is not None else str(enc_in), str(write_path),
                      "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT),
                      "--container=1", "-x", "strip=exif", "-x", "strip=xmp"]
                     + _keep_invisible_flag() + _cjxl_buffering_flag())
-        r = _run_cjxl_full(cjxl_cmd)
+        r = _run_cjxl_full(cjxl_cmd, input=stdin_png)
+        used_python = fast is not None
+        stdin_png = fast = None         # release the PNG
         if r.returncode != 0:
             raise RuntimeError(f"cjxl: {_stderr_tail(r.stderr)}")
+        if converted:
+            _count_colour_route("python" if used_python else "magick")
     return converted, size, skip_icc
 
 
@@ -5224,7 +5335,7 @@ def main():
     global EXPLORER_THUMBNAIL
     global _gen_divergence_logged, _error_details
     global _OUTPUT_ICC_LABEL, _OUTPUT_ICC_BYTES, _OUTPUT_ICC_PATH, _SRGB_ICC_PATH
-    global _FORCE_REDERIVE
+    global _FORCE_REDERIVE, _COLOUR_ROUTES, _COLOUR_TRANSFORMS
     global RESIZE_MODE, RESIZE_VALUE, ALLOW_UPSCALE
     global SHARPEN, SHARPEN_SIGMA, SHARPEN_GAIN, SHARPEN_THRESHOLD
     global DERIVATIVE, _DERIVED_LABEL
@@ -5235,6 +5346,8 @@ def main():
     _OUTPUT_ICC_PATH = None
     _SRGB_ICC_PATH = None
     _FORCE_REDERIVE = set()
+    _COLOUR_ROUTES = {"python": 0, "magick": 0}
+    _COLOUR_TRANSFORMS = {}
     RESIZE_MODE = None
     RESIZE_VALUE = None
     ALLOW_UPSCALE = False
@@ -5917,6 +6030,9 @@ def main():
     if n_aborted:
         done_line += f" ({n_aborted} not attempted — the run had already aborted)"
     logger.info(done_line)
+    if _COLOUR_ROUTES["python"] or _COLOUR_ROUTES["magick"]:
+        logger.info(f"Colour conversion: {_COLOUR_ROUTES['python']} in Python, "
+                    f"{_COLOUR_ROUTES['magick']} with ImageMagick")
     # In a derivative run a policy skip means NO derivative at all, not "up to
     # date"; folded into "skipped" above it read like a finished folder.
     if DERIVATIVE and n_policy_skip:

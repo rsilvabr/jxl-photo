@@ -182,13 +182,16 @@ def _run_plan(plan, jobs):
         _section = results[-1][0]
 
 
-def run(tag, args, timeout=7200):
-    """One script run as an unattended subprocess (stdin closed)."""
+def run(tag, args, timeout=7200, env=None):
+    """One script run as an unattended subprocess (stdin closed). `env`: extra
+    environment variables for this run only (the settings overlay of the
+    fast-colour section)."""
     t = time.time()
     r = subprocess.run([PY] + [str(a) for a in args], stdin=subprocess.DEVNULL,
                        capture_output=True, text=True, encoding="utf-8",
                        errors="replace", timeout=timeout, cwd=str(B),
-                       env={**os.environ, "JXLPHOTO_LOG_DIR": str(B / "_script_logs")})
+                       env={**os.environ, "JXLPHOTO_LOG_DIR": str(B / "_script_logs"),
+                            **(env or {})})
     out = (r.stdout or "") + (r.stderr or "")
     (LOGS / f"{tag}.log").write_text(
         f"$ {' '.join(map(str, args))}\nrc={r.returncode} ({time.time() - t:.0f}s)\n\n{out}",
@@ -892,6 +895,102 @@ def derivative_rederive_checks(A1, pool_jxl):
     check("recompressor: a higher effort at the same distance re-derives",
           rc == 0 and outs[0].stat().st_mtime_ns != after3 and "/d3e5" in rel
           and "encode settings changed" in out, rel[:160])
+
+
+def _decoded16(jxl, tag):
+    """A JXL's pixels as raw 16-bit RGB bytes, djxl's own decode (no colour
+    management), or None."""
+    png = B / f"{tag}.png"
+    if djxl(jxl, png, "--bits_per_sample=16").returncode != 0 or not png.exists():
+        return None
+    data = raw_rgb16_bytes(png)
+    png.unlink()
+    return np.frombuffer(data, dtype="<u2") if data else None
+
+
+def _colour_lines_of(jxl):
+    """The colour description jxlinfo gives (read from an ASCII-named copy)."""
+    r = _via_ascii(lambda s, o: ["jxlinfo", str(s)], jxl, B / "_jxlinfo.tmp")
+    keys = ("Color space", "White point", "Primaries", "Transfer function",
+            "Rendering intent", "bit", "ICC")
+    text = r.stdout.decode("utf-8", errors="replace")
+    return [ln.strip() for ln in text.splitlines() if any(k in ln for k in keys)]
+
+
+def _fast_colour_compare(label, masters, workdir):
+    """The recompressor's sRGB derivative of `masters` with the Python colour
+    conversion (the default) and with ImageMagick (FAST_COLOR_CONVERSION off
+    through a settings overlay): returns (python count, magick count of the
+    default run, off-run python count, off-run magick count, pairs compared,
+    worst pixel difference, bad pairs)."""
+    args = ["--mode", "1", "--output-icc", "sRGB", "--distance", "0", "--effort", "1",
+            "--workers", "4", "--on-unknown", "convert", "--on-regeneration", "convert",
+            "--on-downgrade", "convert", "--no-preflight"]
+    overlay = workdir / "overlay.json"
+    overlay.parent.mkdir(parents=True, exist_ok=True)
+    overlay.write_text(json.dumps({"jxl_recompressor": {"FAST_COLOR_CONVERSION": False}}),
+                       encoding="utf-8")
+    counts, outs = {}, {}
+    for kind, env in (("on", None), ("off", {"JXLPHOTO_SETTINGS": str(overlay)})):
+        d = workdir / kind
+        for m in masters:
+            cp(m, d / Path(m).name)
+        rc, out = run(f"{label}_{kind}", [REC, d] + args, env=env)
+        m = re.search(r"Colour conversion: (\d+) in Python, (\d+) with ImageMagick", out)
+        counts[kind] = (rc, int(m.group(1)) if m else -1, int(m.group(2)) if m else -1)
+        outs[kind] = {p.name: p for p in (d / "recompressed_jxl").glob("*.jxl")}
+    bad, worst, pairs = [], 0, 0
+    for name, a in sorted(outs["on"].items()):
+        b = outs["off"].get(name)
+        if b is None:
+            bad.append(f"{name}: missing in the ImageMagick run")
+            continue
+        pa, pb = _decoded16(a, f"{label}_a"), _decoded16(b, f"{label}_b")
+        if pa is None or pb is None or pa.size != pb.size:
+            bad.append(f"{name}: pixels unreadable")
+            continue
+        diff = int(np.abs(pa.astype(np.int32) - pb.astype(np.int32)).max())
+        worst = max(worst, diff)
+        if diff > 1:
+            bad.append(f"{name}: pixels {diff} apart")
+        if relation(a) != relation(b):
+            bad.append(f"{name}: dc:Relation differs")
+        if _colour_lines_of(a) != _colour_lines_of(b):
+            bad.append(f"{name}: jxlinfo colour lines differ")
+        pairs += 1
+    return counts, pairs, worst, bad
+
+
+def fast_colour_checks(A1, A2, A3, pool_jxl, fixtures=None):
+    section("Colour conversion in Python (FAST_COLOR_CONVERSION)")
+    root = B / "fast_colour"
+    masters = [pool_jxl / A.with_suffix(".jxl").name for A in (A1, A2, A3)]
+    counts, pairs, worst, bad = _fast_colour_compare("fc_pool", masters, root / "pool")
+    check("both runs exit 0", counts["on"][0] == 0 and counts["off"][0] == 0, str(counts))
+    check("the default run converted the 3 masters in Python (no ImageMagick)",
+          counts["on"][1:] == (3, 0), f"python/magick = {counts['on'][1:]}")
+    check("with FAST_COLOR_CONVERSION off all 3 went through ImageMagick",
+          counts["off"][1:] == (0, 3), f"python/magick = {counts['off'][1:]}")
+    check("each pair: pixels within 1, same dc:Relation, same jxlinfo colour lines",
+          pairs == 3 and not bad, f"{pairs} pairs, worst {worst}; {bad}")
+    varied = (fixtures / "TIFF16_varied") if fixtures else None
+    if varied is None or not varied.is_dir():
+        print("\n(no TIFF16_varied/: varied fast-colour checks skipped)")
+        return
+    v = root / "varied_src"
+    for s in sorted(varied.glob("*.tif"))[:10]:
+        cp(s, v / s.name)
+    rc, _ = run("fc_var_encode", [ENC, v, "--mode", "1", "--distance", "0.05", "--effort", "1",
+                                  "--no-preflight"])
+    jxls = sorted((v / "converted_jxl").glob("*.jxl"))
+    check(f"{len(list(v.glob('*.tif')))} varied TIFFs encoded for the comparison",
+          rc == 0 and len(jxls) == len(list(v.glob("*.tif"))), f"rc={rc} {len(jxls)} masters")
+    counts, pairs, worst, bad = _fast_colour_compare("fc_var", jxls, root / "varied")
+    check(f"varied masters: every pair within 1 ({counts['on'][1]} of {len(jxls)} through "
+          f"Python, the rest kept ImageMagick)",
+          counts["on"][0] == 0 and counts["off"][0] == 0 and pairs == len(jxls) and not bad
+          and counts["on"][1] + counts["on"][2] == len(jxls) and counts["off"][1] == 0,
+          f"on={counts['on']} off={counts['off']} pairs={pairs} worst={worst} {bad}")
 
 
 def transcoder_checks(A1, A2):
@@ -2649,6 +2748,7 @@ def main():
                  (overwrite_guard_checks, (A1, A2), "par"),
                  (memory_cap_checks, (A1, pool_jxl), "alone"),
                  (derivative_rederive_checks, (A1, pool_jxl), "par"),
+                 (fast_colour_checks, (A1, A2, A3, pool_jxl, args.fixtures), "par"),
                  (transcoder_checks, (A1, A2), "par"),
                  (hostile_name_checks, (A1,), "par"),
                  (orientation_and_gate_checks, (A1,), "par"),

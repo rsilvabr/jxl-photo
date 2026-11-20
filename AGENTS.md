@@ -341,6 +341,23 @@ names its item. A change on purpose to an item: photo-backup changes first.
   master's XMP over 64 KB becomes a broken APP1 that turns every later
   exiftool write into a no-op. Every change of this round was proven byte
   for byte against the code before on real files, with the clock frozen.
+- **The recompressor converts colour in Python (v2.31.0-rc2, `FAST_COLOR_CONVERSION`).** An
+  `--output-icc` derivative of a master decoded in memory, with no resize or sharpening, is
+  converted by `_convert_matrix_shaper` (common) when both profiles pass
+  `_matrix_shaper_profile` (colorants + `curv` gamma/identity or `para` types 0/3, no LUT tag,
+  curves from black): littleCMS's math curve by curve (cmsgamma.c types 1/4 and their
+  inverses), float32, the target curve read from a 2**20 table at sqrt(linear), in chunks of
+  65 536 pixels with the buffers allocated once, the tables built once per run and shared by
+  every worker (`_colour_transform`), then `make_png_bytes` (common) to cjxl's stdin — no
+  ImageMagick, no `conv.png`. Each of those three choices was measured: `pow` per sample,
+  tables per file (out of the CPU cache with 24 workers) or another chunk size made the SRGB
+  run no faster, or slower, than ImageMagick. Proven against ImageMagick (≤ 1 in 65535) on real
+  masters and in-gamut colours; near black, a colour outside the target's gamut converted to a
+  pure-gamma target can differ 2 or 3 levels, where ImageMagick's own result also strays from
+  the exact computation (`test_out_of_gamut_cube`). Anything else returns None and keeps
+  ImageMagick. Never widen what is accepted (table curves, other `para` forms, LUT profiles)
+  without the same proof; the PNG a worker holds while it waits for a cjxl slot is budgeted
+  (`_FAST_PNG_BYTES_PER_PIXEL`).
 - **The encoder never converts colour, resizes or sharpens — by design.** It
   writes the MASTER, and its outputs carry the `jxlphoto-src`/`srcsum` proof
   that the delete gates trust. Derivatives (colour/size/sharpening) come from

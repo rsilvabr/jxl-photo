@@ -143,7 +143,7 @@ def test_eb_png_writer_holds_no_whole_image_copy(monkeypatch):
     the image (review V2); compressed, the output is small again and any
     whole-image copy shows."""
     real = zlib.compressobj
-    monkeypatch.setattr(enc.zlib, "compressobj", lambda level=-1, *a, **k: real(6, *a, **k))
+    monkeypatch.setattr(zlib, "compressobj", lambda level=-1, *a, **k: real(6, *a, **k))
     img = (np.linspace(0, 65535, 1500 * 2000 * 3).reshape(1500, 2000, 3)).astype(np.uint16)
     tracemalloc.start()
     try:

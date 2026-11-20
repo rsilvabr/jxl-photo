@@ -11,7 +11,7 @@ Requirements:
   exiftool     ->  https://exiftool.org
 """
 
-import subprocess, os, platform, tempfile, threading, zlib, struct, logging, sys, shutil, uuid, hashlib, json
+import subprocess, os, platform, tempfile, threading, struct, logging, sys, shutil, uuid, hashlib, json
 import math
 import re
 from pathlib import Path
@@ -2890,87 +2890,7 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
 
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Rows filtered and compressed at a time by make_png_bytes (#569).
-_PNG_BLOCK_ROWS = 256
-
-
-def make_png_bytes(img, icc_bytes=None):
-    """Encodes a 16-bit numpy array as PNG in memory (pure Python, no temp file)."""
-    import numpy as np
-
-    if img.dtype.kind == 'f':
-        raise ValueError(f"Unsupported TIFF dtype: {img.dtype}. Float TIFFs are not supported by make_png_bytes.")
-    if img.dtype not in (np.uint8, np.uint16):
-        raise ValueError(f"Unsupported TIFF dtype: {img.dtype}. Expected uint8 or uint16.")
-
-    if img.ndim == 2:
-        img = img[:, :, np.newaxis]
-    if img.ndim != 3:
-        raise ValueError(f"Unsupported image shape: {img.shape}. Expected 2D or 3D array.")
-
-    h, w, c = img.shape
-    if c == 1:
-        color_type = 0
-    elif c == 2:
-        color_type = 4  # gray + alpha (LA)
-    elif c == 3:
-        color_type = 2
-    elif c == 4:
-        color_type = 6
-    else:
-        raise ValueError(f"Unsupported channel count: {c}. Expected 1, 2 (LA), 3, or 4.")
-
-    def chunk(name, data):
-        p = name + data
-        return struct.pack(">I", len(data)) + p + struct.pack(">I", zlib.crc32(p) & 0xFFFFFFFF)
-
-    # Write PNG at the input bit depth. The main encode path passes uint16 data;
-    # the cautious ICC test passes uint8 data and needs a true 8-bit PNG to test
-    # the 8-bit path.
-    bit_depth = 8 if img.dtype == np.uint8 else 16
-
-    # Streamed (#569): rows go through ONE zlib stream block by block, so
-    # neither the big-endian copy of the image nor the raw filtered buffer
-    # ever exists whole, and the file is assembled with a single join. The
-    # bytes are identical to zlib.compress(raw, 0) over the whole buffer —
-    # 45 MP used to cost ~1-1.4 GB of transient Python memory per worker.
-    # One compress() call per block, the filter byte (0) and the big-endian
-    # samples laid out by numpy: a Python loop per row held the GIL and made
-    # four parallel workers 2.5x slower than one (measured on 45 MP).
-    # Level 0 (stored), not 1: the PNG only carries the pixels to cjxl, and
-    # 16-bit photo data barely compresses (5.93 vs 6.00 bytes per pixel on a
-    # 43 MP Z8 export) while level 1 cost 6.55 s of Python per file against
-    # 0.40 s; peak memory 11.97 vs 12.12 B/px, inside _PYTHON_BYTES_PER_PIXEL
-    # (a page of 4 channels peaks higher: _python_bytes_per_pixel)
-    # (refactor B2, measured 2026-11-13).
-    comp = zlib.compressobj(0)
-    idat = []
-    row_bytes = w * c * (2 if bit_depth == 16 else 1)
-    for y in range(0, h, _PNG_BLOCK_ROWS):
-        block = img[y:y + _PNG_BLOCK_ROWS]
-        n = block.shape[0]
-        filtered = np.empty((n, row_bytes + 1), dtype=np.uint8)
-        filtered[:, 0] = 0
-        samples = block.astype(">u2") if bit_depth == 16 else block
-        filtered[:, 1:] = np.ascontiguousarray(samples).reshape(n, -1).view(np.uint8)
-        piece = comp.compress(filtered)
-        if piece:
-            idat.append(piece)
-    idat.append(comp.flush())
-    idat_len = sum(len(p) for p in idat)
-    idat_crc = zlib.crc32(b"IDAT")
-    for piece in idat:
-        idat_crc = zlib.crc32(piece, idat_crc)
-
-    parts = [b"\x89PNG\r\n\x1a\n",
-             chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, bit_depth, color_type, 0, 0, 0))]
-    if icc_bytes:
-        parts.append(chunk(b"iCCP", b"ICC Profile\x00\x00" + zlib.compress(icc_bytes)))
-    parts.append(struct.pack(">I", idat_len) + b"IDAT")
-    parts.extend(idat)
-    parts.append(struct.pack(">I", idat_crc & 0xFFFFFFFF))
-    parts.append(chunk(b"IEND", b""))
-    return b"".join(parts)
+make_png_bytes = _common.make_png_bytes
 
 _exif_box_rank = _common._exif_box_rank
 
