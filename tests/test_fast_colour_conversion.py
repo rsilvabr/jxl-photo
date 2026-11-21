@@ -386,12 +386,19 @@ def _psnr(a, b) -> float:
 def test_lossless_derivative_same_pixels_both_routes(tmp_path, monkeypatch, capsys, prophoto_masters):
     spy = []
     real = rec._run_captured
+    real_memory = rec._run_to_memory
 
     def watch(cmd, timeout, *a, **k):
         spy.append([str(c) for c in cmd])
         return real(cmd, timeout, *a, **k)
 
+    def watch_memory(cmd, timeout, *a, **k):
+        spy.append([str(c) for c in cmd])
+        return real_memory(cmd, timeout, *a, **k)
+
     monkeypatch.setattr(rec, "_run_captured", watch)
+    # ImageMagick's PNG comes back in memory since v2.31.0 (_run_to_memory).
+    monkeypatch.setattr(rec, "_run_to_memory", watch_memory)
     fast, text_fast = _derive(tmp_path, monkeypatch, capsys, prophoto_masters["rgb"], "fast")
     managed_in_python = list(spy)
     spy.clear()

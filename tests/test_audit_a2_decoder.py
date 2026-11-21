@@ -118,11 +118,15 @@ def test_dd_failed_relation_step_is_an_error(tmp_path, monkeypatch, which):
 
     def fake(lines, *a, **k):
         lines = [str(x) for x in lines]
-        if which == "clear" and lines[:2] == ["-overwrite_original", "-XMP-dc:Relation="]:
+        # The dc:Relation rewrite: since v2.31.0 the clear and the additions
+        # are ONE command of all-`=` lines (_collapse_list_reset).
+        if (which == "clear" and len(lines) > 1 and lines[0] == "-overwrite_original"
+                and lines[1].startswith("-XMP-dc:Relation=")):
             return subprocess.CompletedProcess(lines, 1, "", "Error: simulated")
-        # The read of the TIFF being written (a temp name, never the .jxl).
+        # The dc:Relation read copy_metadata decides from: since v2.31.0 the
+        # JXL's own (the block the TIFF gets), read BEFORE the one rewrite.
         if (which == "read" and lines[:2] == ["-j", "-XMP-dc:Relation"]
-                and len(lines) == 3 and not lines[-1].lower().endswith(".jxl")):
+                and len(lines) == 3 and lines[-1].lower().endswith(".jxl")):
             return subprocess.CompletedProcess(lines, 1, "", "Error: simulated")
         return real_call(lines, *a, **k)
     monkeypatch.setattr(dec, "_run_exiftool_argfile", fake)

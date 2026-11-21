@@ -474,6 +474,8 @@ TEMP_DIR = None
 # Temporary directory for small intermediate files (EXIF binary, PNG if USE_RAM_FOR_PNG=False).
 # None -> use system temp (usually C:\Users\...\AppData\Local\Temp on Windows)
 # Ex:  -> r"E:\\temp_jxl"
+# No '%' in its path (nor in the system temp's when None): ExifTool reads it
+# as a format code, so a run with one stops before its first file (v2.31.0).
 
 CJXL_TIMEOUT = 900
 # Timeout (seconds) for each cjxl invocation. 600s can be tight for very large
@@ -487,6 +489,12 @@ EXIFTOOL_TIMEOUT = CJXL_TIMEOUT
 # good files into errors (2026-10-06: twelve exiftool timeouts in one run, all
 # reported as a codec timeout). The planning-time batch reads use the two
 # EXIFTOOL_BATCH_* settings below instead.
+
+EXIFTOOL_STAY_OPEN = True
+# Windows: keep ExifTool open (-stay_open) and send it the per-file commands,
+# instead of starting it for each one (~0.2 s per start; a 45 MP TIFF page
+# started four). Same commands, same answers. False = one ExifTool per
+# command, as before v2.31.0.
 
 # Planning-time exiftool BATCH reads (markers of up to 400 files per call).
 # A batch is stopped only when exiftool has printed nothing for
@@ -1205,6 +1213,7 @@ _OVERLAY_SETTINGS = {
     "CJXL_MODULAR": ("bool",),
     "CJXL_TIMEOUT": ("int", 1, None),
     "EXIFTOOL_TIMEOUT": ("int", 1, None),
+    "EXIFTOOL_STAY_OPEN": ("bool",),
     "EXIFTOOL_BATCH_STALL": ("int", 1, None),
     "EXIFTOOL_BATCH_TIMEOUT": ("int", 1, None),
     "TEMP_DIR": ("path?",),
@@ -1477,6 +1486,9 @@ SUMMARY_PREFIX = _common.SUMMARY_PREFIX
 SUMMARY_MAX_FAILURES = 200
 
 
+def _log_failure_recap(*a, **k): return _common._log_failure_recap(_G, *a, **k)
+
+
 def emit_summary_json(enabled: bool, *, ok: int, overwritten: int, skipped: int,
                       errors: int, log_file, extras: Optional[Dict[str, int]] = None,
                       failures: Optional[list] = None, dry_run: bool = False,
@@ -1487,9 +1499,11 @@ def emit_summary_json(enabled: bool, *, ok: int, overwritten: int, skipped: int,
     so the wrapper can sum and render script-specific stats without knowing
     what they mean. `failures` is a list of (file, reason) pairs. `dry_run`
     marks counts as "would have" so the wrapper can label the block instead of
-    reporting a simulation as finished work.
+    reporting a simulation as finished work. Without the flag the failed files
+    are named once more at the end of the log (_log_failure_recap).
     """
     if not enabled:
+        _log_failure_recap(failures)
         return
     failures = failures or []
     unreadable = unreadable or []
@@ -1690,6 +1704,21 @@ _EXIFTOOL_BATCH = {}
 # Read-only exiftool results run ahead in one process, per thread
 # (_prefetch_exiftool_reads), each used once by the read that asks for it.
 _EXIFTOOL_PREFETCH = threading.local()
+# The kept-open ExifTool processes of this script (EXIFTOOL_STAY_OPEN).
+_EXIFTOOL_POOL = _common._ExiftoolPool()
+# --serve (_common._serve): the log every job of a serve process writes to;
+# what one run keeps about the files it saw, emptied before each job (a file
+# rewritten between two jobs with the same size and date is read again); the
+# facts about the tools a serve process keeps on purpose; this script's
+# options a serve process refuses (maintenance modes).
+_SERVE_LOG = None
+_SERVE_FILE_CACHES = ("_content_id_cache", "_planned_outputs")
+_SERVE_TOOL_FACTS = ("_EXIFTOOL_BATCH",)
+_SERVE_REFUSED = ("restamp_moved", "restamp_then_sync", "clear_icc_cache")
+# Per thread: while --verify-roundtrip checks every page (_VERIFY_EACH_PAGE),
+# the Explorer thumbnail's decode of the page is kept (`kept`) for the check of
+# the same codestream (_take_kept_decode): one decode per page, not two.
+_KEPT_DECODE = threading.local()
 
 
 # Captured at import: some tests replace this module's `subprocess` with a stub.
@@ -1722,6 +1751,9 @@ def _exiftool_source(*a, **k): return _common._exiftool_source(_G, *a, **k)
 
 
 def _run_exiftool_argfile(*a, **k): return _common._run_exiftool_argfile(_G, *a, **k)
+
+
+def _run_exiftool_file(*a, **k): return _common._run_exiftool_file(_G, *a, **k)
 
 
 def _exiftool_batch(*a, **k): return _common._exiftool_batch(_G, *a, **k)
@@ -1786,7 +1818,7 @@ def _tiff_byte_order(tiff_path) -> str:
 def extract_exif_raw(tiff_path, tmp_dir):
     arg_file = tmp_dir / "exif_extract.args"
     arg_file.write_text(f"{_ARGFILE_CHARSET}-b\n-Exif\n{tiff_path}\n", encoding="utf-8")
-    r = _run_captured([_get_exiftool_cmd(), "-@", str(arg_file)], EXIFTOOL_TIMEOUT)
+    r = _run_exiftool_file(arg_file, EXIFTOOL_TIMEOUT, text=False)
     if r.returncode == 0 and r.stdout and len(r.stdout) > 8:
         # Never the source's name: a '%' in it would be expanded by the
         # -Exif<= argument that reads this file back (#550).
@@ -2499,10 +2531,7 @@ def extract_xmp_original(tiff_path, tmp_dir):
     # Correct order: -o output.xmp -b -XMP input.tif
     arg_file = tmp_dir / "xmp_extract.args"
     arg_file.write_text(f"{_ARGFILE_CHARSET}-o\n{xmp_path}\n-b\n-XMP\n{tiff_path}\n", encoding="utf-8")
-    _run_captured(
-        [_get_exiftool_cmd(), "-@", str(arg_file)],
-        EXIFTOOL_TIMEOUT
-    )
+    _run_exiftool_file(arg_file, EXIFTOOL_TIMEOUT, text=False)
     if xmp_path.exists() and xmp_path.stat().st_size > 0:
         return xmp_path
     return None
@@ -2759,7 +2788,10 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
     # could not happen here and silently de-rotated scans/camera TIFFs.)
     args_lines.append("-tagsfromfile")
     args_lines.append(_exiftool_source(tiff_path, tmp_dir))      # '%' names: #550
-    args_lines.append("-exif:all")
+    # The VALUES, not their printed form (#684): `-exif:all` copied
+    # MaxApertureValue f/2.83 as f/2.8 and a FocalLength of 6.62 mm as 6.6 mm.
+    # (A TIFF never gives -b -Exif a block, so this copy is the master's EXIF.)
+    args_lines.append("-exif:all#")
     if not xmp_preloaded:
         args_lines.append("-xmp:all")
 
@@ -3954,6 +3986,10 @@ def _foreign_overwrite_reason(info: dict, src_paths, out_path) -> Optional[str]:
     return None
 
 
+# How many threads read the newer TIFFs' bytes for the content sync.
+_SYNC_HASH_THREADS = 4
+
+
 def _mark_sync_same_bytes(items: list, dry_run: bool) -> int:
     """Smart sync: a TIFF newer than its JXL but with the SAME BYTES the JXL
     was made from is up to date, not a new file (2.3 of the 2026-11-10 review).
@@ -3998,23 +4034,40 @@ def _mark_sync_same_bytes(items: list, dry_run: bool) -> int:
     # need no second read.
     todo = [(t, j) for t, j in cands if not _sync_same_bytes(t, j)]
     marks = _read_source_markers_batch(sorted({str(j) for _t, j in todo})) if todo else {}
-    prog = _batch_read_state("Sync byte check", len(cands))
+    # The sha256 of each TIFF that has a srcsum to compare, read by up to
+    # _SYNC_HASH_THREADS threads (hashlib lets the others run while one hashes).
+    # A hard disk gives the same total speed with more readers (measured
+    # 2026-11-19: 141-159 MB/s with 1 to 32), but an SSD and the antivirus scan
+    # on the first open of each file do not set the pace one file at a time.
+    wanted = {}
+    for n, (t, j) in enumerate(cands):
+        if _sync_same_bytes(t, j):
+            continue
+        info = marks.get(str(j)) or {}
+        if not info.get("unread") and info.get("srcsum"):
+            wanted[n] = info["srcsum"]
+    prog = _batch_read_state("Sync byte check", len(wanted))
+    digests = {}
+    if wanted:
+        with ThreadPoolExecutor(max_workers=min(_SYNC_HASH_THREADS, len(wanted))) as pool:
+            futures = {pool.submit(_file_content_id, cands[n][0]): n for n in wanted}
+            for done, fut in enumerate(as_completed(futures), 1):
+                try:
+                    digests[futures[fut]] = fut.result()
+                except OSError:
+                    digests[futures[fut]] = None
+                _batch_read_tick(prog, done)
     proven = []
     for n, (t, j) in enumerate(cands):
-        _batch_read_tick(prog, n)
         if _sync_same_bytes(t, j):
             try:
                 proven.append((t, j, t.stat().st_mtime_ns))
             except OSError:
                 pass
             continue
-        info = marks.get(str(j)) or {}
-        want = info.get("srcsum")
-        if info.get("unread") or not want:
+        if n not in wanted or digests.get(n) != wanted[n]:
             continue
         try:
-            if _file_content_id(t) != want:
-                continue
             tiff_mtime_ns = t.stat().st_mtime_ns
         except OSError:
             continue
@@ -4259,6 +4312,10 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
 
     with tempfile.TemporaryDirectory(prefix="jxl_", dir=TEMP_DIR) as tmp:
         tmp_dir = Path(tmp)
+        # The thumbnail's decode is kept for the page check only when there is
+        # one (_VERIFY_EACH_PAGE); never a decode of another file.
+        _KEPT_DECODE.wanted = bool(_VERIFY_EACH_PAGE)
+        _KEPT_DECODE.kept = None
         try:
             # 1. Extract raw EXIF binary
             exif_bin = extract_exif_raw(tiff_path, tmp_dir)
@@ -4667,6 +4724,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             if _VERIFY_EACH_PAGE:
                 _page_ok, _page_detail = _verify_roundtrip_page(
                     tiff_path, page_idx, write_path, _dist)
+                _KEPT_DECODE.kept = None
                 if not _page_ok:
                     raise RuntimeError(f"round-trip verification FAILED on page "
                                        f"{page_idx}: {_page_detail}")
@@ -4690,8 +4748,9 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
         except Exception as e:
             # A read prefetched for this file and never asked for (a reader
             # raised in between) must not wait in this thread for the next
-            # file: drop it here too (review V6).
+            # file: drop it here too (review V6). The same for a kept decode.
             _clear_exiftool_prefetch()
+            _KEPT_DECODE.kept = None
             # Remove any partial/corrupt output produced by THIS run so the
             # next smart-sync run does not mistake it for a fresh, up-to-date
             # JXL and skip it forever. The delete only happens when THIS run
@@ -5569,22 +5628,101 @@ def process_group(group_items: list, workers: int, mode: int = 0):
     # runs in every mode before the first byte is written — two sources mapping
     # to one output abort the run instead of costing two originals.
     if DELETE_SOURCE:
-        _delete_sources(results, tasks, moved_finals, use_staging)
+        _delete_sources(results, tasks, moved_finals, use_staging, workers=workers)
 
     return results
 
 
-def _delete_sources(results, tasks, moved_finals, use_staging):
+def _gate_page_settled(r) -> bool:
+    """A page result the delete gate may go on with: freshly written — or,
+    with DELETE_SKIPPED, skipped because its output was already there."""
+    if r[1] in ("ok", "overwrite") and r[3] is not None:
+        return True
+    return DELETE_SKIPPED and r[1] == "skipped"
+
+
+def _delete_sources(results, tasks, moved_finals, use_staging, workers=1):
     """The delete gate of process_group, moved here unchanged (refactor plan
     261113, A2): each source TIFF of these results is deleted only when every
-    check below proves it archived, in the same order as before."""
-    deleted = 0
-    deleted_skipped = 0
+    check below proves it archived, in the same order as before.
+
+    The pixel checks (VERIFY_ROUNDTRIP: a full decode of each page, 74 % of a
+    deleting run before v2.31.0) are started up front in a pool of `workers`
+    threads (the run's memory-capped count: a check needs less memory than
+    the encode it follows) for every source the cheap gates before them do
+    not already keep (_check_worth_starting: the pages settled, nothing left
+    out of the JXL, the provenance of a skipped output); the loop reads each
+    result where it called the check before. A source's own check still comes
+    before its own delete; another source's may now run first (Fable's B3,
+    5.6-b of plan 261113)."""
     # Group results by source TIFF path
     results_by_tiff: Dict[str, list] = {}
     for result in results:
         key = result[0][0]  # str(tiff_path)
         results_by_tiff.setdefault(key, []).append(result)
+    skip_proof = _skipped_archive_proof_of(results_by_tiff)
+    checks, check_pool = {}, None
+    if VERIFY_ROUNDTRIP:
+        todo = [(tk, r[0][1], r[2]) for tk, trs in results_by_tiff.items()
+                if _check_worth_starting(tk, trs, skip_proof) for r in trs]
+        if todo:
+            check_pool = ThreadPoolExecutor(max_workers=max(1, min(int(workers or 1), len(todo))))
+            for tk, page, final in todo:
+                checks[(tk, page, final)] = check_pool.submit(
+                    _verify_roundtrip_page, Path(tk), page, Path(final), _distance_for(tk))
+    try:
+        _delete_checked_sources(results_by_tiff, tasks, moved_finals, use_staging, checks,
+                                skip_proof=skip_proof)
+    finally:
+        if check_pool is not None:
+            check_pool.shutdown(wait=True, cancel_futures=True)
+
+
+def _skipped_archive_proof_of(results_by_tiff) -> dict:
+    """_skipped_archive_proof of every skipped page of these results (with
+    DELETE_SKIPPED; else {}).
+
+    A SKIPPED page is deleted on the strength of a PRE-EXISTING output this
+    run never wrote — its own status proves nothing but "a file by this name
+    exists". Before the gate's checks such an output used to be certified
+    only by exists() + integrity (+ an optional pixel round-trip), and a
+    same-named JXL of ANOTHER photo (a camera's name counter resetting across
+    cards, or simply OVERWRITE=False's "SKIP (exists)" on any age) deleted the
+    master TIFF for nothing. One batched exiftool pass over all skipped finals
+    + sources proves the pairing; an unreadable, absent or foreign marker
+    fails CLOSED (the source is kept). The dry-run preview of --delete-skipped
+    runs the same predicate."""
+    if not DELETE_SKIPPED:
+        return {}
+    pairs = [(Path(tk), Path(r[2])) for tk, trs in results_by_tiff.items()
+             for r in trs if r[1] == "skipped"]
+    return _skipped_archive_proof(pairs) if pairs else {}
+
+
+def _check_worth_starting(tiff_key, tiff_results, skip_proof) -> bool:
+    """Would the gate's loop reach the pixel check of this source? False
+    when one of the gates before it keeps the source whatever the pixels say
+    — a page not settled, a page or content its JXL leaves out, a skipped
+    output without its provenance (review S5: a --delete-skipped re-run over
+    old masters decoded every one of them for nothing). The loop judges every
+    source itself; this only spares a decode."""
+    if not all(_gate_page_settled(r) for r in tiff_results):
+        return False
+    key = os.path.normcase(tiff_key)
+    if key in _discarded_real_page_sources or _unarchived_content_sources.get(key):
+        return False
+    return all(skip_proof.get((key, os.path.normcase(r[2])), False)
+               for r in tiff_results if r[1] == "skipped")
+
+
+def _delete_checked_sources(results_by_tiff, tasks, moved_finals, use_staging, checks,
+                            skip_proof=None):
+    """The gate's loop (_delete_sources): `checks` holds the pixel checks
+    already started, by (source, page, output); `skip_proof` the provenance
+    of the skipped outputs (_skipped_archive_proof_of, read here when not
+    given)."""
+    deleted = 0
+    deleted_skipped = 0
 
     # Index tasks by final path ONCE (the old nested loop was O(n^2)
     # and rebuilt the result set for every source TIFF).
@@ -5592,26 +5730,10 @@ def _delete_sources(results, tasks, moved_finals, use_staging):
     for _, _, final_jxl, _, _, _, _, _, _ in tasks:
         by_final[str(final_jxl)] = final_jxl
 
-    # A SKIPPED page is deleted on the strength of a PRE-EXISTING output
-    # this run never wrote — its own status proves nothing but "a file by
-    # this name exists". Before the checks below such an output used to be
-    # certified only by exists() + integrity (+ an optional pixel
-    # round-trip), and a same-named JXL of ANOTHER photo (a camera's name
-    # counter resetting across cards, or simply OVERWRITE=False's "SKIP
-    # (exists)" on any age) deleted the master TIFF for nothing. One
-    # batched exiftool pass over all skipped finals + sources proves the
-    # pairing (`_skipped_archive_proof`); an unreadable, absent or
-    # foreign marker fails CLOSED (the source is kept). The dry-run
-    # preview of --delete-skipped runs the same predicate.
-    _skip_proof = {}
-    if DELETE_SKIPPED:
-        _skip_pairs = []
-        for _tk, _trs in results_by_tiff.items():
-            for _r in _trs:
-                if _r[1] == "skipped":
-                    _skip_pairs.append((Path(_tk), Path(_r[2])))
-        if _skip_pairs:
-            _skip_proof = _skipped_archive_proof(_skip_pairs)
+    # The provenance of every SKIPPED page, in one batched read
+    # (_skipped_archive_proof_of): a skip proves nothing on its own.
+    _skip_proof = (skip_proof if skip_proof is not None
+                   else _skipped_archive_proof_of(results_by_tiff))
 
     for tiff_key, tiff_results in results_by_tiff.items():
         # Every page must have freshly succeeded — or, with DELETE_SKIPPED,
@@ -5619,12 +5741,7 @@ def _delete_sources(results, tasks, moved_finals, use_staging):
         # carries NO proof of its own (see the DELETE_SKIPPED note): it is
         # admitted here only so the checks below can judge it on the file
         # itself, never on the timestamp that produced the skip.
-        def _page_settled(r) -> bool:
-            if r[1] in ("ok", "overwrite") and r[3] is not None:
-                return True
-            return DELETE_SKIPPED and r[1] == "skipped"
-
-        all_ok = all(_page_settled(r) for r in tiff_results)
+        all_ok = all(_gate_page_settled(r) for r in tiff_results)
         if not all_ok:
             _blocked_by_skip = (not DELETE_SKIPPED
                                 and any(r[1] == "skipped" for r in tiff_results))
@@ -5738,8 +5855,19 @@ def _delete_sources(results, tasks, moved_finals, use_staging):
             verify_failed = None
             for r in tiff_results:
                 _page = r[0][1]
-                ok_v, detail = _verify_roundtrip_page(
-                    Path(tiff_key), _page, Path(r[2]), _distance_for(tiff_key))
+                _check = checks.get((tiff_key, _page, r[2]))
+                try:
+                    if _check is not None:
+                        ok_v, detail = _check.result()
+                    else:
+                        ok_v, detail = _verify_roundtrip_page(
+                            Path(tiff_key), _page, Path(r[2]), _distance_for(tiff_key))
+                except Exception as e:
+                    # A check that raised (a MemoryError in its comparison)
+                    # keeps THIS source, and the gate goes on judging the
+                    # others: it used to end the whole gate, with `workers`
+                    # checks running at once (Fable's review, S3).
+                    ok_v, detail = False, f"the check itself failed ({type(e).__name__}: {e})"
                 if not ok_v:
                     verify_failed = (_page, detail)
                     break
@@ -6123,6 +6251,12 @@ def build_parser():
                         help="Show what would be converted without converting")
     parser.add_argument("--summary-json",    action="store_true",
                         help=argparse.SUPPRESS)  # internal: machine-readable summary for jxl_photo.py
+    parser.add_argument("--serve",           action="store_true",
+                        help="Serve mode, for a program that converts many files one at "
+                             "a time (photo-backup): read one job per line on stdin (JSON: "
+                             "id, input, output), run each like a single call with the "
+                             "other options of this command line, answer one JSON line per "
+                             "job on stdout. Never deletes. See the README.")
     parser.add_argument("--staging",         type=str, default=None,
                         help="Staging directory for output JXLs (reduces HDD seek contention)")
     parser.add_argument("--export-marker",  type=str, default=None,
@@ -6179,6 +6313,7 @@ def build_parser():
 
 
 _work_dir_problem = _common._work_dir_problem
+_percent_temp_problem = _common._percent_temp_problem
 
 
 def _configure_run(parser, args):
@@ -6223,6 +6358,10 @@ def _configure_run(parser, args):
             parser.error(_why)
 
     _check_dir(TEMP_DIR, "TEMP_DIR", dry_run_uses_it=True)
+    # A '%' in the temp folder: ExifTool cannot keep its own files there.
+    _why = _percent_temp_problem(TEMP_DIR)
+    if _why:
+        parser.error(_why)
     _check_dir(args.staging, "staging directory")
     # The script-set staging path (the TEMP2_DIR constant at the top of this
     # file) never goes through --staging's validation: an invalid or
@@ -6856,6 +6995,8 @@ def main():
     _utf8_console()      # before argparse prints anything (#661)
     parser = build_parser()
     args = parser.parse_args()
+    if args.serve:
+        parser.error("--serve runs the serve loop: start the script itself with it")
 
     global ICC_CACHE_DIR_OVERRIDE
     global _gen_divergence_logged
@@ -7455,4 +7596,6 @@ def main():
         sys.exit(1)
 
 if __name__ == "__main__":
+    if "--serve" in sys.argv[1:]:
+        sys.exit(_common._serve(_G, main, sys.argv[1:]))
     main()

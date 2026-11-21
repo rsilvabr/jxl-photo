@@ -35,6 +35,9 @@ SCRIPTS = {
 EXEMPT = {"_run_exiftool_argfile", "_read_mpg_markers", "_tool_version",
           "_exiftool_one_process", "_exiftool_commands", "_run_exiftool_writes",
           "_prefetch_exiftool_reads",
+          # The kept-open ExifTool (EXIFTOOL_STAY_OPEN): they pass their
+          # caller's timeout on, like _run_exiftool_argfile.
+          "_run_exiftool_file", "_exiftool_via_server",
           # The batch engine's runner (#676): one chunk of a planning-time
           # batch read, called only by _exiftool_batch, with its per-batch limit.
           "_batch_exiftool"}
@@ -42,7 +45,8 @@ EXEMPT = {"_run_exiftool_argfile", "_read_mpg_markers", "_tool_version",
 # timeout is the 2nd (_exiftool_commands, _run_exiftool_writes) or 3rd
 # (the common module's g-functions) argument, or `timeout=`.
 _COMMAND_RUNNERS = {"_exiftool_commands", "_run_exiftool_writes", "_exiftool_one_process",
-                    "_prefetch_exiftool_reads"}
+                    "_prefetch_exiftool_reads", "_run_exiftool_file",
+                    "_exiftool_via_server"}
 
 
 def _exiftool_calls(src: str):

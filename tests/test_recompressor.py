@@ -362,7 +362,7 @@ class TestConvertOne:
         # ...then the rest of the metadata copied from the source JXL, with no
         # field-by-field XMP copy on top of the block (#531 doubling)...
         assert "-tagsfromfile" in lines and str(src) in lines
-        assert "-exif:all" in lines and "-xmp:all" not in lines
+        assert "-exif:all#" in lines and "-xmp:all" not in lines     # #684: the values
         # ...and the new parameters APPENDED to the chain, gen reconciled
         assert "-XMP-dc:Description=gen=2 | cjxl d=0.1 e=7 | cjxl d=1.0 e=7" in lines
 

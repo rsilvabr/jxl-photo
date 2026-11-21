@@ -357,7 +357,16 @@ names its item. A change on purpose to an item: photo-backup changes first.
   the exact computation (`test_out_of_gamut_cube`). Anything else returns None and keeps
   ImageMagick. Never widen what is accepted (table curves, other `para` forms, LUT profiles)
   without the same proof; the PNG a worker holds while it waits for a cjxl slot is budgeted
-  (`_FAST_PNG_BYTES_PER_PIXEL`).
+  (`_FAST_PNG_BYTES_PER_PIXEL`). Since v2.31.0 the ImageMagick route's PNG stays in memory too
+  (`png:-` read by `_run_to_memory`, whose `input=` writes the raw pixels first: ImageMagick
+  reads its whole input before it writes; the iCCP checks and `_png_without_colour_chunks`
+  take the bytes) — no `conv.png` in `TEMP_DIR` — and every derivative run budgets that PNG.
+  `_run_to_memory`'s stdout pipe is 1 MB on Windows (`_output_pipe`, `_PIPE_BUFFER`):
+  ImageMagick writes a PNG in small pieces, and through the default pipe each piece waited
+  for the reading thread, which sleeps while the pipe is empty — a 2048 px derivative's
+  13 MB PNG took 2.0 s against 1.0 s for a file, and the resize run was slower than with
+  `conv.png` (found after the phase-1 review; djxl writes large blocks and never noticed).
+  Never go back to `subprocess.PIPE` there.
 - **The encoder never converts colour, resizes or sharpens — by design.** It
   writes the MASTER, and its outputs carry the `jxlphoto-src`/`srcsum` proof
   that the delete gates trust. Derivatives (colour/size/sharpening) come from
@@ -494,7 +503,16 @@ names its item. A change on purpose to an item: photo-backup changes first.
 - **`--delete-source` works in every mode** (since v2.0.0). Every delete path is gated
   by an integrity check plus (for JPEG recovery) `djxl --reconstruct_jpeg` or a
   same-run MD5 match. Keep those gates fail-CLOSED: an unverifiable output must
-  block deletion, never be waved through.
+  block deletion, never be waved through. The encoder's pixel checks
+  (`VERIFY_ROUNDTRIP`, 74 % of a deleting run) are started up front in a pool of
+  the run's memory-capped worker count (`_delete_sources`, v2.31.0) — only for
+  the sources the cheap gates before them do not already keep
+  (`_check_worth_starting`: pages settled, nothing left out, the provenance of
+  a skipped output, read first by `_skipped_archive_proof_of`) — and the
+  gate's loop (`_delete_checked_sources`) reads each result where it called the
+  check: same order of checks, same lines; a source's check still comes before
+  its own delete. A check that raises keeps its own source ("the check itself
+  failed") and the loop goes on judging the others.
 - **"Cannot tell" is not "no marker" (#563).** `_read_source_markers_batch`
   (parity-pinned in the four backends) marks a file whose batch failed,
   stalled or returned no entry with `unread: True`; its src/srcsum stay None.
@@ -545,16 +563,156 @@ names its item. A change on purpose to an item: photo-backup changes first.
   reads in `build_metadata_injection_args` are prefetched
   (`_prefetch_exiftool_reads`: answered only for the EXACT same arguments,
   read-only commands only — never an `-o` extraction, which fails when run
-  twice); the decoder's `copy_metadata` is two processes and a failure never
+  twice); the decoder's `copy_metadata` is two batches and a failure never
   stops the next (`stop_at_failure=False`). A new exiftool call on those
   paths joins the list; a command that must stay apart from another (the XMP
   block before the edits, `-wm cg`, a clear before a `+=`) stays a separate
-  COMMAND, which no longer costs a process. The encoder's PNG for cjxl is
+  COMMAND, which no longer costs a process. **The decoder rewrites the TIFF
+  ONCE (v2.31.0):** ExifTool rewrites the whole TIFF for any command that
+  writes, so the JXL's XMP block goes into a small file of its own first
+  (`-o <tmp>.xmp -tagsfromfile <jxl> -XMP`, byte for byte; a `%` path: the
+  file `_xmp_block_args` read), the XMP edits (the dc:Relation all-`=` lines
+  of `_collapse_list_reset`, provenance, pixel sum, History, the orientation's
+  XMP line) are made THERE, and ONE command writes the EXIF, `-XMP<=` the
+  edited block and the IPTC into the TIFF. Never move an XMP edit into the
+  TIFF's command while it writes the block: the block wins and the edit is
+  ignored. A `%` in the temp folder (ExifTool expands it in the names of `-o`
+  and `<=`): every backend REFUSES such a folder at the start of a run and of
+  a serve process (`_percent_temp_problem`, the effective folder — TEMP_DIR,
+  else the system's; the owner's call, 2026-11-21: some steps failed file by
+  file there and the encoder silently kept only the XMP fields ExifTool can
+  write). `copy_metadata` keeps the old route for a direct call: the block
+  straight from a plain-named JXL into the TIFF, the edits in a second
+  command (`direct_block`). The batch
+  ends with a read of the TIFF's dc:Relation, and the copy fails unless
+  this run's `jxlphoto-src` is there (Fable's review: a block file ExifTool
+  could not open gave a TIFF with the EXIF only and an OK). The
+  dc:Relation the edits decide from is the JXL's own (read
+  before). The Software/ImageDescription clean-ups read the TIFF after it and
+  run only when they find tifffile's defaults (a master made from a TIFF
+  tifffile wrote); they are cosmetic and never fail the copy. The encoder's PNG for cjxl is
   zlib level 0 (B2: 16-bit photo data barely compresses; 6.55 s → 0.40 s of
   Python per 43 MP file). Peak Python memory per pixel is the same for an
   RGB page and ~1.3–2.9 B/px higher for a 16-bit page of 4 channels (RGB+IR,
   RGBA), where the level-1 PNG used to shrink; `_PYTHON_BYTES_PER_PIXEL`
   budgets per channel (review V5).
+- **ExifTool kept open (`EXIFTOOL_STAY_OPEN`, v2.31.0).** On Windows every
+  per-file ExifTool command goes to an ExifTool started once with
+  `-stay_open True -@ -` (~15 ms a command against ~200 ms for a fresh
+  process, measured 2026-11-21): `_exiftool_via_server` (common), used by
+  `_run_exiftool_argfile` (after the prefetch lookup), `_exiftool_commands`,
+  `_prefetch_exiftool_reads` and `_run_exiftool_file` (the encoder's two
+  argfile calls; `binary` keeps a `-b` answer as bytes). Each script has its
+  own pool (`_EXIFTOOL_POOL = _common._ExiftoolPool()`, state of the script;
+  the transcoder and the recompressor have `_EXIFTOOL_BATCH` for it): a thread
+  takes a process for one call and gives it back; processes are told apart by
+  ExifTool command AND working directory; idle ones are kept up to the most
+  ever busy (at least 4, at most 8: ~50 MB each after a big TIFF, outside the
+  memory budget), the most recently used taken first; one idle for 120 s is
+  closed at the next call, one is replaced after 1000 commands, all close at
+  exit. Its rules: used only when `_exiftool_batch_ok` and the script's
+  `subprocess` (module, `run`, `Popen`) is the real one (a test double of a
+  runner or of subprocess turns it off, so the double sees every command as
+  before); ONE command at a time (two in the pipe could deadlock: a long one
+  fills stdin while the answer to the one before fills stdout); the answer is
+  read in the calling thread with PeekNamedPipe, each byte looked at about
+  once (`_AnswerScan`: searching from the start after each 4 KB read made a
+  32 MB answer quadratic) and the deadline checked every round
+  (`_spawn_exiftool_server` is the only new subprocess owner,
+  `tests/test_subprocess_capture.py`); a timeout kills the process and raises
+  `subprocess.TimeoutExpired`; a command written to it that it ended without
+  answering gets status -1 and is NEVER sent again (a write could run twice,
+  even one it may have died just before reading), one that could not be
+  written at all goes once to a fresh process. ExifTool does not end when its
+  stdin closes (measured), so every process is in a Windows Job Object of its
+  own (kill on close; `kill()` ends the whole job, so a launcher's child — an
+  old PAR-packed exiftool.exe, a Chocolatey shim — goes too): it never
+  outlives Python, however Python ends. No Job Object = no kept-open process
+  (the old path). The planning-time batch reads (their stall rule) and the
+  `-ver` probe stay processes of their own (a probe on the kept-open process
+  would wait the whole timeout for an ExifTool without `-echo4`).
+  **A command that changes how LATER commands write or read XMP never goes
+  there** (`_taints_xmp_prefixes`): (1) a command that writes XMP fields
+  copied from a file (a field copy `-xmp:all`/`-all:all`/`-xmp-<ns>:…`, or
+  `_exiftool_source`'s MIE dump): afterwards ExifTool writes some namespaces
+  with ITS prefix (measured: Google's container item `GItem:` where the file
+  and a fresh process keep `Item:`); (2) a struct write other than
+  xmpMM:History (`_STRUCT_WRITE`): afterwards that struct's flattened tags
+  are named differently (`Thumbnails={...}`, then `ThumbnailWidth` read back
+  EMPTY with status 0 — Fable's review). The History append, then the
+  `HistoryParameters` reads the scripts make, answer as a fresh process does
+  (`test_the_history_append_then_its_reads_match_a_fresh_process`): a new
+  struct write or a new read of a flattened struct tag needs the same proof.
+  Such a command — or a batch holding one — runs in a process of its own,
+  exactly as before v2.31.0. Each command ends with `-execute<N>`: ExifTool
+  answers `{ready<N>}`, so a command it refused BEFORE running it (an option
+  that took the `-echo3` line as its value) is a complete answer at once —
+  status -1, its own words — and that process is retired, instead of a wait
+  of the whole timeout. **"Error opening file" is a failure**
+  (`_unread_source_failed`, every entry point): ExifTool answers a
+  `-TAG<=FILE` that exists but cannot be opened (held by an antivirus) with
+  that line and exit status 0 when the command wrote anything else, and the
+  output then lacks all that file held. Not closed: an ExifTool that runs as
+  a launcher could start its child before `_put_in_job` (none here; 13.59
+  has no child process). `tests/test_exiftool_stay_open.py`.
+- **Serve mode (`--serve`, v2.31.0; encoder, decoder, transcoder).** For a
+  program that converts many files one call at a time (photo-backup does not
+  use it yet: that is its own change, and a contract item to add then). The
+  script's `__main__` calls `_common._serve(_G, main, argv)` instead of
+  `main()` when the command line has `--serve` (`main()` itself refuses the
+  flag): one JSON job per stdin line (`id`, `input`, `output`: absolute paths
+  only — an empty string was the process's working folder), each run as
+  `main()` with `sys.argv` = input, output and the serve line's options, one
+  JSON answer per job (`exit`, `outputs` new in the folder, `error` = the
+  FIRST two ERROR lines the job logged, the cause, as photo-backup reads a
+  single call's output; else the last line it printed on stderr), a
+  presentation line first and an end line at EOF. What a job prints on stderr
+  (argparse's usage from a check `main()` makes itself, tifffile's warnings
+  through `logging.lastResort`) is caught (`redirect_stderr`) and copied into
+  the log: one usage text per job filled an unread stderr pipe and stopped
+  the process. The abort latch of the job before is reset (`_reset_abort`).
+  Its rules: refused before the first job (`_serve_refusal`, the script's own
+  parse plus the EFFECTIVE `DELETE_SOURCE`/`DELETE_SKIPPED`): any delete, a
+  confirmation switch, `--clean-staging`, `--help`/`--version`, and each
+  script's maintenance modes (`_SERVE_REFUSED`; the encoder's
+  `--provenance adopt` in common); stdin and stdout become the channels and
+  fds 0/1 point at NUL (nothing printed can corrupt an answer or fill a pipe
+  nobody reads); ONE log for all jobs (`_SERVE_LOG`: `setup_logger` hands it
+  back); every per-file cache keyed by path/size/date is emptied before each
+  job (`_SERVE_FILE_CACHES`, and run state a run clears only at its end, the
+  `_planned_outputs`), so **a new module-level container that remembers files
+  across runs goes in that tuple** (`test_a_job_leaves_no_state_for_the_next`:
+  job B after job A and after job C must leave every data global of the
+  script and of common the same, scalars included, in all three scripts);
+  an unexpected exception is answered and ENDS the process (state may be
+  half done); on Windows the process puts itself in a kill-on-close Job
+  Object, so its cjxl/djxl/ExifTool die with it. The wizard never sends it:
+  `NOT_OFFERED`, and `_expert_flags_problem` refuses it. `tests/test_serve.py`
+  (subprocesses: the loop moves fds 0 and 1).
+- **The failed files again at the end (v2.31.0).** Without `--summary-json`,
+  each `emit_summary_json` calls `_log_failure_recap` (common): `Errors (N):`
+  and the first ten `  -> name: reason` at WARNING. Never ERROR: each failure
+  already logged its ERROR line and photo-backup's `_JXLPHOTO_ERROR` counts
+  the lines that START with ERROR. The transcoder's `main()` resets its
+  `_run_summary` first (`record_summary()`), or a serve job could repeat the
+  failures of the job before it.
+- **EXIF is copied by VALUE (#684, v2.31.0):** every `-tagsfromfile ...
+  -exif:all` is `-exif:all#`, and `_exiftool_source`'s MIE container has
+  `-exif:all#` after its `-all:all`. A printed value converted back is lossy
+  (MaxApertureValue f/2.83 → f/2.8, FocalLength 6.62 → 6.6 mm); the value is
+  exact to ExifTool's rational precision (an APEX rational is rewritten from
+  its number: ApertureValue 8.99999999 can come back 9.00000007). A TIFF never
+  gives `-b -Exif` a block (0 bytes, every TIFF measured), so the copy is the
+  master's EXIF. A new EXIF copy uses `#` too.
+- **One decode per page for the Explorer thumbnail and the page check
+  (v2.31.0):** while `_VERIFY_EACH_PAGE` (photo-backup's
+  `--verify-roundtrip`), `convert_one` sets the encoder's thread-local
+  `_KEPT_DECODE.wanted`; `_make_explorer_thumbnail` then also writes
+  `--orig_icc_out` and keeps its PAM with `_codestream_digest` (sha256 of the
+  codestream payloads), and `_decode_jxl_for_verify` takes it (`_take_kept_decode`,
+  once) only when the file it checks has the same digest — pixels and profiles
+  come from the codestream only. Normal runs keep nothing and pass no extra
+  flag. Anything else decodes as before.
 - **Worker memory cap**: the encoder caps `--workers`
   (`_memory_capped_workers`, parity-pinned with the recompressor's unused
   copy). The recompressor caps the full-size cjxl instead
@@ -873,11 +1031,12 @@ names its item. A change on purpose to an item: photo-backup changes first.
 - The suite and the battery set `JXLPHOTO_LOG_DIR` (conftest / `run()`), so no
   test writes to `Logs\`. Every subprocess call in the four backends goes
   through `_run_captured` except the version probes (`_tool_version`,
-  `_warn_if_libjxl_too_old`) and `_run_to_memory` (#671, then the decodes of
+  `_warn_if_libjxl_too_old`), `_run_to_memory` (#671, then the decodes of
   round 87 — see "Full-size decodes stay in memory": an output that must
   never reach the disk, read into memory in the calling thread — the same
-  no-reader-thread rules; `_run_captured`'s stdout is a temp FILE by design);
-  `tests/test_subprocess_capture.py` enforces it.
+  no-reader-thread rules; `_run_captured`'s stdout is a temp FILE by design)
+  and `_spawn_exiftool_server` (the kept-open ExifTool, v2.31.0, read the same
+  way); `tests/test_subprocess_capture.py` enforces it.
 - Prefer verifying real behavior against real photos over reasoning alone — the
   test suite is synthetic/mocked, so codec-path bugs (ICC, bit depth,
   multi-page, channel counts) only show up against actual files.
@@ -1056,6 +1215,12 @@ must-fix / should-fix items and a commit verdict.
   section per release that changed an existing command line's behaviour)
 - `docs/behavior_and_limitations.md` — defaults, limits and viewer quirks
   (the README's "Good to know" links into it)
+- `docs/known_issues.md` — only the bugs that changed FILES the toolkit
+  wrote: which versions, how to find those files (an ExifTool `-if` on the
+  `xmpMM:History` version, tested on a real master) and what to do. A fix of
+  such a bug adds its entry at the top in the same change; everything else
+  stays in the bug tracker only. The README's documentation table gets its
+  row at the next release
 - `docs/file_sizes.md` — measured file sizes per camera and for film scans,
   effort 7 vs 9 (sizes, time, ssimulacra2/butteraugli) and `--buffering 0`;
   libjxl 0.12.0, 2026-10-30. The README's size table is its summary (the

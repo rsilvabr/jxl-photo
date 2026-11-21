@@ -1014,6 +1014,13 @@ EXIFTOOL_TIMEOUT = CJXL_TIMEOUT
                              # Per-file exiftool calls (metadata copy, source
                              # profile read): same patience as the codec — a
                              # busy hard disk can stall them for minutes
+EXIFTOOL_STAY_OPEN = True    # Windows: keep ExifTool open (-stay_open) and
+                             # send it the per-file commands instead of
+                             # starting it for each one (~0.2 s per start;
+                             # one that copies XMP fields from a file still
+                             # gets a process of its own);
+                             # same answers, ended with the script (a Job
+                             # Object). False = one ExifTool per command
 EXIFTOOL_BATCH_STALL = 180   # Planning-time batch reads (up to 400 files per
                              # call): stopped after this long with no output
                              # from exiftool (a hang) …
@@ -1054,6 +1061,11 @@ EXPORT_JXL_SUBFOLDER = ""                   # mode 7
 | 2 | Usage error (argparse) or the run aborted early (disk full) |
 | 3 | Aborted by the user at the delete confirmation |
 | 130 | Interrupted with Ctrl+C (summary still printed with partial results) |
+
+A run that had errors names the failed files once more at its end
+(`Errors (N):`, WARNING lines, the first ten), for whoever reads only the last
+lines of a console or a log. Not with `--summary-json`: the wizard prints its
+own list.
 
 ## Notes
 

@@ -294,6 +294,9 @@ def _expert_flags_problem(origin: str, dest: str, flags: Optional[str]) -> Optio
     unknown = [t for t in extras if t.startswith('-')]
     if unknown:
         return f"{' '.join(unknown)} {'is' if len(unknown) == 1 else 'are'} not an option of {module}.py"
+    if getattr(_ns, "serve", False):
+        return ("--serve is for a program that sends the script its files one by one "
+                "(photo-backup), not for a run of the wizard")
     return None
 
 
@@ -3359,6 +3362,11 @@ NOT_OFFERED: Dict[str, str] = {
     "jxl_tiff_decoder:--version": "not a run option",
     "jxl_jpeg_transcoder:--version": "not a run option",
     "jxl_recompressor:--version": "not a run option",
+    # A loop for a program that sends the script its files one by one
+    # (photo-backup), never a run of the wizard: refused in the expert flags.
+    "jxl_tiff_encoder:--serve": "serve mode, for programs (photo-backup)",
+    "jxl_tiff_decoder:--serve": "serve mode, for programs (photo-backup)",
+    "jxl_jpeg_transcoder:--serve": "serve mode, for programs (photo-backup)",
 }
 
 # Flags the maintenance screens pass (their own small commands, not jobs).
@@ -8035,15 +8043,8 @@ class InteractiveMenu:
             and any(_recompress_entry_in_place(_s, dest_path, detected_mode)
                     for _s, dest_path, detected_mode in resolved_entries))
 
-        # ...and nobody can type the HHMM token in a scheduled run. The
-        # _run_saved_session gate keys on last_mode (0/8) and misses manifest
-        # presets, which store 99 — so the refusal has to happen here, where the
-        # resolved entries (and their real modes) are known.
-        if _any_in_place_recompress and workflow.get('unattended') and not dry_run:
-            self._print_error(
-                "Refusing to run unattended: this manifest recompresses JXLs in "
-                "place (mode 0/8), and the HHMM confirmation cannot be given "
-                "here. Run it from the menu, or add --dry-run to simulate it.")
+        if not self._manifest_step_in_place_unattended(workflow, _any_in_place_recompress,
+                                                       dry_run):
             return False
 
         if not dry_run and (_flags_request_delete(workflow.get('expert_flags'), origin, dest)
@@ -8374,6 +8375,23 @@ class InteractiveMenu:
                     for i, _why in _bad_folder[:5]:
                         self._print_error(f"Manifest row {i}: output folder — {_why}")
                     return False
+        return True
+
+    def _manifest_step_in_place_unattended(self, workflow, any_in_place_recompress,
+                                           dry_run) -> bool:
+        """A manifest that recompresses JXLs in place (mode 0/8, no
+        Destination) is refused unattended: nobody can type the HHMM token of
+        an in-place replacement in a scheduled run. False = refused (the step
+        printed why)."""
+        # The _run_saved_session gate keys on last_mode (0/8) and misses
+        # manifest presets, which store 99 — so the refusal has to happen here,
+        # where the resolved entries (and their real modes) are known.
+        if any_in_place_recompress and workflow.get('unattended') and not dry_run:
+            self._print_error(
+                "Refusing to run unattended: this manifest recompresses JXLs in "
+                "place (mode 0/8), and the HHMM confirmation cannot be given "
+                "here. Run it from the menu, or add --dry-run to simulate it.")
+            return False
         return True
 
     def _manifest_step_source_overlaps(self, workflow, resolved_entries) -> bool:

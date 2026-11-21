@@ -148,6 +148,14 @@ EXIFTOOL_TIMEOUT = CODEC_TIMEOUT
 # patience as the codec: many workers on a busy hard disk can stall a metadata
 # rewrite for minutes. The planning-time batch reads use the two settings below.
 
+EXIFTOOL_STAY_OPEN = True
+# Windows: keep ExifTool open (-stay_open) and send it the per-file commands
+# instead of starting it for each one (~0.2 s per start; a command that copies
+# XMP fields from a file, such as the convert path's metadata copy, still gets
+# a process of its own). Same commands, same answers; the processes end with
+# the script (a Windows Job Object).
+# False = one ExifTool per command, as before v2.31.0.
+
 EXIFTOOL_BATCH_STALL = 180
 # A planning-time batch read (up to 400 files per exiftool call) is stopped only
 # after this many seconds with no output from exiftool (a hang).
@@ -516,6 +524,9 @@ Options:
                      to total a multi-entry run; it is never printed to the
                      user. Safe to use in your own scripts -- the prefix is
                      stable and the payload is JSON.
+  --serve            Serve mode, for a program that converts many files one at
+                     a time: one job per line on stdin, one answer per line on
+                     stdout. Never deletes. See "Serve mode" below
   --export-marker M  Folder name marker for modes 6/7 (default: the EXPORT_MARKER
                      setting in the script). Matched case-insensitively on
                      folder names that START or END with it.
@@ -536,6 +547,53 @@ Options:
 | `2` | Aborted (e.g. duplicate output destinations) |
 | `3` | User declined the delete-source confirmation |
 | `130` | Interrupted with Ctrl+C (cancelled) |
+
+A run that had errors names the failed files once more at its end
+(`Errors (N):`, WARNING lines, the first ten), for whoever reads only the last
+lines of a console or a log. Not with `--summary-json`: the wizard prints its
+own list.
+
+### Serve mode (`--serve`)
+
+For a program that converts many files one call at a time (photo-backup keeps
+each JPEG as a lossless JXL and rebuilds it on restore): each call pays
+Python's start, the imports, the tool checks and a log of its own — more than
+the work on a JPEG. A serve process is started once, with the options every
+file shares, and reads one job per line:
+
+```
+python jxl_jpeg_transcoder.py --serve --mode 0 --workers 1 --effort 7 --force-transcode
+{"id": "1", "input": "D:\\Photos\\IMG_0001.jpg", "output": "D:\\Backup\\0001"}
+```
+
+- Its first line on stdout presents it:
+  `{"serve": 1, "version": "2.31.0", "script": "jxl_jpeg_transcoder.py"}`.
+- Each job runs exactly like `python jxl_jpeg_transcoder.py <input> <output>
+  <options>` and gets one answer line: `{"id": "1", "exit": 0, "outputs":
+  ["IMG_0001.jxl"], "error": ""}` — `exit` is that call's exit code,
+  `outputs` the names that were not in the folder before the job, `error`
+  the first errors it logged (or the last line it printed on stderr).
+- Input and output are absolute paths, the output folder must exist (a
+  single call in mode 2 would create it), and a missing input is answered
+  `exit` 2 without running the job. `outputs` names only what is new at the
+  top of the folder: an output rewritten in place (`--overwrite`, a sync)
+  is not listed, and two serve processes sharing a folder see each other's
+  files.
+- A malformed line is answered with `exit` 2 and the next job runs. When
+  stdin closes, the last line is `{"end": true, "jobs": N, "failed": M}` and
+  the process exits 0. Lines are JSON in ASCII (`\uXXXX` for the rest).
+- All its jobs write to one log; stdout carries only the answers, and nothing
+  else is printed (stderr only if Python itself dies).
+- It never deletes and never asks: `--delete-source`, `--delete-skipped`,
+  `--delete-confirm-off`, `--clean-staging`, `--repair-jbrd`, `-h`,
+  `--version` — or `DELETE_SOURCE` / `DELETE_SKIPPED` set to True in the
+  script — make it exit 2 before the first job.
+- A job that raises an unexpected error is answered (`exit` 2) and the
+  process ends, so nothing half done reaches the next job. On Windows it and
+  everything it started (cjxl, djxl, magick, ExifTool) end together, however
+  it ends.
+- `jxl_photo.py transcode --serve ...` works the same; the wizard itself
+  never uses it (refused in the expert flags).
 
 * * *
 

@@ -409,6 +409,11 @@ EXIFTOOL_TIMEOUT = CJXL_TIMEOUT
 # reported as a codec timeout). The planning-time batch reads use the two
 # EXIFTOOL_BATCH_* settings below instead.
 
+EXIFTOOL_STAY_OPEN = True
+# Windows: keep ExifTool open (-stay_open) and send it the per-file commands,
+# instead of starting it for each one (~0.2 s per start). Same commands, same
+# answers. False = one ExifTool per command, as before v2.31.0.
+
 # Planning-time exiftool BATCH reads (markers of up to 400 files per call).
 # A batch is stopped only when exiftool has printed nothing for
 # EXIFTOOL_BATCH_STALL seconds (a hang), or after EXIFTOOL_BATCH_TIMEOUT
@@ -447,6 +452,8 @@ WORKER_MEMORY_LIMIT = "both"
 TEMP_DIR = None
 # Scratch dir for exiftool argfiles and --verify-roundtrip decodes.
 # None = system temp.
+# No '%' in its path (nor in the system temp's when None): ExifTool reads it
+# as a format code, so a run with one stops before its first file (v2.31.0).
 
 TEMP2_DIR = None
 # Staging dir (fast SSD): outputs are written there and moved to the final
@@ -749,6 +756,7 @@ _OVERLAY_SETTINGS = {
     "CJXL_BUFFERING": ("choice", None, 0, 1, 2, 3),
     "CJXL_TIMEOUT": ("int", 1, None),
     "EXIFTOOL_TIMEOUT": ("int", 1, None),
+    "EXIFTOOL_STAY_OPEN": ("bool",),
     "EXIFTOOL_BATCH_STALL": ("int", 1, None),
     "EXIFTOOL_BATCH_TIMEOUT": ("int", 1, None),
     "TEMP_DIR": ("path?",),
@@ -1008,10 +1016,10 @@ _UNKNOWN_IMAGE_PIXELS = 60_000_000
 # of them: a worker runs one at a time.
 _SIDE_STEP_BYTES_PER_PIXEL = 40
 
-# Bytes per pixel of the PNG the Python colour conversion hands to cjxl
-# (FAST_COLOR_CONVERSION): it stays in memory while its worker waits for a
-# cjxl slot and while cjxl reads it, where the ImageMagick route's conv.png
-# waited on disk. 16-bit RGBA = 8.
+# Bytes per pixel of the PNG a derivative hands to cjxl — the Python colour
+# conversion's (FAST_COLOR_CONVERSION) and, since v2.31.0, ImageMagick's,
+# which was conv.png on disk: it stays in memory while its worker waits for a
+# cjxl slot and while cjxl reads it. 16-bit RGBA = 8.
 _FAST_PNG_BYTES_PER_PIXEL = 8
 
 
@@ -1115,9 +1123,10 @@ def _memory_capped_pipeline(requested, max_pixels, distance, effort,
     `cjxl_pixels` is the largest image cjxl will really ENCODE when that is
     smaller than the source (a resized derivative: a 2048 px copy of a 45 MP
     master is ~3 MP); the side steps still decode the full `max_pixels`.
-    A run that converts colour in Python (_fast_colour_possible) adds the PNG
-    it holds in memory while it waits for its slot (_FAST_PNG_BYTES_PER_PIXEL)
-    to the cjxl budget.
+    A derivative run (DERIVATIVE, or one that converts colour in Python,
+    _fast_colour_possible) adds the PNG it holds in memory while it waits for
+    its slot (_FAST_PNG_BYTES_PER_PIXEL) to the cjxl budget: ImageMagick's
+    PNG is in memory too since v2.31.0.
     """
     if WORKER_MEMORY_FRACTION <= 0:
         return requested, None
@@ -1128,7 +1137,7 @@ def _memory_capped_pipeline(requested, max_pixels, distance, effort,
     enc_pixels = (min(cjxl_pixels, pixels) if cjxl_pixels and cjxl_pixels > 0
                   else pixels)
     per_cjxl = enc_pixels * _cjxl_bytes_per_pixel(distance, effort, buffering)
-    if _fast_colour_possible():
+    if DERIVATIVE or _fast_colour_possible():
         per_cjxl += enc_pixels * _FAST_PNG_BYTES_PER_PIXEL
     per_side = pixels * _SIDE_STEP_BYTES_PER_PIXEL
     avail, budget = _available_memory_bytes()
@@ -1214,6 +1223,9 @@ SUMMARY_PREFIX = _common.SUMMARY_PREFIX
 SUMMARY_MAX_FAILURES = 200
 
 
+def _log_failure_recap(*a, **k): return _common._log_failure_recap(_G, *a, **k)
+
+
 def emit_summary_json(enabled: bool, *, ok: int, overwritten: int, skipped: int,
                       errors: int, log_file, extras: Optional[Dict[str, int]] = None,
                       failures: Optional[list] = None, dry_run: bool = False,
@@ -1224,9 +1236,11 @@ def emit_summary_json(enabled: bool, *, ok: int, overwritten: int, skipped: int,
     so the wrapper can sum and render script-specific stats without knowing
     what they mean. `failures` is a list of (file, reason) pairs. `dry_run`
     marks counts as "would have" so the wrapper can label the block instead of
-    reporting a simulation as finished work.
+    reporting a simulation as finished work. Without the flag the failed files
+    are named once more at the end of the log (_log_failure_recap).
     """
     if not enabled:
+        _log_failure_recap(failures)
         return
     failures = failures or []
     unreadable = unreadable or []
@@ -1442,6 +1456,11 @@ def _guard_refusal_hint(*a, **k): return _common._guard_refusal_hint(_G, *a, **k
 #   system codepage, so non-ASCII paths would not be found).
 # - UTF8: tag VALUES read/written are UTF-8, so non-ASCII metadata round-trips.
 _ARGFILE_CHARSET = "-charset\nFileName=UTF8\n-charset\nUTF8\n"
+# Does this exiftool report a status per command? {exiftool command: bool},
+# asked once (_exiftool_batch_ok): what EXIFTOOL_STAY_OPEN needs.
+_EXIFTOOL_BATCH = {}
+# The kept-open ExifTool processes of this script (EXIFTOOL_STAY_OPEN).
+_EXIFTOOL_POOL = _common._ExiftoolPool()
 
 
 # Captured at import: some tests replace this module's `subprocess` with a stub.
@@ -2702,15 +2721,18 @@ def _icc_has_native_form(icc: bytes, grey: bool) -> bool:
 _png_iccp = _common._png_iccp
 
 
-def _png_without_colour_chunks(src: Path, dst: Path) -> None:
+def _png_without_colour_chunks(src: Path, dst: Path = None):
     """Copy a PNG dropping iCCP/sRGB/gAMA/cHRM/cICP: cjxl then reads the
     pixels as sRGB and keeps their numbers — the encoder's "skip" layout,
-    with the real profile carried in XMP (the jxlphoto-iccprofile token)."""
+    with the real profile carried in XMP (the jxlphoto-iccprofile token).
+    `src` may be the PNG's bytes; without `dst` the copy is returned as bytes
+    (the derivative PNG held in memory, v2.31.0)."""
+    import io
     drop = {b"iCCP", b"sRGB", b"gAMA", b"cHRM", b"cICP"}
-    with open(src, "rb") as fi, open(dst, "wb") as fo:
+    with _png_stream(src) as fi, (io.BytesIO() if dst is None else open(dst, "wb")) as fo:
         sig = fi.read(8)
         if sig != b"\x89PNG\r\n\x1a\n":
-            raise RuntimeError(f"not a PNG: {src}")
+            raise RuntimeError(f"not a PNG: {_common._png_name(src)}")
         fo.write(sig)
         while True:
             head = fi.read(8)
@@ -2726,11 +2748,17 @@ def _png_without_colour_chunks(src: Path, dst: Path) -> None:
             while remaining:
                 block = fi.read(min(remaining, 1 << 20))
                 if not block:
-                    raise RuntimeError(f"truncated PNG: {src}")
+                    raise RuntimeError(f"truncated PNG: {_common._png_name(src)}")
                 fo.write(block)
                 remaining -= len(block)
             if t == b"IEND":
                 break
+        if dst is None:
+            return fo.getvalue()
+    return None
+
+
+_png_stream = _common._png_stream
 
 
 def _skip_icc_lines(jxl_path: Path, skip_icc: bytes) -> list:
@@ -3137,7 +3165,10 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
     """
     with tempfile.TemporaryDirectory(dir=TEMP_DIR) as tmp:
         tmp = Path(tmp)
-        dec_png, conv_png = tmp / "dec.png", tmp / "conv.png"
+        dec_png = tmp / "dec.png"
+        # ImageMagick's PNG for cjxl stays in memory (v2.31.0): it was conv.png
+        # in TEMP_DIR, up to 270 MB written and read back per 45 MP derivative.
+        magick_png = None
         icc_args, out_icc, orig_icc = _djxl_icc_args(tmp)
         # The pixels in memory when nothing needs the PNG (#680).
         mem = _decode_in_memory_for_derivative(jxl_path, icc_args, out_icc, orig_icc)
@@ -3282,29 +3313,36 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
                 mem = None          # the converted image is in the PNG now
                 enc_in = None
             else:
+                # The PNG to stdout, read into memory (_run_to_memory): ImageMagick
+                # reads its whole input before it writes, so the raw pixels go
+                # in first and the PNG comes out after.
                 if mem is None:
                     cmd = (["magick", str(magick_in)] + args
-                           + ["-depth", "16"] + _TEMP_PNG_ARGS + ["png:" + _magick_out_path(conv_png)])
-                    r = _run_captured(cmd, CJXL_TIMEOUT)
+                           + ["-depth", "16"] + _TEMP_PNG_ARGS + ["png:-"])
+                    r = _run_to_memory(cmd, CJXL_TIMEOUT)
                 else:
                     cmd = (["magick"] + mem[0] + args
-                           + ["-depth", "16"] + _TEMP_PNG_ARGS + ["png:" + _magick_out_path(conv_png)])
-                    r = _run_captured(cmd, CJXL_TIMEOUT, input=mem[1])
+                           + ["-depth", "16"] + _TEMP_PNG_ARGS + ["png:-"])
+                    r = _run_to_memory(cmd, CJXL_TIMEOUT, input=mem[1])
                     mem = None          # the pixels are ImageMagick's now
-                if r.returncode != 0 or not conv_png.exists():
+                if r.returncode != 0 or not r.stdout:
                     raise RuntimeError(f"magick: {_stderr_tail(r.stderr)}")
-                if (not grey or blob) and "iCCP" not in _png_chunk_types(conv_png):
+                if (not grey or blob) and "iCCP" not in _png_chunk_types(r.stdout):
                     # Traps A1/A2: without the profile cjxl would silently tag the
                     # converted pixels as sRGB. Never let that reach the archive.
                     raise RuntimeError("ImageMagick wrote the converted image without its ICC "
                                        "profile — refusing to encode it as the wrong colour space")
-                enc_in = conv_png
+                magick_png = r.stdout
+                r = None
+                enc_in = None
         skip_icc = None
         stdin_png = None
         if fast is not None:
             stdin_png, skip_icc = fast
-        elif CJXL_DISTANCE > 0:
-            _icc_in = _png_iccp(enc_in)
+        else:
+            stdin_png, magick_png = magick_png, None
+        if fast is None and CJXL_DISTANCE > 0:
+            _icc_in = _png_iccp(stdin_png if stdin_png is not None else enc_in)
             if _icc_in and not _icc_has_native_form(
                     _icc_in, bytes(_icc_in[16:20]) == b"GRAY"):
                 # R1 (2026-10-08 audit): with the profile in iCCP cjxl would
@@ -3312,9 +3350,12 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
                 # on a real scan with its A2B-only profile). Encode the pixels
                 # tagged sRGB instead; the profile rides in XMP
                 # (the jxlphoto-iccprofile token).
-                skip_png = tmp / "skip.png"
-                _png_without_colour_chunks(enc_in, skip_png)
-                enc_in = skip_png
+                if stdin_png is not None:
+                    stdin_png = _png_without_colour_chunks(stdin_png)
+                else:
+                    skip_png = tmp / "skip.png"
+                    _png_without_colour_chunks(enc_in, skip_png)
+                    enc_in = skip_png
                 skip_icc = _icc_in
                 logger.info(f"  >Profile with no native JXL form: derivative encoded "
                             f"tagged sRGB with the profile kept in XMP | {jxl_path.name}")
@@ -3575,7 +3616,8 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
                  "-tagsfromfile", _src,
                  # ExifByteOrder: the output's EXIF keeps the source's II/MM
                  # (cjxl wrote none, and a new EXIF block is MM by default).
-                 "-exif:all", "-ExifByteOrder<ExifByteOrder", "-iptc:all"]
+                 # The EXIF VALUES, not their printed form (#684).
+                 "-exif:all#", "-ExifByteOrder<ExifByteOrder", "-iptc:all"]
                 # #623: the re-encode already turned the pixels by the
                 # codestream orientation; the copied tag would turn them again.
                 + _orientation_reset_args(jxl_path)
@@ -4918,6 +4960,7 @@ def build_parser():
 
 
 _work_dir_problem = _common._work_dir_problem
+_percent_temp_problem = _common._percent_temp_problem
 
 
 def _configure_run(parser, args):
@@ -5124,6 +5167,10 @@ def _configure_run(parser, args):
             parser.error(_why)
 
     _check_dir(TEMP_DIR, "TEMP_DIR", dry_run_uses_it=True)
+    # A '%' in the temp folder: ExifTool cannot keep its own files there.
+    _why = _percent_temp_problem(TEMP_DIR)
+    if _why:
+        parser.error(_why)
     _check_dir(args.staging, "staging directory")
     # The script-set staging path (the TEMP2_DIR constant at the top of this
     # file) never goes through --staging's validation: an invalid or

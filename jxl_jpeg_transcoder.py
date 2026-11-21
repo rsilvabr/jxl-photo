@@ -21,6 +21,7 @@ Requirements:
 """
 
 import subprocess
+import atexit
 import os
 import sys
 import shutil
@@ -672,6 +673,8 @@ DELETE_CONFIRM = True
 # Paths
 TEMP_DIR = None
 # None = system temp. Set to custom path if needed.
+# No '%' in its path (nor in the system temp's when None): ExifTool reads it
+# as a format code, so a run with one stops before its first file (v2.31.0).
 
 CODEC_TIMEOUT = 900
 # Timeout (seconds) for each cjxl/djxl/magick invocation. 600s can be tight
@@ -685,6 +688,11 @@ EXIFTOOL_TIMEOUT = CODEC_TIMEOUT
 # good files into errors (2026-10-06: twelve exiftool timeouts in one run, all
 # reported as a codec timeout). The planning-time batch reads use the two
 # EXIFTOOL_BATCH_* settings below instead.
+
+EXIFTOOL_STAY_OPEN = True
+# Windows: keep ExifTool open (-stay_open) and send it the per-file commands,
+# instead of starting it for each one (~0.2 s per start). Same commands, same
+# answers. False = one ExifTool per command, as before v2.31.0.
 
 # Planning-time exiftool BATCH reads (markers of up to 400 files per call).
 # A batch is stopped only when exiftool has printed nothing for
@@ -802,6 +810,22 @@ def _guard_refusal_hint(*a, **k): return _common._guard_refusal_hint(_G, *a, **k
 # - UTF8: tag VALUES read/written are UTF-8 (non-ASCII metadata round-trips
 #   without codepage corruption).
 _ARGFILE_CHARSET = "-charset\nFileName=UTF8\n-charset\nUTF8\n"
+# Does this exiftool report a status per command? {exiftool command: bool},
+# asked once (_exiftool_batch_ok): what EXIFTOOL_STAY_OPEN needs.
+_EXIFTOOL_BATCH = {}
+# The kept-open ExifTool processes of this script (EXIFTOOL_STAY_OPEN).
+_EXIFTOOL_POOL = _common._ExiftoolPool()
+# --serve (_common._serve): the log every job of a serve process writes to;
+# what one run keeps about the files it saw, emptied before each job (a file
+# rewritten between two jobs with the same size and date is read again; the
+# outputs a run planned, normally cleared at its end); the facts about the
+# tools a serve process keeps on purpose; this script's options a serve
+# process refuses (maintenance modes).
+_SERVE_LOG = None
+_SERVE_FILE_CACHES = ("_content_id_cache", "_JXLINFO_CACHE", "_SOURCE_TAGS_CACHE",
+                      "_planned_outputs")
+_SERVE_TOOL_FACTS = ("_EXIFTOOL_BATCH",)
+_SERVE_REFUSED = ("repair_jbrd",)
 
 
 # Captured at import: some tests replace this module's `subprocess` with a stub.
@@ -1006,8 +1030,9 @@ def _copy_metadata(src_path: Path, dst_path: Path) -> None:
             r_copy = _run_exiftool_argfile(
                 ["-overwrite_original", "-tagsfromfile", _exiftool_source(src_path, _mt),
                  # ExifByteOrder: the output's EXIF keeps the source's II/MM
-                 # (a new EXIF block is big-endian by default).
-                 "-exif:all", "-ExifByteOrder<ExifByteOrder",
+                 # (a new EXIF block is big-endian by default). The EXIF
+                 # VALUES, not their printed form (#684: f/2.83 became f/2.8).
+                 "-exif:all#", "-ExifByteOrder<ExifByteOrder",
                  # #637: exiftool's "unsafe" tags are copied only when named:
                  # InteropIndex says which DCF colour space the camera used
                  # (R98 sRGB, R03 Adobe RGB). decode_to_image clears them
@@ -1231,6 +1256,7 @@ _OVERLAY_SETTINGS = {
     "JPEG_ORIENTATION": ("choice", "original", "upright"),
     "CODEC_TIMEOUT": ("int", 1, None),
     "EXIFTOOL_TIMEOUT": ("int", 1, None),
+    "EXIFTOOL_STAY_OPEN": ("bool",),
     "EXIFTOOL_BATCH_STALL": ("int", 1, None),
     "EXIFTOOL_BATCH_TIMEOUT": ("int", 1, None),
     "TEMP_DIR": ("path?",),
@@ -1342,9 +1368,15 @@ def record_summary(*, ok=0, overwritten=0, skipped=0, errors=0, log_file="",
     })
 
 
+def _log_failure_recap(*a, **k): return _common._log_failure_recap(_G, *a, **k)
+
+
 def emit_summary_json(enabled):
-    """Print one JSON line the wrapper can aggregate. No-op without the flag."""
+    """Print one JSON line the wrapper can aggregate. Without the flag the
+    failed files are named once more at the end of the log
+    (_log_failure_recap)."""
     if not enabled:
+        _log_failure_recap(_run_summary["failures"])
         return
     failures = _run_summary["failures"]
     payload = dict(_run_summary)
@@ -4728,6 +4760,9 @@ _srgb_icc_cache = None
 _srgb_icc_lock = threading.Lock()
 
 
+_generated_srgb_icc = _common._generated_srgb_icc
+
+
 def _get_srgb_icc_path() -> Optional[str]:
     """Return the path of a real sRGB ICC profile generated via Pillow's
     LittleCMS, or None if unavailable.
@@ -4738,19 +4773,43 @@ def _get_srgb_icc_path() -> Optional[str]:
     a real sRGB ICC performs the proper gamut mapping.
 
     The profile is written once to a STABLE path (no per-process temp leak)
-    and created under a lock (workers may race here).
+    and created under a lock (workers may race here). It is the toolkit's
+    generated sRGB with its FIXED creation date (_generated_srgb_icc, #685):
+    made fresh, Pillow's carries the moment it was made, so two identical
+    --to-srgb outputs made on different days differed in their profile.
+
+    The file is named after its CONTENT (jxl_photo_sRGB_<sha256>.icc), so it
+    never has to replace the jxl_photo_sRGB.icc an older version left (with
+    Pillow's own date): replacing that failed whenever another program had it
+    open, it was read-only or another account owned it, and every --to-srgb
+    file then fell back to -colorspace sRGB. A file of the content name with
+    other bytes (a crash mid-write) is replaced; when even that fails, this
+    process writes its own copy (….<pid>.icc, removed at exit). None only when
+    no profile can be made or no file written.
     """
     global _srgb_icc_cache
     if _srgb_icc_cache is not None:
-        return _srgb_icc_cache
+        return _srgb_icc_cache or None
     with _srgb_icc_lock:
         if _srgb_icc_cache is not None:  # re-check after acquiring the lock
-            return _srgb_icc_cache
+            return _srgb_icc_cache or None
         try:
-            from PIL import ImageCms
-            icc_path = Path(tempfile.gettempdir()) / "jxl_photo_sRGB.icc" if TEMP_DIR is None else Path(TEMP_DIR) / "jxl_photo_sRGB.icc"
-            if not icc_path.exists() or icc_path.stat().st_size < 128:
-                profile_bytes = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+            profile_bytes = _generated_srgb_icc()
+        except Exception:
+            _srgb_icc_cache = False  # do not retry every file
+            return None
+        base = Path(tempfile.gettempdir()) if TEMP_DIR is None else Path(TEMP_DIR)
+        stem = "jxl_photo_sRGB_" + hashlib.sha256(profile_bytes).hexdigest()[:16]
+
+        def _holds_it(p):
+            try:
+                return p.read_bytes() == profile_bytes
+            except OSError:
+                return False
+
+        for name in (stem + ".icc", f"{stem}.{os.getpid()}.icc"):
+            icc_path = base / name
+            if not _holds_it(icc_path):
                 # Atomic write: a crash mid-write used to leave a truncated
                 # profile cached under this stable name, failing every future
                 # --to-srgb run until someone deleted it by hand.
@@ -4758,15 +4817,27 @@ def _get_srgb_icc_path() -> Optional[str]:
                 try:
                     _part.write_bytes(profile_bytes)
                     os.replace(str(_part), str(icc_path))
+                except OSError:
+                    pass        # another process may have written it meanwhile
                 finally:
                     try:
                         _part.unlink()
                     except OSError:
                         pass
-            _srgb_icc_cache = str(icc_path)
-        except Exception:
-            _srgb_icc_cache = False  # do not retry every file
-    return _srgb_icc_cache or None
+            if _holds_it(icc_path):
+                if name != stem + ".icc":
+                    atexit.register(_unlink_quietly, icc_path)
+                _srgb_icc_cache = str(icc_path)
+                return _srgb_icc_cache
+        _srgb_icc_cache = False  # do not retry every file
+    return None
+
+
+def _unlink_quietly(path) -> None:
+    try:
+        Path(path).unlink()
+    except OSError:
+        pass
 
 
 # Adobe RGB (1998)-compatible matrix/TRC profile: the SAME 500 bytes
@@ -7298,6 +7369,12 @@ Examples:
     parser.add_argument("--dry-run", action="store_true", help="Show what would happen")
     parser.add_argument("--summary-json", action="store_true",
                         help=argparse.SUPPRESS)  # internal: machine-readable summary for jxl_photo.py
+    parser.add_argument("--serve", action="store_true",
+                        help="Serve mode, for a program that converts many files one at "
+                             "a time (photo-backup): read one job per line on stdin (JSON: "
+                             "id, input, output), run each like a single call with the "
+                             "other options of this command line, answer one JSON line per "
+                             "job on stdout. Never deletes. See the README.")
     parser.add_argument("--output-name", type=str, default=CONVERT_OUTPUT_FOLDER,
                         help="Output folder name override for convert modes 1 and 3")
     parser.add_argument("output", nargs="?", type=Path, default=None,
@@ -7386,6 +7463,7 @@ _RUN_DEFAULTS = {
 
 
 _work_dir_problem = _common._work_dir_problem
+_percent_temp_problem = _common._percent_temp_problem
 
 
 def _configure_run(parser, args):
@@ -7461,6 +7539,10 @@ def _configure_run(parser, args):
         _why = _work_dir_problem(_wd_path, _wd_label, args.dry_run, _wd_dry)
         if _why:
             parser.error(_why)
+    # A '%' in the temp folder: ExifTool cannot keep its own files there.
+    _why = _percent_temp_problem(TEMP_DIR)
+    if _why:
+        parser.error(_why)
 
     # --decode only makes sense for JXL inputs; reject it for other single
     # files instead of silently misrouting (e.g. djxl on a PNG).
@@ -7759,6 +7841,8 @@ def main():
     _utf8_console()      # before argparse or the early checks print anything (#661)
     parser = build_parser()
     args = parser.parse_args()
+    if args.serve:
+        parser.error("--serve runs the serve loop: start the script itself with it")
 
     # Every run-scoped global starts from its SCRIPT setting (captured at
     # import) — a second main() in the same process used to inherit the first
@@ -7768,6 +7852,9 @@ def main():
     for _gname, _gvalue in _RUN_DEFAULTS.items():
         globals()[_gname] = _gvalue
     _DERIVED_INPUT_LABELS.clear()       # per run (_drop_derivative_pairs)
+    # A run that records nothing reports nothing: never the totals and the
+    # failures of the run before it in the same process (a --serve job).
+    record_summary()
 
     global RESIZE_MODE, RESIZE_VALUE, ALLOW_UPSCALE
     global SHARPEN, SHARPEN_SIGMA, SHARPEN_GAIN, SHARPEN_THRESHOLD, LABEL_QUALITY
@@ -7838,4 +7925,6 @@ def main():
         sys.exit(1)
 
 if __name__ == "__main__":
+    if "--serve" in sys.argv[1:]:
+        sys.exit(_common._serve(_G, main, sys.argv[1:]))
     main()

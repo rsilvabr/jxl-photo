@@ -23,10 +23,12 @@ Only the standard library is imported at the top: numpy, Pillow and tifffile
 are the scripts' (a function here reaches them as g.np, g.Image, ...).
 """
 
+import atexit
 import base64
 import contextlib
 import functools
 import hashlib
+import io
 import json
 import logging
 import os
@@ -36,6 +38,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 import zlib
@@ -636,6 +639,58 @@ def _codestream_fingerprint(jxl_path):
     return f"{length}:{h:016x}"
 
 
+def _codestream_digest(jxl_path):
+    """sha256 hex of a JXL's WHOLE codestream (the same bytes
+    _codestream_fingerprint names: a bare file, or the jxlc box / the jxlp
+    boxes without their 4-byte index), or None when the file is not a JPEG XL
+    or cannot be read. The pixels and the profiles djxl gives come from the
+    codestream only: two files with the same digest decode the same."""
+    h = hashlib.sha256()
+    try:
+        with open(jxl_path, "rb") as f:
+            end = f.seek(0, 2)
+            f.seek(0)
+            if f.read(2) == b"\xff\x0a":
+                spans = [(0, end)]
+            else:
+                spans = []
+                for typ, pos, hdr, size in _jxl_boxes(f, end):
+                    skip = {b"jxlc": 0, b"jxlp": 4}.get(typ)
+                    if skip is None or size - hdr < skip:
+                        continue
+                    spans.append((pos + hdr + skip, size - hdr - skip))
+                if not spans:
+                    return None
+            for off, length in spans:
+                f.seek(off)
+                left = length
+                while left:
+                    chunk = f.read(min(left, 1 << 22))
+                    if not chunk:
+                        return None
+                    h.update(chunk)
+                    left -= len(chunk)
+    except (OSError, struct.error):
+        return None
+    return h.hexdigest()
+
+
+def _take_kept_decode(g, jxl_path):
+    """(pam bytes, out_icc, orig_icc) of the decode the Explorer thumbnail
+    kept for this thread (_make_explorer_thumbnail, the encoder's
+    _KEPT_DECODE), when it was a decode of the SAME codestream as `jxl_path`
+    now holds; else None. Used once: taken or not, it is dropped."""
+    keep = _script_get(g, "_KEPT_DECODE")
+    kept = getattr(keep, "kept", None) if keep is not None else None
+    if kept is None:
+        return None
+    keep.kept = None
+    digest, pam, out_icc, orig_icc = kept
+    if digest is None or _codestream_digest(jxl_path) != digest:
+        return None
+    return pam, out_icc, orig_icc
+
+
 def _cjxl_whole_image(distance, effort, buffering=None):
     """True when cjxl encodes the whole image at once instead of streaming
     (libjxl 0.12 with buffering left to the encoder: effort 10+, effort 8-9
@@ -767,12 +822,26 @@ def _generated_srgb_icc() -> bytes:
     return bytes(raw)
 
 
+def _png_stream(png):
+    """A binary stream of the PNG `png`: a path, opened, or the PNG itself
+    (bytes held in memory: the recompressor's derivative PNG, v2.31.0)."""
+    if isinstance(png, (bytes, bytearray, memoryview)):
+        import io
+        return io.BytesIO(png)
+    return open(png, "rb")
+
+
+def _png_name(png) -> str:
+    return "<in memory>" if isinstance(png, (bytes, bytearray, memoryview)) else Path(png).name
+
+
 def _png_iccp(png_path: Path):
     """The ICC profile in a PNG's iCCP chunk (decompressed), or None. Reads
-    chunk headers only up to the first IDAT."""
+    chunk headers only up to the first IDAT. `png_path` may be the PNG's
+    bytes."""
     import zlib
     try:
-        with open(png_path, "rb") as f:
+        with _png_stream(png_path) as f:
             if f.read(8) != b"\x89PNG\r\n\x1a\n":
                 return None
             while True:
@@ -823,11 +892,12 @@ def _png_is_grayscale(png_path: Path) -> bool:
 
 def _png_chunk_types(png_path: Path) -> list:
     """Chunk types before the first IDAT (iCCP/sRGB must precede it per the PNG
-    spec) — reads a few KB, not the whole 16-bit intermediate."""
+    spec) — reads a few KB, not the whole 16-bit intermediate. `png_path` may
+    be the PNG's bytes."""
     types = []
-    with open(png_path, "rb") as f:
+    with _png_stream(png_path) as f:
         if f.read(8) != b"\x89PNG\r\n\x1a\n":
-            raise RuntimeError(f"not a PNG: {png_path.name}")
+            raise RuntimeError(f"not a PNG: {_png_name(png_path)}")
         while True:
             head = f.read(8)
             if len(head) < 8:
@@ -1031,6 +1101,25 @@ def _work_dir_problem(path, label, dry_run, dry_run_uses_it=False):
     except OSError as e:
         return f"{label} is not usable: {path} ({e})"
     return None
+
+
+def _percent_temp_problem(temp_dir):
+    """Why the run's temp folder cannot hold ExifTool's own files, or None.
+    ExifTool reads a '%' in the name of a file it writes (-o) or reads a tag
+    from (<=) as a format code (#550), and the toolkit keeps such files in
+    the temp folder: the XMP block of a TIFF, the container of a '%' path,
+    the decoder's block file. In a folder with a '%' some steps failed file by
+    file and the encoder kept only the XMP fields ExifTool can write (it
+    dropped SilverFast's LSI settings). Checked once, at the start of a run:
+    the EFFECTIVE folder — TEMP_DIR, else the system's (TEMP/TMP, which
+    photo-backup points at its work folder)."""
+    folder = str(temp_dir) if temp_dir else tempfile.gettempdir()
+    if "%" not in folder:
+        return None
+    return (f"the temp folder has a '%' in its path ({folder}): ExifTool reads a '%' in "
+            f"a file name as a format code, so it cannot keep its files there. Set "
+            f"TEMP_DIR at the top of the script (or the TEMP and TMP variables) to a "
+            f"folder without '%'.")
 
 
 def _source_path_id(src_path) -> str:
@@ -1667,14 +1756,23 @@ def _scan_state(g, root):
             "gap": g._SCAN_REPORT_EVERY, "announced": False}
 
 
+# Captured at import, like the scripts' own _DEVNULL: a test may replace a
+# script's `subprocess` with a stub that has only run() (and the conftest
+# mirror then this module's).
+_VERSION_STDIN = subprocess.DEVNULL
+
+
 # libjxl version detection - used to gate flags that only exist in newer
 # cjxl/djxl builds. Unknown versions are treated as "old" (safe fallback:
 # no new flags are ever appended).
 @functools.lru_cache(maxsize=None)
 def _tool_version(exe: str):
-    """Return (major, minor, patch) of a cjxl/djxl-like tool, or None if unknown."""
+    """Return (major, minor, patch) of a cjxl/djxl-like tool, or None if unknown.
+    stdin is NUL: a tool that read it would take a line of a --serve process's
+    jobs."""
     try:
-        r = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=10)
+        r = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=10,
+                           stdin=_VERSION_STDIN)
         out = (r.stdout or "") + " " + (r.stderr or "")
     except Exception:
         return None
@@ -2126,7 +2224,13 @@ def setup_logger(g):
     second call in the same process (tests, a script driving another)
     replaces the handlers instead of doubling every line. No delete summary
     here: this runs before anything is deleted, and a line of zeros reads
-    like a result."""
+    like a result.
+
+    A --serve process (g._SERVE_LOG set) keeps ONE log for all its jobs: each
+    job's main() gets that file back and the handlers stay as they are."""
+    serve_log = _script_get(g, "_SERVE_LOG")
+    if serve_log:
+        return serve_log
     g.LOG_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     # PID suffix: two children of the same script started in the same second
@@ -2168,6 +2272,33 @@ def setup_logger(g):
     g._log_settings_overlay()
     log.info(f"{_script_get(g, '_LOG_SAVED_LABEL', 'Log saved to')}: {log_file}")
     return log_file
+
+
+# How many failed files the end-of-run recap names (the rest: a count).
+_RECAP_MAX = 10
+
+
+def _log_failure_recap(g, failures) -> None:
+    """The files that failed, once more at the end of the run, for whoever
+    reads only the last lines (a console, a scheduled task's window, a log's
+    tail): `Errors (N):` and `  -> name: reason` for the first _RECAP_MAX.
+    WARNING, not ERROR: each failure already logged its own ERROR line, and
+    photo-backup counts the lines that start with ERROR. Not with
+    --summary-json (each emit_summary_json calls this only then): the
+    wizard prints its own list from the summary."""
+    failures = list(failures or [])
+    if not failures:
+        return
+    g.logger.warning(f"Errors ({len(failures)}):")
+    for item in failures[:_RECAP_MAX]:
+        name, reason = (item if isinstance(item, (tuple, list)) and len(item) == 2
+                        else (item, ""))
+        reason = " ".join(str(reason).split())
+        # The file as the run recorded it (its path, where it has one): two
+        # files of one name in two event folders (modes 6/7) must not look alike.
+        g.logger.warning(f"  -> {name}: {reason[:300]}")
+    if len(failures) > _RECAP_MAX:
+        g.logger.warning(f"  ... and {len(failures) - _RECAP_MAX} more (each one above)")
 
 
 # === JXL finders of the decoder and the recompressor ===
@@ -2338,19 +2469,30 @@ def _exiftool_batch_ok(g) -> bool:
         return False
     exe = g._get_exiftool_cmd()
     if exe not in state:
-        version = ""
-        try:
-            r = _exiftool_one_process(g, [["-ver"]], g.EXIFTOOL_TIMEOUT)[0]
-            version = (r.stdout or "").strip()
-            state[exe] = r.returncode == 0 and bool(version)
-        except Exception:
-            state[exe] = False
-        # One line in the log file: a run that falls back to one process per
-        # command is only slower, and nothing else would tell (review V4).
-        g.logger.debug(f"exiftool {version or '(version unknown)'}: "
-                       + ("a file's commands share one process" if state[exe]
-                          else "one process per command (no status per command)"))
+        # Workers that ask at once wait for the first one's answer: six
+        # workers of the recompressor each started a -ver process of their
+        # own at the start of a run (measured 2026-11-21).
+        with _EXIFTOOL_PROBE_LOCK:
+            if exe not in state:
+                version = ""
+                try:
+                    r = _exiftool_one_process(g, [["-ver"]], g.EXIFTOOL_TIMEOUT)[0]
+                    version = (r.stdout or "").strip()
+                    state[exe] = r.returncode == 0 and bool(version)
+                except Exception:
+                    state[exe] = False
+                # One line in the log file: a run that falls back to one
+                # process per command is only slower, and nothing else would
+                # tell (review V4).
+                g.logger.debug(f"exiftool {version or '(version unknown)'}: "
+                               + ("a file's commands share one process" if state[exe]
+                                  else "one process per command (no status per command)"))
     return state[exe]
+
+
+# Orders the probes of _exiftool_batch_ok (a lock, not state: the answers stay
+# in each script's _EXIFTOOL_BATCH).
+_EXIFTOOL_PROBE_LOCK = threading.Lock()
 
 
 def _exiftool_commands(g, commands, timeout=60, stop_at_failure=True):
@@ -2359,7 +2501,8 @@ def _exiftool_commands(g, commands, timeout=60, stop_at_failure=True):
     (run like _run_exiftool_argfile) or the Path of an argfile written for
     one call (run like `exiftool -@ <file>`).
 
-    ONE process when _exiftool_batch_ok: every command runs, even after one
+    ONE process when _exiftool_batch_ok (a kept-open one when
+    _exiftool_via_server has one): every command runs, even after one
     that failed (a caller that raises at the first failure drops the file,
     so what the later ones did is never kept). Otherwise one process per
     command, exactly as before: stopping at the first that fails, or
@@ -2367,11 +2510,14 @@ def _exiftool_commands(g, commands, timeout=60, stop_at_failure=True):
     never stopped, the decoder's copy_metadata)."""
     if len(commands) > 1 and _exiftool_batch_ok(g):
         lines = [_argfile_command(g, c) if isinstance(c, Path) else list(c) for c in commands]
-        return _exiftool_one_process(g, lines, timeout * len(commands))
+        results = _exiftool_via_server(g, lines, timeout * len(commands))
+        if results is None:
+            results = _exiftool_one_process(g, lines, timeout * len(commands))
+        return [_unread_source_failed(g, cmd, r) for cmd, r in zip(lines, results)]
     results = []
     for cmd in commands:
         if isinstance(cmd, Path):
-            r = g._run_captured([g._get_exiftool_cmd(), "-@", str(cmd)], timeout, text=True)
+            r = _run_exiftool_file(g, cmd, timeout)
         else:
             r = g._run_exiftool_argfile(cmd, timeout=timeout)
         results.append(r)
@@ -2405,8 +2551,10 @@ def _prefetch_exiftool_reads(g, commands, timeout):
     local.results = {}
     if len(commands) < 2 or not _exiftool_batch_ok(g):
         return
-    results = _exiftool_one_process(g, [list(c) for c in commands],
-                                    timeout * len(commands))
+    lines = [list(c) for c in commands]
+    results = _exiftool_via_server(g, lines, timeout * len(commands))
+    if results is None:
+        results = _exiftool_one_process(g, lines, timeout * len(commands))
     local.results = {tuple(str(a) for a in c): r for c, r in zip(commands, results)}
 
 
@@ -2426,6 +2574,613 @@ def _run_exiftool_writes(g, writes, timeout):
     for (_cmd, prefix, n), r in zip(writes, results):
         if r.returncode != 0:
             raise RuntimeError(f"{prefix}{(r.stderr or r.stdout or 'no output')[:n].strip()}")
+
+
+# === ExifTool kept open (EXIFTOOL_STAY_OPEN) ===
+#
+# Starting ExifTool costs ~0.2 s on Windows (197 ms a command, measured
+# 2026-11-21), and a 45 MP two-page TIFF started nine of them: 3.7 of its
+# 8.6 s. One kept open (-stay_open True -@ -) answers the same read in ~15 ms.
+# Each script has its own pool (its _EXIFTOOL_POOL, state of the script); a
+# thread takes a process for one call and gives it back. Windows only: each
+# process goes in a Job Object of its own, because a kept-open ExifTool does
+# not end when its stdin closes (measured) and must never outlive the Python
+# that started it.
+
+_EXIFTOOL_SERVER_ARGS = ("-stay_open", "True", "-@", "-")
+# An idle process older than this is closed at the next call; a process is
+# replaced after this many commands; idle ones are kept up to the most ever
+# busy at once, at least the first number and at most the second (~50 MB
+# each after a large TIFF, measured 2026-11-21, outside the memory budget:
+# review S4), the most recently used taken first so the others age out.
+_EXIFTOOL_SERVER_IDLE_SECONDS = 120.0
+_EXIFTOOL_SERVER_MAX_COMMANDS = 1000
+_EXIFTOOL_SERVER_KEEP_IDLE = 4
+_EXIFTOOL_SERVER_MAX_IDLE = 8
+_JOB_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+_JOB_EXTENDED_LIMIT_INFORMATION = 9
+# Captured at import, like the scripts' own _DEVNULL: a test may replace a
+# script's `subprocess` (and the conftest mirror then this module's).
+_SUBPROCESS_TIMEOUT = subprocess.TimeoutExpired
+# The real ones, to tell a test double of them (_exiftool_server_ok).
+_REAL_SUBPROCESS = subprocess
+_REAL_POPEN = subprocess.Popen
+_REAL_RUN = subprocess.run
+_SERVER_GONE_TEXT = ("the kept-open ExifTool ended{code} before it answered this command; "
+                     "nothing proves whether it ran, so it is not sent again")
+# A command that WRITES XMP fields it copied from a file: a field copy
+# (-tagsfromfile ... -xmp:all, -all:all, -xmp-<ns>:...) or a dump into another
+# file (-o ... -all:all, _exiftool_source's MIE container). Never -XMP, the
+# block copied as it is, and never an assignment (=, +=, <).
+_XMP_FIELD_SPEC = re.compile(r"-(?:all|xmp(?:-[^:<>=+]*)?)(?::[^<>=+]*)?#?", re.I)
+# A struct value written (-TAG={...} or -TAG+={...}); group 1 is the tag.
+_STRUCT_WRITE = re.compile(r"-([^=<>+{]*?)\+?=\{")
+# A tag written from a FILE (-TAG<=FILE): ExifTool answers one it cannot open
+# with "Error opening file" and exit status 0 (_unread_source_failed).
+_FILE_SOURCE_LINE = re.compile(r"-[\w:#-]+<=")
+
+
+class _ExiftoolGone(Exception):
+    """The kept-open ExifTool closed its pipes. `written`: whether the
+    command had been handed to it (then it may have run)."""
+
+    def __init__(self, written: bool):
+        super().__init__("the kept-open ExifTool ended")
+        self.written = written
+
+
+class _JobRefused(OSError):
+    """The process could not be put in the pool's Job Object."""
+
+
+def _spawn_exiftool_server(exe):
+    """One ExifTool kept open (`-stay_open True -@ -`), its three streams on
+    pipes that _ExiftoolServer reads in the calling thread — no reader thread
+    (communicate() is never called; see _run_captured)."""
+    return subprocess.Popen([exe, *_EXIFTOOL_SERVER_ARGS], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+
+
+def _kill_on_close_job():
+    """A Windows Job Object that ends every process in it when its last
+    handle closes — when this Python process ends, however it ends (the
+    wizard's idle timeout, photo-backup, Task Manager). The handle is never
+    closed on purpose. None when one cannot be made (then no process is kept
+    open)."""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _Basic(ctypes.Structure):
+            _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64),
+                        ("PerJobUserTimeLimit", ctypes.c_int64),
+                        ("LimitFlags", wintypes.DWORD),
+                        ("MinimumWorkingSetSize", ctypes.c_size_t),
+                        ("MaximumWorkingSetSize", ctypes.c_size_t),
+                        ("ActiveProcessLimit", wintypes.DWORD),
+                        ("Affinity", ctypes.c_size_t),
+                        ("PriorityClass", wintypes.DWORD),
+                        ("SchedulingClass", wintypes.DWORD)]
+
+        class _Extended(ctypes.Structure):
+            _fields_ = [("BasicLimitInformation", _Basic),
+                        ("IoInfo", ctypes.c_uint64 * 6),
+                        ("ProcessMemoryLimit", ctypes.c_size_t),
+                        ("JobMemoryLimit", ctypes.c_size_t),
+                        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                        ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateJobObjectW.restype = wintypes.HANDLE
+        k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+        k32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int,
+                                                ctypes.c_void_p, wintypes.DWORD]
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        job = k32.CreateJobObjectW(None, None)
+        if not job:
+            return None
+        info = _Extended()
+        info.BasicLimitInformation.LimitFlags = _JOB_LIMIT_KILL_ON_JOB_CLOSE
+        if not k32.SetInformationJobObject(job, _JOB_EXTENDED_LIMIT_INFORMATION,
+                                           ctypes.byref(info), ctypes.sizeof(info)):
+            k32.CloseHandle(job)
+            return None
+        return job
+    except Exception:
+        return None
+
+
+def _put_in_job(job, proc) -> bool:
+    """Put the process of the Popen `proc` in the Job Object `job`."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        return bool(k32.AssignProcessToJobObject(job, int(proc._handle)))
+    except Exception:
+        return False
+
+
+def _end_job(job) -> None:
+    """End every process in the Job Object `job` — a launcher's child too
+    (an ExifTool that runs as a launcher and a child: the PAR-packed
+    exiftool.exe before 12.88, a Chocolatey shim; review S6) — and close it."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        k32.TerminateJobObject(job, 1)
+        k32.CloseHandle(job)
+    except Exception:
+        pass
+
+
+def _taints_xmp_prefixes(lines) -> bool:
+    """Would this ExifTool command change how LATER commands of the same
+    process write or read XMP? Two kinds were measured (2026-11-21):
+
+    - writing XMP fields copied from a file (_XMP_FIELD_SPEC): afterwards a
+      re-written XMP names Google's container item namespace `GItem:` where
+      the file and a fresh process keep `Item:` (same URI, same values;
+      review S2);
+    - writing a struct value other than xmpMM:History (_STRUCT_WRITE):
+      afterwards ExifTool names that struct's flattened tags differently —
+      after `-XMP-xmp:Thumbnails={Width=7}` a read of `ThumbnailWidth` came
+      back EMPTY with status 0 (Fable's review, S1). The History append the
+      scripts make, then their reads of `HistoryParameters`, answer exactly as
+      in a fresh process (test_the_history_append_then_its_reads_match_a_fresh_process).
+
+    Reads, deletions and plain edits change nothing measured. Such a command
+    never goes to a kept-open process: it runs in a process of its own, as
+    before v2.31.0, so every kept-open process answers as a fresh one would
+    and an output never depends on what ran before it."""
+    low = [str(a).strip().lower() for a in lines]
+    for a in low:
+        m = _STRUCT_WRITE.match(a)
+        if m and not m.group(1).endswith("history"):
+            return True
+    if "-tagsfromfile" not in low and "-o" not in low:
+        return False
+    return any(a != "-xmp" and _XMP_FIELD_SPEC.fullmatch(a) for a in low)
+
+
+def _unread_source_failed(g, lines, r):
+    """`r`, or a copy of it with status 1 when ExifTool could not open the
+    FILE of a `-TAG<=FILE` line: it answers that with "Error opening file"
+    and exit status 0, and the output then lacks all that file held — the
+    #550 class (Fable's review, M1: a decoded TIFF without its XMP and its
+    jxlphoto-src marker reported OK; the encoder's -XMP<= and -Exif<=
+    preloads got the same answer)."""
+    if getattr(r, "returncode", 1) != 0:
+        return r
+    err = r.stderr if isinstance(r.stderr, str) else (r.stderr or b"").decode("utf-8", "replace")
+    if "Error opening file" not in err or not any(
+            _FILE_SOURCE_LINE.match(str(a).strip()) for a in lines):
+        return r
+    return g._CompletedProcess(r.args, 1, r.stdout, r.stderr)
+
+
+def _server_answer(buf, head: bytes, ready, start=0):
+    """(status, where the command's own output ends) once `buf` holds a whole
+    answer: the marker `head<status>}` and its line end — then `ready` and its
+    line end, when given (stdout) — else None. A marker line that does not end
+    in a number gives -1 (fail closed, as _split_by_marker). The marker is
+    looked for from `start` (_AnswerScan)."""
+    i = buf.find(head, start)
+    if i < 0:
+        return None
+    nl = buf.find(b"\n", i)
+    if nl < 0:
+        return None
+    m = re.fullmatch(rb"(-?\d+)\}\r?", bytes(buf[i + len(head):nl]))
+    status = int(m.group(1)) if m else -1
+    if ready is not None:
+        r = buf.find(ready, nl)
+        if r < 0 or buf.find(b"\n", r) < 0:
+            return None
+    return status, i
+
+
+class _AnswerScan:
+    """The end of ONE command's answer in a stream read piece by piece.
+    feed() takes the whole buffer after each read and looks at each byte
+    about once: searching for the marker from the start after every read of
+    a pipe (4 KB) made a 32 MB answer take 9.6 s instead of 1.4 s (review
+    S3)."""
+
+    def __init__(self, head: bytes, ready):
+        self.head, self.ready = head, ready
+        self.pos = 0        # where the next search for the marker starts
+        self.at = -1        # where the marker is, once seen
+        self.rpos = 0       # where the next search for a lone ready line starts
+
+    def feed(self, buf):
+        """_server_answer's verdict on `buf`, the stream so far — or (-1,
+        where the ready line starts) when the ready line came with no marker
+        before it (`at` stays -1: the caller tells that case apart)."""
+        if self.at < 0:
+            i = buf.find(self.head, self.pos)
+            if i < 0:
+                # The marker may be cut by the end of this read: look again
+                # from where its beginning could be.
+                self.pos = max(0, len(buf) - len(self.head) + 1)
+                if self.ready is not None:
+                    r = buf.find(self.ready, self.rpos)
+                    if r >= 0:
+                        if buf.find(b"\n", r) >= 0:
+                            return -1, r
+                        self.rpos = r        # its line end is still to come
+                    else:
+                        self.rpos = max(0, len(buf) - len(self.ready) + 1)
+                return None
+            self.at = i
+        return _server_answer(buf, self.head, self.ready, self.at)
+
+
+class _ExiftoolServer:
+    """One ExifTool kept open, used by one thread at a time (_ExiftoolPool).
+
+    run() hands it ONE command — its argument lines, the -echo3/-echo4 markers
+    of _exiftool_one_process and -execute — and reads the answer back from the
+    stdout and stderr pipes in the calling thread (PeekNamedPipe; no reader
+    thread). Never two commands at once: a long command could fill stdin while
+    the answer to the one before it fills stdout, and both sides would wait.
+
+    The process is in a Job Object of its own (kill on close): kill() ends the
+    whole job, a launcher's child included, and Python's end closes it. Not
+    closed (Fable's review, S4): a launcher that started its child before
+    _put_in_job ran would leave that child outside; ExifTool 13.59 has no
+    child process (its perl DLL runs in the process itself)."""
+
+    def __init__(self, exe):
+        self.exe = exe
+        self.cwd = os.getcwd()
+        self.commands = 0
+        self.last_used = time.monotonic()
+        self.dead = False
+        self.proc = None
+        self._job_lock = threading.Lock()
+        self.job = _kill_on_close_job()
+        if not self.job:
+            self.job = None
+            raise _JobRefused("no job object could be made")
+        try:
+            self.proc = _spawn_exiftool_server(exe)
+        except BaseException:
+            self._end_job()
+            raise
+        if not _put_in_job(self.job, self.proc):
+            self.kill()
+            raise _JobRefused("ExifTool could not be put in its job object")
+        import msvcrt
+        self._pipes = ((self.proc.stdout.fileno(), msvcrt.get_osfhandle(self.proc.stdout.fileno())),
+                       (self.proc.stderr.fileno(), msvcrt.get_osfhandle(self.proc.stderr.fileno())))
+
+    def alive(self) -> bool:
+        return not self.dead and self.proc.poll() is None
+
+    def _end_job(self) -> None:
+        with self._job_lock:            # never the same handle closed twice
+            job, self.job = self.job, None
+        if job:
+            _end_job(job)
+
+    def kill(self) -> None:
+        self.dead = True
+        self._end_job()
+        if self.proc is None:
+            return
+        try:
+            self.proc.kill()
+        except OSError:
+            pass
+        try:
+            self.proc.wait(timeout=10)
+        except Exception:
+            pass
+        for stream in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+    def close(self) -> None:
+        """Ask ExifTool to stop (-stay_open False), then make sure it has."""
+        if self.alive():
+            try:
+                self.proc.stdin.write(b"-stay_open\nFalse\n")
+                self.proc.stdin.flush()
+                self.proc.stdin.close()
+                self.proc.wait(timeout=5)
+            except Exception:
+                pass
+        self.kill()
+
+    @staticmethod
+    def _read_some(fd, handle, buf) -> bool:
+        """Append what the pipe holds to `buf`; True when something came.
+        _ExiftoolGone(True) when ExifTool has closed it."""
+        import _winapi
+        try:
+            ready = _winapi.PeekNamedPipe(handle, 0)[0]
+        except OSError:
+            raise _ExiftoolGone(True) from None
+        if not ready:
+            return False
+        chunk = os.read(fd, ready)
+        if not chunk:
+            raise _ExiftoolGone(True)
+        buf += chunk
+        return True
+
+    def run(self, lines, deadline: float, timeout):
+        """(status, stdout bytes, stderr bytes) of ONE command; `lines` are its
+        argument lines, the charset lines included. Raises
+        subprocess.TimeoutExpired once `deadline` (a time.monotonic() value)
+        has passed, _ExiftoolGone when ExifTool ended; either way the process
+        is killed first."""
+        tag = "{jxlphoto" + uuid.uuid4().hex[:12]
+        marker = f"{tag} 0 " + "${status}}"
+        # -execute<N>: ExifTool ends the answer with {ready<N>}, a line no
+        # value of this command can be (measured 2026-11-21).
+        num = uuid.uuid4().int % 10 ** 12
+        data = ("\n".join([str(a) for a in lines]
+                          + ["-echo3", marker, "-echo4", marker, f"-execute{num}"])
+                + "\n").encode("utf-8")
+        try:
+            self.proc.stdin.write(data)
+            self.proc.stdin.flush()
+        except OSError:
+            self.kill()
+            raise _ExiftoolGone(False) from None
+        self.commands += 1
+        head = (tag + " 0 ").encode("ascii")
+        ready = f"{{ready{num}}}".encode("ascii")
+        out, err = bytearray(), bytearray()
+        scan_out, scan_err = _AnswerScan(head, ready), _AnswerScan(head, None)
+        (fo, ho), (fe, he) = self._pipes
+        pause = 0.0002
+        try:
+            while True:
+                got = self._read_some(fo, ho, out)
+                got = self._read_some(fe, he, err) or got
+                done_out = scan_out.feed(out)
+                done_err = scan_err.feed(err)
+                if done_out is not None and scan_out.at < 0:
+                    # {ready<N>} with no marker before it: ExifTool refused
+                    # the command before running it (an option took the
+                    # -echo3 line as its value) — a whole answer, status -1,
+                    # at once instead of after the timeout, with ExifTool's
+                    # own words (Fable's review, S2). Its stderr is written;
+                    # the process is retired all the same (dead: release()
+                    # closes it), so nothing of this answer can reach the next.
+                    self._read_some(fe, he, err)
+                    done_err = scan_err.feed(err) or (-1, len(err))
+                    self.dead = True
+                if done_out is not None and done_err is not None:
+                    break
+                # Every round, data or not: an answer that keeps trickling in
+                # without its marker must time out too.
+                if time.monotonic() >= deadline:
+                    raise _SUBPROCESS_TIMEOUT([self.exe, *_EXIFTOOL_SERVER_ARGS], timeout)
+                if got:
+                    pause = 0.0002
+                    continue
+                time.sleep(pause)
+                pause = min(pause * 2, 0.005)
+        except BaseException:
+            self.kill()
+            raise
+        (s_out, end_out), (s_err, end_err) = done_out, done_err
+        return (s_out if s_out == s_err else -1), bytes(out[:end_out]), bytes(err[:end_err])
+
+
+class _ExiftoolPool:
+    """The kept-open ExifTool processes of ONE script (its _EXIFTOOL_POOL):
+    acquire() hands a thread a process for one call, release() takes it
+    back. Processes are told apart by ExifTool command and by the working
+    directory they started in (a relative path resolves there). Each is in a
+    Job Object of its own; all are closed at exit."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.idle = []
+        self.live = []
+        self.busy = 0
+        self.peak = 0
+        self.started = 0
+        self.disabled = False
+        self._at_exit = False
+
+    def acquire(self, exe):
+        """A kept-open ExifTool `exe` started in the current working directory,
+        or None when none can be had (the caller then runs its command in a
+        process of its own, as before). The most recently used idle one comes
+        first: the others then age out (_EXIFTOOL_SERVER_IDLE_SECONDS)."""
+        cwd = os.getcwd()
+        now = time.monotonic()
+        stale, found = [], None
+        with self.lock:
+            if not self.disabled:
+                keep = []
+                for s in self.idle:
+                    if not s.alive() or now - s.last_used > _EXIFTOOL_SERVER_IDLE_SECONDS:
+                        stale.append(s)
+                    else:
+                        keep.append(s)
+                for j in range(len(keep) - 1, -1, -1):
+                    if keep[j].exe == exe and keep[j].cwd == cwd:
+                        found = keep.pop(j)
+                        break
+                self.idle = keep
+                self.busy += 1
+                self.peak = max(self.peak, self.busy)
+            disabled = self.disabled
+        for s in stale:
+            self._forget(s)
+            s.close()
+        if disabled:
+            return None
+        if found is not None:
+            return found
+        try:
+            srv = _ExiftoolServer(exe)
+        except _JobRefused:
+            with self.lock:
+                self.busy -= 1
+                self.disabled = True
+            return None
+        except Exception:
+            with self.lock:
+                self.busy -= 1
+            return None
+        with self.lock:
+            self.live.append(srv)
+            self.started += 1
+            if not self._at_exit:
+                atexit.register(self.close_all)
+                self._at_exit = True
+        return srv
+
+    def release(self, srv) -> None:
+        """Take back a process after a call that answered."""
+        srv.last_used = time.monotonic()
+        with self.lock:
+            self.busy -= 1
+            keep = min(max(_EXIFTOOL_SERVER_KEEP_IDLE, self.peak), _EXIFTOOL_SERVER_MAX_IDLE)
+            if (srv.alive() and srv.commands < _EXIFTOOL_SERVER_MAX_COMMANDS
+                    and len(self.idle) < keep):
+                self.idle.append(srv)
+                return
+        self._forget(srv)
+        srv.close()
+
+    def drop(self, srv) -> None:
+        """Take back a process that failed (killed, never used again)."""
+        with self.lock:
+            self.busy -= 1
+        self._forget(srv)
+        srv.kill()
+
+    def _forget(self, srv) -> None:
+        with self.lock:
+            try:
+                self.live.remove(srv)
+            except ValueError:
+                pass
+
+    def close_all(self) -> None:
+        """Close every process of the pool (at exit, or a test)."""
+        with self.lock:
+            live, self.live, self.idle = list(self.live), [], []
+        for s in live:
+            s.close()
+
+
+def _exiftool_server_ok(g) -> bool:
+    """May this script's ExifTool commands go to a kept-open process? Windows,
+    EXIFTOOL_STAY_OPEN on, the script has a pool, and _exiftool_batch_ok: the
+    script's own runners are in place (a test double sees every command, as
+    before) and this ExifTool reports each command's status."""
+    if os.name != "nt" or not _script_get(g, "EXIFTOOL_STAY_OPEN", False):
+        return False
+    pool = _script_get(g, "_EXIFTOOL_POOL")
+    if pool is None or pool.disabled:
+        return False
+    # A test double of the script's subprocess (the module, or its run or
+    # Popen) sees every command too: a process kept open since an earlier
+    # real call would answer behind its back.
+    sp = _script_get(g, "subprocess")
+    if (sp is not _REAL_SUBPROCESS or getattr(sp, "Popen", None) is not _REAL_POPEN
+            or getattr(sp, "run", None) is not _REAL_RUN):
+        return False
+    return _exiftool_batch_ok(g)
+
+
+def _exiftool_via_server(g, commands, timeout, binary=False):
+    """[CompletedProcess] of `commands` (lists of argument lines, without the
+    charset lines) run in order on a kept-open ExifTool, each answered like a
+    _run_exiftool_argfile call of its own: its status (the -echo markers of
+    _exiftool_one_process), stdout and stderr — text decoded as _run_captured
+    decodes it, or bytes with `binary`. All within `timeout` seconds. None
+    when no kept-open process can be had: the caller runs them as before.
+
+    Fail closed: a command written to an ExifTool that then ended without
+    answering gets status -1 — a write is never sent twice, even when it may
+    have died just before reading it; one that could not be written at all
+    (its pipe already closed) goes, once, to a fresh process. A timeout or
+    Ctrl+C kills the process and raises, as _run_captured did. A command that
+    changes the XMP prefixes of the commands after it (_taints_xmp_prefixes)
+    is never sent: None, and the caller runs the call as before."""
+    if not commands or any(_taints_xmp_prefixes(c) for c in commands):
+        return None
+    if not _exiftool_server_ok(g):
+        return None
+    pool = g._EXIFTOOL_POOL
+    exe = g._get_exiftool_cmd()
+    head = g._ARGFILE_CHARSET.rstrip("\n").split("\n")
+    if _script_get(g, "EXIFTOOL_IGNORE_MINOR"):
+        head = head + ["-m"]
+    empty = b"" if binary else ""
+    deadline = time.monotonic() + timeout
+    srv = pool.acquire(exe)
+    if srv is None:
+        return None
+    results, retried, i = [], False, 0
+    try:
+        while i < len(commands):
+            cmd = [str(a) for a in commands[i]]
+            try:
+                status, out, err = srv.run(head + cmd, deadline, timeout)
+            except _ExiftoolGone as gone:
+                pool.drop(srv)
+                code = srv.proc.returncode
+                srv = None
+                if not gone.written and not retried:
+                    retried = True
+                    srv = pool.acquire(exe)
+                    if srv is not None:
+                        continue
+                    if not results:
+                        return None
+                gone_text = _SERVER_GONE_TEXT.format(
+                    code="" if code is None else f" (exit code {code})")
+                gone_text = gone_text.encode() if binary else gone_text
+                for c in commands[i:]:
+                    results.append(g._CompletedProcess([exe] + [str(a) for a in c], -1,
+                                                       empty, gone_text))
+                return results
+            if not binary:
+                out = out.decode("utf-8", "replace").replace("\r\n", "\n")
+                err = err.decode("utf-8", "replace").replace("\r\n", "\n")
+            results.append(g._CompletedProcess([exe] + cmd, status, out, err))
+            i += 1
+    except BaseException:
+        if srv is not None:
+            pool.drop(srv)
+            srv = None
+        raise
+    finally:
+        if srv is not None:
+            pool.release(srv)
+    return results
+
+
+def _run_exiftool_file(g, path, timeout, text=True):
+    """`exiftool -@ <path>` for an argfile written for one call: on a
+    kept-open ExifTool when _exiftool_via_server has one (the argfile's lines
+    sent as they are), else exactly the call it always was."""
+    lines = _argfile_command(g, path)
+    via = _exiftool_via_server(g, [lines], timeout, binary=not text)
+    if via is not None:
+        return _unread_source_failed(g, lines, via[0])
+    return _unread_source_failed(g, lines, g._run_captured(
+        [g._get_exiftool_cmd(), "-@", str(path)], timeout, text=text))
 
 
 # === Settings overlay ===
@@ -3061,15 +3816,25 @@ def _make_explorer_thumbnail(g, jxl_path, tmp_dir):
     tmp_dir = Path(tmp_dir)
     pam, icc, jpg = tmp_dir / "thumb.pam", tmp_dir / "thumb_src.icc", tmp_dir / "thumb.jpg"
     srgb = tmp_dir / "thumb_srgb.icc"
+    # The encoder's page check of the same file (its _KEPT_DECODE, asked for
+    # while --verify-roundtrip checks every page): this decode is kept for it,
+    # with the original profile too, so the page is decoded once.
+    keep = _script_get(g, "_KEPT_DECODE")
+    keep = keep if keep is not None and getattr(keep, "wanted", False) else None
+    orig = tmp_dir / "thumb_orig.icc"
     try:
         if shutil.which("djxl") is None or shutil.which("magick") is None:
             raise RuntimeError("needs djxl and ImageMagick (magick) on PATH")
         from PIL import ImageCms
         srgb.write_bytes(ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes())
         r = g._run_to_memory(["djxl", str(jxl_path), "-", "--output_format=pam",
-                              f"--icc_out={icc}"], g.CJXL_TIMEOUT)
+                              f"--icc_out={icc}"]
+                             + ([f"--orig_icc_out={orig}"] if keep is not None else []),
+                             g.CJXL_TIMEOUT)
         if r.returncode != 0 or not r.stdout:
             raise RuntimeError(f"djxl: {g._stderr_tail(r.stderr)}")
+        if keep is not None:
+            keep.kept = (_codestream_digest(jxl_path), r.stdout, icc, orig)
         raw = g._pam_raw_input(r.stdout)
         if raw is None:
             pam.write_bytes(r.stdout)
@@ -3562,10 +4327,17 @@ def _read_pipe_until_eof(fd, deadline):
         chunks.append(chunk)
 
 
-def _run_to_memory(g, cmd, timeout):
+def _run_to_memory(g, cmd, timeout, input=None):
     """`cmd` run like _run_captured, but its stdout is read into MEMORY in this
     thread and never touches the disk (#671). Returns a CompletedProcess with
     stdout and stderr as bytes.
+
+    `input` (bytes) goes to the child's stdin first, written from this thread,
+    and stdin is closed before stdout is read — for a program that reads its
+    WHOLE input before it writes anything: ImageMagick reads an image whole
+    before the first operator runs (the recompressor's derivative PNG, v2.31.0).
+    A child that wrote first would wait on a full pipe while this thread waits
+    to write; stderr goes to a file, never in the way.
 
     For a decode that is only an intermediate: the Explorer thumbnail's
     full-size PAM (272 MB for a 45 MP 16-bit page) used to go to TEMP_DIR once
@@ -3580,10 +4352,35 @@ def _run_to_memory(g, cmd, timeout):
     cmd = g._long_codec_paths(cmd)
     deadline = time.monotonic() + timeout
     with tempfile.TemporaryFile(dir=g.TEMP_DIR) as err:
-        p = subprocess.Popen(cmd, stdin=g._DEVNULL, stdout=subprocess.PIPE,
-                             stderr=err, bufsize=0)
+        rfd, wfd = _output_pipe()
         try:
-            out = _read_pipe_until_eof(p.stdout.fileno(), deadline)
+            p = subprocess.Popen(cmd, stdin=g._DEVNULL if input is None else subprocess.PIPE,
+                                 stdout=wfd, stderr=err, bufsize=0)
+        except BaseException:
+            os.close(rfd)
+            os.close(wfd)
+            raise
+        os.close(wfd)       # the child's copy is its own: EOF comes when it closes it
+        try:
+            if input is not None:
+                try:
+                    # A raw write may take less than all of it (one write is
+                    # capped at 2 GiB - 1): write until everything is written
+                    # (Fable's review, S5).
+                    view = memoryview(input).cast("B")
+                    while view:
+                        n = p.stdin.write(view)
+                        if not n:
+                            break
+                        view = view[n:]
+                except OSError:
+                    pass    # it stopped reading (it failed): its exit code and stderr say why
+                finally:
+                    try:
+                        p.stdin.close()
+                    except OSError:
+                        pass
+            out = _read_pipe_until_eof(rfd, deadline)
             if out is None:
                 raise subprocess.TimeoutExpired(cmd, timeout)
             # The child closed its stdout: it is exiting. A few seconds of
@@ -3594,9 +4391,30 @@ def _run_to_memory(g, cmd, timeout):
             p.wait()
             raise
         finally:
-            p.stdout.close()
+            os.close(rfd)
         err.seek(0)
         return g._CompletedProcess(cmd, rc, out, err.read())
+
+
+# The pipe a child writes its output into for _run_to_memory: 1 MB on
+# Windows, not the system's default. ImageMagick writes a PNG in small
+# pieces; each time the pipe was full it waited for the reading thread, which
+# sleeps while the pipe is empty (_read_pipe_until_eof): a 13 MB PNG of a
+# 2048 px derivative took 2.0 s instead of the 1.0 s of a file on disk
+# (measured 2026-11-21). djxl writes in large blocks and was never slowed.
+_PIPE_BUFFER = 1 << 20
+
+
+def _output_pipe():
+    """(read fd, write fd) of a new pipe for a child's stdout: on Windows
+    with a _PIPE_BUFFER buffer (neither end inheritable: Popen hands the
+    child a copy of the write end), elsewhere os.pipe()."""
+    if os.name != "nt":
+        return os.pipe()
+    import _winapi
+    import msvcrt
+    r, w = _winapi.CreatePipe(None, _PIPE_BUFFER)
+    return msvcrt.open_osfhandle(r, os.O_RDONLY), msvcrt.open_osfhandle(w, os.O_WRONLY)
 
 
 def _exiftool_source(g, path, tmp_dir) -> str:
@@ -3621,7 +4439,12 @@ def _exiftool_source(g, path, tmp_dir) -> str:
         pass
     # -unsafe: exiftool leaves its "unsafe" tags (InteropIndex, ...) out of
     # -all:all, and a caller that names one (#637) would find it missing.
-    r = g._run_exiftool_argfile(["-o", mie, "-all:all", "-unsafe", p], timeout=g.EXIFTOOL_TIMEOUT)
+    # -exif:all# after it: the EXIF goes into the container with its VALUES,
+    # not their printed form (#684: MaxApertureValue f/2.83 came out f/2.8 of
+    # a '%' path even with the callers' own -exif:all#); measured 2026-11-21,
+    # nothing else in the container changes.
+    r = g._run_exiftool_argfile(["-o", mie, "-all:all", "-exif:all#", "-unsafe", p],
+                                timeout=g.EXIFTOOL_TIMEOUT)
     if os.path.exists(mie):
         return mie
     if "Nothing to write" in (r.stderr or "") + (r.stdout or ""):
@@ -4417,6 +5240,11 @@ def _run_exiftool_argfile(g, args_lines, timeout=60):
     kept = _prefetched_result(g, args_lines)
     if kept is not None:
         return kept
+    # A kept-open ExifTool when there is one (EXIFTOOL_STAY_OPEN): the same
+    # lines, the same answer, no process started.
+    via = _exiftool_via_server(g, [list(args_lines)], timeout)
+    if via is not None:
+        return _unread_source_failed(g, args_lines, via[0])
     argfile = None
     try:
         with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
@@ -4429,8 +5257,8 @@ def _run_exiftool_argfile(g, args_lines, timeout=60):
                 af.write("-m\n")
             af.write("\n".join(str(a) for a in args_lines))
             af.write("\n")
-        return g._run_captured([g._get_exiftool_cmd(), "-@", argfile],
-                             timeout, text=True)
+        return _unread_source_failed(g, args_lines, g._run_captured(
+            [g._get_exiftool_cmd(), "-@", argfile], timeout, text=True))
     finally:
         if argfile:
             try:
@@ -4710,6 +5538,20 @@ def _decode_jxl_for_verify(g, jxl_path: Path, tmp_dir: Path,
     bits) is decoded to the PNG, as before — and so is a file djxl writes no
     PAM for at all (32-bit float samples, #683): only the PNG decode's own
     failure raises, as it did before #673."""
+    # The Explorer thumbnail's decode of this very codestream, when the encoder
+    # kept it (one decode per page while --verify-roundtrip checks each page):
+    # same pixels, same profiles — they come from the codestream only.
+    kept = _take_kept_decode(g, jxl_path)
+    if kept is not None:
+        arr = g._pam_array(kept[0])
+        if arr is not None:
+            if (require_original_space
+                    and g._decoded_in_original_space(kept[1], kept[2]) is False):
+                raise RuntimeError(
+                    "lossy ICC blob: djxl decodes it to linear sRGB, so the pixel check "
+                    "cannot compare it with the source — source kept "
+                    "(ICC_PNG_STRATEGY 'cautious' never writes such files)")
+            return arr
     icc_args, out_icc, orig_icc = (g._djxl_icc_args(tmp_dir) if require_original_space
                                    else ([], None, None))
     r = g._run_to_memory(["djxl", str(jxl_path), "-", "--output_format=pam"] + icc_args,
@@ -4763,3 +5605,270 @@ def _compare_stats(g, src, dec):
         diff = a - b
         sq += float((diff * diff).sum())
     return s_sum / total, d_sum / total, sq / total
+
+
+# === Serve mode (--serve) ===
+#
+# photo-backup converts its photos one call at a time; each call paid Python's
+# start, the imports, the tool probes and a log file of its own (0.47 s of a
+# JPEG's 0.39 s of work, measured 2026-11-19). A serve process starts once and
+# runs one job per line it reads, each exactly like a single call: main() with
+# sys.argv set to the job's input, its output and the serve line's options.
+# The protocol, one JSON object per line, ASCII:
+#   -> {"serve": 1, "version": "<TOOLKIT_VERSION>", "script": "<name>.py"}
+#   <- {"id": "...", "input": "<path>", "output": "<folder>"}      (one per job)
+#   -> {"id": ..., "exit": N, "outputs": [names new in the folder], "error": ""}
+#   -> {"end": true, "jobs": N, "failed": M}                       (at EOF)
+# Plan 261119 part A with the Fable review's amendments; plan 261121, phase 2.
+
+_SERVE_PROTOCOL = 1
+# Options a serve process refuses (by their parsed value, so every spelling
+# argparse accepts is caught): a serve process never deletes, never asks and
+# never runs a maintenance mode. Each script adds its own (_SERVE_REFUSED).
+_SERVE_REFUSED_ALWAYS = ("delete_source", "delete_skipped", "delete_confirm_off",
+                         "clean_staging", "serve")
+_SERVE_ERROR_MAX = 1000
+
+
+class _JobErrors(logging.Handler):
+    """Keeps the FIRST ERROR-level messages a job logged (its answer's
+    `error`): the first one names the cause, and photo-backup reads the first
+    two of a single call's output (the JP-20 round-trip failure is one)."""
+
+    def __init__(self, keep=2):
+        super().__init__(level=logging.ERROR)
+        self.keep = keep
+        self.messages = []
+
+    def emit(self, record):
+        if len(self.messages) < self.keep:
+            try:
+                self.messages.append(record.getMessage())
+            except Exception:
+                pass
+
+
+# At most this many lines a job printed on stderr are copied into the log.
+_SERVE_STDERR_LINES = 50
+
+
+def _serve_line(obj) -> str:
+    return json.dumps(obj, ensure_ascii=True) + "\n"
+
+
+def _serve_one_line(text) -> str:
+    return " | ".join(ln.strip() for ln in str(text).splitlines()
+                      if ln.strip())[:_SERVE_ERROR_MAX]
+
+
+def _serve_refusal(g, options):
+    """Why a serve process cannot run with these options, or None. Asked of
+    the script's own parser and of its EFFECTIVE settings: DELETE_SOURCE =
+    True edited at the top of the script deletes with no flag at all."""
+    for tok in options:
+        if tok in ("-h", "--help", "--version") or tok.startswith(("--help=", "--version=")):
+            return f"{tok} (not a run)"
+    parser = g.build_parser()
+    err = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(err):
+            ns = parser.parse_args(["<input>", "<output>"] + list(options))
+    except SystemExit:
+        last = [ln for ln in err.getvalue().strip().splitlines() if ln.strip()]
+        return "these options: " + (last[-1].split("error: ", 1)[-1] if last else "invalid")
+    refused = tuple(_SERVE_REFUSED_ALWAYS) + tuple(_script_get(g, "_SERVE_REFUSED", ()))
+    for dest in refused:
+        if getattr(ns, dest, None) not in (None, False):
+            return "--" + dest.replace("_", "-")
+    if getattr(ns, "provenance", None) == "adopt":
+        return "--provenance adopt (it rewrites existing outputs)"
+    for name in ("DELETE_SOURCE", "DELETE_SKIPPED"):
+        if _script_get(g, name):
+            return f"{name} = True (the script's setting)"
+    # The temp folder is the process's: every job would be refused for it.
+    why = _percent_temp_problem(_script_get(g, "TEMP_DIR"))
+    return f"cannot start: {why}" if why else None
+
+
+def _serve_put_self_in_job() -> bool:
+    """Put this process in a kill-on-close Job Object of its own: however it
+    ends (its caller killed it, a crash), its children — cjxl, djxl, magick,
+    the kept-open ExifTools — end with it. False when it cannot."""
+    job = _kill_on_close_job()
+    if job is None:
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.GetCurrentProcess.restype = wintypes.HANDLE
+        k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        return bool(k32.AssignProcessToJobObject(job, k32.GetCurrentProcess()))
+    except Exception:
+        return False
+
+
+def _serve_job(g, main, raw, options, log_file):
+    """(answer dict, fatal) of one job line. `fatal`: main() raised what a
+    single call would have died of — the process stops after answering,
+    whatever it left half done is not carried into the next job."""
+    try:
+        # utf-8-sig: PowerShell's Out-File and Set-Content start a file with a BOM.
+        job = json.loads(raw.decode("utf-8-sig"))
+    except (UnicodeDecodeError, ValueError, RecursionError) as e:
+        return {"id": None, "exit": 2, "outputs": [],
+                "error": _serve_one_line(f"bad job: not JSON ({e})")}, False
+    jid = job.get("id") if isinstance(job, dict) and isinstance(job.get("id"), str) else None
+    if not isinstance(job, dict) or set(job) != {"id", "input", "output"} or not all(
+            isinstance(job[k], str) for k in job):
+        return {"id": jid, "exit": 2, "outputs": [],
+                "error": "bad job: a JSON object with exactly the strings id, input, output"}, False
+    # Absolute paths only: an empty string is the serve process's working
+    # folder, which nobody chose ("" "" converted every JPEG found there).
+    for key in ("input", "output"):
+        if not job[key] or not Path(job[key]).is_absolute():
+            return {"id": jid, "exit": 2, "outputs": [],
+                    "error": f"bad job: {key} must be an absolute path"}, False
+    inp, out = Path(job["input"]), Path(job["output"])
+    if not inp.exists():
+        return {"id": jid, "exit": 2, "outputs": [], "error": f"bad job: no input {inp}"}, False
+    if not out.is_dir():
+        return {"id": jid, "exit": 2, "outputs": [],
+                "error": f"bad job: no output folder {out}"}, False
+    try:
+        before = set(os.listdir(out))
+    except OSError as e:
+        return {"id": jid, "exit": 2, "outputs": [], "error": f"bad job: {e}"}, False
+    # What one run keeps about the files it saw (keyed by path, size and
+    # date) starts empty for each job: a file rewritten between two jobs with
+    # the same size and date must be read again.
+    for name in _script_get(g, "_SERVE_FILE_CACHES", ()):
+        obj = _script_get(g, name)
+        if hasattr(obj, "cache_clear"):
+            obj.cache_clear()
+        elif hasattr(obj, "clear"):
+            obj.clear()
+    # The disk-full abort a job before latched is not this job's: a job that
+    # returns early (no file to convert) was answered exit 2 after one.
+    reset = _script_get(g, "_reset_abort")
+    if callable(reset):
+        reset()
+    errors = _JobErrors()
+    g.logger.addHandler(errors)
+    g.logger.info(f"serve job {jid}: {inp} -> {out}")
+    saved_argv = sys.argv
+    sys.argv = [str(_script_get(g, "__file__")), str(inp), str(out), *options]
+    # What the job prints on stderr (argparse's usage and error from a check
+    # main() makes itself, tifffile's warnings through logging.lastResort, any
+    # thread) is caught: it goes into the log and the answer, never to the
+    # caller's stderr, which may be a pipe nobody reads (one usage text per
+    # job filled it: the process stopped after 1 answer of 40).
+    caught = io.StringIO()
+    code, text, fatal = 0, "", False
+    try:
+        with contextlib.redirect_stderr(caught):
+            main()
+    except SystemExit as e:
+        if e.code is None:
+            code = 0
+        elif isinstance(e.code, int):
+            code = e.code
+        else:
+            code, text = 1, str(e.code)
+    except KeyboardInterrupt:
+        raise
+    except Exception as e:
+        code, text, fatal = 2, f"{type(e).__name__}: {e}", True
+        g.logger.exception(f"serve job {jid}: unexpected error")
+    finally:
+        sys.argv = saved_argv
+        g.logger.removeHandler(errors)
+    said = [ln.rstrip() for ln in caught.getvalue().splitlines() if ln.strip()]
+    if said:
+        g.logger.warning(f"serve job {jid}: it printed on stderr:")
+        if len(said) > _SERVE_STDERR_LINES:
+            g.logger.warning(f"  ({len(said) - _SERVE_STDERR_LINES} earlier line(s) left out)")
+        for ln in said[-_SERVE_STDERR_LINES:]:
+            g.logger.warning(f"  {ln}")
+    g.logger.info(f"serve job {jid}: exit {code}")
+    try:
+        outputs = sorted(set(os.listdir(out)) - before)
+    except OSError:
+        outputs = []
+    error = "" if code == 0 else _serve_one_line(
+        text or " | ".join(errors.messages) or (said[-1].strip() if said else "")
+        or f"see the log: {log_file}")
+    return {"id": jid, "exit": code, "outputs": outputs, "error": error}, fatal
+
+
+def _serve(g, main, argv) -> int:
+    """--serve (see the section header): the script's `__main__` calls this
+    instead of main() when its command line has --serve. Returns the
+    process's exit code: 0 after the end line, 2 for a refused command line,
+    a lost channel or a job that raised, 130 for Ctrl+C."""
+    if list(argv).count("--serve") != 1:
+        sys.stderr.write("--serve: give it once\n")
+        return 2
+    options = [a for a in argv if a != "--serve"]
+    why = _serve_refusal(g, options)
+    if why and why.startswith("cannot start: "):
+        sys.stderr.write(f"--serve {why}\n")
+        return 2
+    if why:
+        sys.stderr.write(f"--serve refuses {why}: a serve process never deletes, never asks "
+                         f"and never runs a maintenance mode\n")
+        return 2
+    # stdin and stdout become the job and answer channels; file descriptors 0
+    # and 1 then point at NUL, so nothing a run prints (progress, a summary
+    # line) can reach the answers or fill a pipe nobody reads — the log file
+    # has every line. stderr keeps only what Python prints when it dies.
+    try:
+        jobs = os.fdopen(os.dup(0), "rb")
+        results = os.fdopen(os.dup(1), "w", encoding="ascii", newline="\n")
+        null = os.open(os.devnull, os.O_RDWR)
+        os.dup2(null, 0)
+        os.dup2(null, 1)
+        os.close(null)
+        sys.stdin = open(os.devnull, "r", encoding="utf-8")
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    except OSError as e:
+        sys.stderr.write(f"--serve: cannot take over stdin/stdout: {e}\n")
+        return 2
+    in_job = _serve_put_self_in_job() if os.name == "nt" else None
+    g._SERVE_LOG = None
+    log_file = g.setup_logger()
+    g._SERVE_LOG = log_file
+    g.logger.info(f"serve mode: one job per line on stdin, options {options}")
+    if in_job is False:
+        g.logger.warning("serve mode: this process could not be put in a Job Object of its "
+                         "own (already in one that refuses it?): if it is killed, a cjxl, "
+                         "djxl or ExifTool it started may outlive it")
+    try:
+        results.write(_serve_line({"serve": _SERVE_PROTOCOL, "version": g.TOOLKIT_VERSION,
+                                   "script": Path(_script_get(g, "__file__")).name}))
+        results.flush()
+    except OSError:
+        return 2
+    answered = failed = 0
+    try:
+        for raw in jobs:
+            raw = raw.strip()
+            if not raw:
+                continue
+            result, fatal = _serve_job(g, main, raw, options, log_file)
+            answered += 1
+            failed += result["exit"] != 0
+            try:
+                results.write(_serve_line(result))
+                results.flush()
+            except OSError:
+                return 2
+            if fatal:
+                return 2
+        results.write(_serve_line({"end": True, "jobs": answered, "failed": failed}))
+        results.flush()
+        return 0
+    except KeyboardInterrupt:
+        return 130
+    except OSError:
+        return 2

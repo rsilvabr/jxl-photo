@@ -396,17 +396,44 @@ def test_provenance_marker_write_exception_fails_the_copy(monkeypatch, tmp_path)
         "the except handler used to log at DEBUG and still return success"
 
 
+def _reads_back(marker):
+    """_run_exiftool_argfile stub: every write succeeds; the TIFF's dc:Relation,
+    read back after the write, holds `marker` (or nothing)."""
+    import json
+
+    def fake(lines, **k):
+        lines = [str(a) for a in lines]
+        if "-j" in lines and lines[-1].endswith(".tif"):
+            entry = {"SourceFile": "a.tif"}
+            if marker:
+                entry["Relation"] = [marker]
+            return _FakeRun(stdout=json.dumps([entry]))
+        # A real exiftool always answers a -j read with JSON (#582: an empty
+        # answer is a failed read).
+        return _FakeRun(stdout='[{"SourceFile": "a.jxl"}]' if "-j" in lines else "")
+    return fake
+
+
 def test_provenance_marker_write_success_still_passes(monkeypatch, tmp_path):
     src = tmp_path / "a.jxl"
     _jxl_stub(src)
     tif = tmp_path / "a.tif"
     tif.write_bytes(b"\x00")
-    # A real exiftool always answers a -j read with JSON (#582: an empty
-    # answer is a failed read).
     monkeypatch.setattr(dec, "_run_exiftool_argfile",
-                        lambda lines, **k: _FakeRun(
-                            stdout='[{"SourceFile": "a.tif"}]' if "-j" in lines else ""))
+                        _reads_back(dec.SRC_PREFIX + dec._source_path_id(src)))
     assert dec.copy_metadata(src, tif, tmp_path, provenance_sources=[src]) is True
+
+
+def test_a_write_that_says_ok_without_the_marker_fails_the_copy(monkeypatch, tmp_path):
+    """Fable's review, M1: ExifTool can answer status 0 for a write whose XMP
+    never arrived (a block file it could not open): the marker read back
+    after the write is what proves it."""
+    src = tmp_path / "a.jxl"
+    _jxl_stub(src)
+    tif = tmp_path / "a.tif"
+    tif.write_bytes(b"\x00")
+    monkeypatch.setattr(dec, "_run_exiftool_argfile", _reads_back(None))
+    assert dec.copy_metadata(src, tif, tmp_path, provenance_sources=[src]) is False
 
 
 # ===========================================================================

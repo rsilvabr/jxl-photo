@@ -41,7 +41,7 @@ def _recorded_run(tmp_path, monkeypatch, names=("DSC_0001 (2).tif",), pages=1):
         _tiff(src / name, seed=i, pages=pages)
     out = tmp_path / HOSTILE / "16B_JXL"
     seen = {}
-    monkeypatch.setattr(enc, "_delete_sources", lambda *a: seen.setdefault("args", a))
+    monkeypatch.setattr(enc, "_delete_sources", lambda *a, **k: seen.setdefault("args", a))
     monkeypatch.setattr(sys, "argv", [
         "jxl_tiff_encoder.py", str(src), str(out), "--mode", "0", "--distance", "0",
         "--effort", "3", "--workers", "1", "--no-preflight", "--delete-source",

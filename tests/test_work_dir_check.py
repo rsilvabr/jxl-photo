@@ -76,7 +76,9 @@ def _tiff(folder: Path) -> Path:
 def test_transcoder_creates_a_missing_temp_dir(tmp_path):
     root = tmp_path / HOSTILE
     src = _jpeg(root / "jpg [B] 京都")
-    temp = root / "temp nao existe [x]" / "sub 5%"
+    # No '%' in a temp folder: refused at the start since v2.31.0 (ExifTool
+    # reads it as a format code); the sources keep theirs.
+    temp = tmp_path / "写真 [T] temp nao existe" / "sub [x]"
     r = _run("jxl_jpeg_transcoder", [src.parent, "--mode", "0"], _overlay(tmp_path, temp))
     out = r.stdout + r.stderr
     assert r.returncode == 0, out
@@ -116,7 +118,7 @@ def test_encoder_dry_run_over_its_own_master(tmp_path):
     wrote. With the folder in place the master reads fine (no refusal)."""
     root = tmp_path / HOSTILE
     src = _tiff(root / "_EXPORT [B] 京都")
-    temp = root / "temp [x] 5%"
+    temp = tmp_path / "写真 [T] temp [x]"          # no '%' in a temp folder (v2.31.0)
     ov = _overlay(tmp_path, temp)
     r = _run("jxl_tiff_encoder", [src.parent, "--mode", "0"], ov)
     assert r.returncode == 0, r.stdout + r.stderr

@@ -48,8 +48,11 @@ _SUBPROCESS_ATTRS = {"run", "Popen", "call", "check_call", "check_output"}
 # reach the disk (the Explorer thumbnail's full-size PAM): same rules — no
 # reader thread, stderr to a temp file, a timeout that holds — but stdout is
 # read into memory in the calling thread. N2 runs it (the lossless encode).
+# _spawn_exiftool_server (EXIFTOOL_STAY_OPEN) starts the ExifTool kept open:
+# its pipes are read by _ExiftoolServer in the calling thread (PeekNamedPipe,
+# never communicate()), so it starts no reader thread either — N2 runs it.
 _ALLOWED_OWNERS = {"_run_captured", "_run_to_memory", "_tool_version",
-                   "_warn_if_libjxl_too_old"}
+                   "_warn_if_libjxl_too_old", "_spawn_exiftool_server"}
 # The scripts' own filenames, for attributing a stack frame to a child script.
 _SCRIPT_FILES = set(_SCRIPTS)
 _PROBE_FUNCS = {"_tool_version", "_warn_if_libjxl_too_old"}

@@ -144,12 +144,12 @@ def _copy_metadata_doubles(monkeypatch, fake):
 def test_copy_metadata_runs_every_command_when_a_cleanup_fails(tmp_path, monkeypatch):
     """The decoder's copy_metadata on the one-process-per-command path (an
     exiftool older than 12.15, or a test double): a cosmetic clean-up that
-    fails never stops the commands after it (stop_at_failure=False, review
-    V2) — here the second process's IFD0 Software clean-up (the read says
-    tifffile's default is still there): the provenance write after it still
-    runs, and the copy is not failed for it, as when each was a call of its
-    own. (Until #682 the failing clean-up was the preview page's
-    `-ifd1:Software=`, which no longer runs.)"""
+    fails never fails the copy (stop_at_failure=False, review V2) — here the
+    IFD0 Software clean-up (the read says tifffile's default is still there).
+    Since v2.31.0 the provenance and History lines ride on the TIFF's one
+    rewrite, which runs BEFORE the clean-ups (they read its result); the
+    clean-up is still tried. (Until #682 the failing clean-up was the preview
+    page's `-ifd1:Software=`, which no longer runs.)"""
     calls = []
 
     def fake(args, timeout=60):
@@ -172,19 +172,22 @@ def test_copy_metadata_runs_every_command_when_a_cleanup_fails(tmp_path, monkeyp
     history = [i for i, c in enumerate(calls)
                if any(a.startswith("-XMP-xmpMM:History+=") for a in c)]
     assert len(cleanup) == 1, calls                          # the clean-up was tried
-    assert history and history[0] > cleanup[0], "the last write never ran after it"
+    assert history and history[0] < cleanup[0], "the provenance write never ran"
+    reads = [i for i, c in enumerate(calls) if c[:1] == ["-s"] and "-IFD0:Software" in c]
+    assert reads and history[0] < reads[0] < cleanup[0], calls   # read the result, then clean
 
 
 def test_copy_metadata_runs_the_rest_when_the_exif_copy_fails(tmp_path, monkeypatch):
-    """The first process too (stop_at_failure=False): a failed EXIF copy is
-    the file's error (False), but the three reads after it and the
-    provenance write still run, as when each command was a call of its own."""
+    """The first process too (stop_at_failure=False): a failed copy (the EXIF,
+    the XMP block and the IPTC share one command since v2.31.0) is the file's
+    error (False), but the three reads after it and the provenance write
+    still run, as when each command was a call of its own."""
     calls = []
 
     def fake(args, timeout=60):
         args = [str(a) for a in args]
         calls.append(args)
-        if "-exif:all" in args:
+        if "-exif:all#" in args:
             return subprocess.CompletedProcess(args, 1, "", "Error: corrupt tag")
         if "-XMP-dc:Relation" in args and "-j" in args:
             return subprocess.CompletedProcess(args, 0, '[{"SourceFile": "x"}]', "")
@@ -197,7 +200,8 @@ def test_copy_metadata_runs_the_rest_when_the_exif_copy_fails(tmp_path, monkeypa
     assert ok is False
     assert sum("-IFD0:Software" in c for c in calls) == 1        # the reads ran
     assert sum("-ImageDescription" in c for c in calls) == 1
-    assert sum("-j" in c and "-XMP-dc:Relation" in c for c in calls) == 1
+    # the JXL's dc:Relation, and the TIFF's read back after the write (Fable M1)
+    assert sum("-j" in c and "-XMP-dc:Relation" in c for c in calls) == 2
     assert any(any(a.startswith("-XMP-xmpMM:History+=") for a in c) for c in calls), \
         "the last write never ran"
 
@@ -273,6 +277,9 @@ def test_the_encoder_writes_a_file_s_metadata_in_one_process(tmp_path, monkeypat
         return real(g, commands, timeout)
     monkeypatch.setattr(common, "_exiftool_one_process", counting)
     monkeypatch.setattr(enc, "_EXIFTOOL_BATCH", {})
+    # The one-process path (EXIFTOOL_STAY_OPEN off); the kept-open one is
+    # tests/test_exiftool_stay_open.py's.
+    monkeypatch.setattr(enc, "EXIFTOOL_STAY_OPEN", False)
     monkeypatch.setattr(sys, "argv", [
         "jxl_tiff_encoder.py", str(folder), str(folder / "jxl"), "--mode", "0",
         "--distance", "0", "--effort", "3", "--no-preflight", "--workers", "1"])
@@ -318,6 +325,7 @@ def test_the_decoder_copies_a_tiff_s_metadata_in_two_processes(tmp_path, monkeyp
         return real(g, commands, timeout)
     monkeypatch.setattr(common, "_exiftool_one_process", counting)
     monkeypatch.setattr(dec, "_EXIFTOOL_BATCH", {})
+    monkeypatch.setattr(dec, "EXIFTOOL_STAY_OPEN", False)      # the one-process path
     monkeypatch.setattr(sys, "argv", ["jxl_tiff_decoder.py", str(jxl), str(folder / "tif"),
                                       "--workers", "1"])
     monkeypatch.setenv("JXLPHOTO_LOG_DIR", str(tmp_path / "logs"))
@@ -327,11 +335,19 @@ def test_the_decoder_copies_a_tiff_s_metadata_in_two_processes(tmp_path, monkeyp
         assert e.code in (0, None)
     tif = folder / "tif" / "DSC_0001 (2).tif"
     assert tif.is_file()
-    # the probe, then copy_metadata's first process: the two copies and the
-    # three reads (no `-ifd1:` clean-up since #682)
+    # the probe, copy_metadata's read of the JXL's dc:Relation (its XMP block
+    # was read into a file already: this folder has a '%', _xmp_block_args;
+    # without one the block's `-o` extraction shares that read's process),
+    # then ONE process with the block's XMP edits, the TIFF's ONE rewrite
+    # (EXIF, the edited block and IPTC since v2.31.0), the two reads the
+    # clean-ups decide from (no `-ifd1:` clean-up, #682) and the read back of
+    # the TIFF's dc:Relation (the marker proves the XMP arrived, Fable M1)
     assert len(batches[0]) == 1, batches
-    first = [b for b in batches if any("-exif:all" in c for c in b)]
+    first = [b for b in batches if any("-exif:all#" in c for c in b)]
     assert len(first) == 1 and len(first[0]) == 5, first
+    tiff_writes = [c for c in first[0] if "-overwrite_original" in c
+                   and not c[-1].lower().endswith(".xmp")]
+    assert len(tiff_writes) == 1, first[0]
     assert _tag(tif, "XMP-dc:Title") == "写真 [2]"
     rel = _tag(tif, "XMP-dc:Relation")
     assert "jxlphoto-page:" not in rel and "jxlphoto-depth:" not in rel, rel
@@ -364,6 +380,7 @@ def test_682_the_decoder_runs_no_empty_ifd1_cleanup(tmp_path, monkeypatch):
         return real(g, commands, timeout)
     monkeypatch.setattr(common, "_exiftool_one_process", recording)
     monkeypatch.setattr(dec, "_EXIFTOOL_BATCH", {})
+    monkeypatch.setattr(dec, "EXIFTOOL_STAY_OPEN", False)      # the one-process path
     monkeypatch.setattr(sys, "argv", ["jxl_tiff_decoder.py", str(jxl), str(folder / "tif"),
                                       "--workers", "1"])
     monkeypatch.setenv("JXLPHOTO_LOG_DIR", str(tmp_path / "logs"))
@@ -373,7 +390,7 @@ def test_682_the_decoder_runs_no_empty_ifd1_cleanup(tmp_path, monkeypatch):
         assert e.code in (0, None)
     tif = folder / "tif" / "DSC_0001 (2).tif"
     assert tif.is_file()
-    assert any("-exif:all" in c for c in seen), seen         # copy_metadata ran batched
+    assert any("-exif:all#" in c for c in seen), seen        # copy_metadata ran batched
     ifd1 = [c for c in seen if any(a.lower().startswith("-ifd1:") for a in c)]
     assert ifd1 == [], ifd1
     out = enc._run_exiftool_argfile(["-j", "-G1", "-IFD1:all", "-IFD0:Software",

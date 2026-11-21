@@ -1,16 +1,17 @@
 """The manifest's own pre-run steps, one by one and in order (refactor F4.7).
 
-_execute_manifest_workflow refuses or asks before the first child for six
+_execute_manifest_workflow refuses or asks before the first child for seven
 reasons that only a whole manifest shows: a bit-exact JPEG recovery asked to
 resize or rename (a _GATE_RULES rule), a mode-7 row whose subfolder cannot be
 told, a bad output folder name, two Sources that overlap, two rows writing
-the same output, and one row's output being another row's Source. Pinned
-here: the recovery rule, the mode-7 subfolder, the Source overlap and the
-output-feeds-Source step (what each refuses unattended, what an attended
-"no" does) and two orders (the recovery rule before the overlap, the overlap
-before the chain). The output folder name and the collision steps are pinned
-by their older tests (tests/test_round33_lows.py,
-tests/test_audit_rounds_19_20.py).
+the same output, one row's output being another row's Source, and a
+recompression that replaces its sources run unattended. Pinned here: the
+recovery rule, the mode-7 subfolder, the Source overlap, the
+output-feeds-Source step and the in-place step (what each refuses
+unattended, what an attended "no" does) and two orders (the recovery rule
+before the overlap, the overlap before the chain). The output folder name and
+the collision steps are pinned by their older tests
+(tests/test_round33_lows.py, tests/test_audit_rounds_19_20.py).
 
 Every folder is hostile (Japanese, brackets, a space, %): these steps compare
 paths.
@@ -163,6 +164,42 @@ def test_an_output_feeding_another_source_asks_when_attended(tmp_path, monkeypat
     rows = [(root / "A", root / "B out", 2), (root / "B out", root / "C", 2)]
     ok, cmds, _out = _run(monkeypatch, tmp_path, capsys, rows, answer=answer)
     assert ok is runs and (len(cmds) == 2) is runs
+
+
+# --- a recompression that replaces its sources ---------------------------------
+
+def test_an_in_place_recompression_is_refused_unattended(tmp_path, monkeypatch, capsys):
+    src = tmp_path / HOSTILE / "masters [a]"
+    ok, cmds, out = _run(monkeypatch, tmp_path, capsys, [(src, "", 0)], origin="jxl",
+                         dest="jxl", conv="jxl_recompress", unattended=True)
+    assert not ok and not cmds
+    assert "Refusing to run unattended: this manifest recompresses JXLs in place" in out
+
+
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_an_in_place_recompression_asks_the_token_when_attended(tmp_path, monkeypatch, capsys,
+                                                                 confirmed):
+    monkeypatch.setattr(wp.InteractiveMenu, "_confirm_in_place_replace",
+                        lambda self: confirmed)
+    src = tmp_path / HOSTILE / "masters [a]"
+    ok, cmds, out = _run(monkeypatch, tmp_path, capsys, [(src, "", 0)], origin="jxl",
+                         dest="jxl", conv="jxl_recompress")
+    assert "Refusing to run unattended" not in out
+    assert ok is confirmed and bool(cmds) is confirmed
+
+
+def test_the_in_place_refusal_is_a_step_of_its_own():
+    """Not an inline refusal in _execute_manifest_workflow (refactor F4.7):
+    every unattended refusal of the manifest is a _manifest_step_* method."""
+    import ast
+    tree = ast.parse(Path(wp.__file__).read_text(encoding="utf-8"))
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "InteractiveMenu")
+    fn = next(f for f in cls.body
+              if isinstance(f, ast.FunctionDef) and f.name == "_execute_manifest_workflow")
+    texts = [ast.unparse(n.args[0]) for n in ast.walk(fn)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+             and n.func.attr == "_print_error" and n.args]
+    assert not [t for t in texts if "unattended" in t], texts
 
 
 # --- the order ----------------------------------------------------------------

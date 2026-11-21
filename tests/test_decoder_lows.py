@@ -67,8 +67,10 @@ def test_copy_metadata_reports_a_nonzero_exiftool_exit(monkeypatch, tmp_path):
     tif.write_bytes(b"\x00")
 
     def fake_argfile(args_lines, timeout=60):
+        # The EXIF copy is `-exif:all#` since v2.31.0 (#684: the values, not
+        # their printed form).
         if "-tagsfromfile" in [str(a) for a in args_lines] and \
-                "-exif:all" in [str(a) for a in args_lines]:
+                "-exif:all#" in [str(a) for a in args_lines]:
             return _FakeRun(stderr="Error: corrupt tag", returncode=1)
         return _FakeRun()
 

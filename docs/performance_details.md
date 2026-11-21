@@ -54,6 +54,7 @@ story by theme.
 | [v2.30.2](version_history.md#v2302-rc2) | Full-size decodes stay in memory: the thumbnail, copies, decoded TIFFs, the checks before a delete | resized JPEG copy of a 45 MP master: 14.1 → 4.5 s |
 | [v2.30.2](version_history.md#v2302) | A new master written once instead of seven times; planning reads a stub of each JXL; a decoded TIFF rewritten fewer times | archiving writes 79 MB instead of 520; decoding 15.8 → 5.6 s |
 | [v2.31.0-rc2](version_history.md#v2310-rc2) | sRGB derivative: colour converted in Python, image to cjxl in memory | 60 masters, sRGB copies at d=0.7 e7: 133 → 123 s (temp folder on an NVMe drive), 176–196 → 121 s (on a SATA SSD); 16 % less CPU |
+| v2.31.0 | ExifTool kept open; a decoded TIFF written once; one decode for the thumbnail and the page check; the delete gate's checks in parallel; ImageMagick's PNG in memory; `--serve` | 4 TIFFs archived one call each with every page checked: 16.9 → 13.2 s; 6 masters decoded: 5.1 → 4.2 s; a deleting run of 6 TIFFs: 11.3 → 9.0 s; 6 masters resized to 2048 px: 4.1 → 3.6 s; 30 JPEGs archived through one `--serve` process instead of a call each: 8.9 → 4.8 s |
 
 ## The starting design
 
@@ -186,6 +187,19 @@ frees up. The same run became 3 encodes plus 3 workers preparing. The worst
 case — every slot at its cjxl peak and every extra worker at its own peak —
 still fits the budget.
 
+### The checks before a delete, in parallel
+
+With `--delete-source` the encoder decodes every page it wrote and compares
+it with the TIFF before deleting the TIFF (`VERIFY_ROUNDTRIP`). Those checks
+ran one after the other once the encodes were done: 74 % of a deleting run's
+time (131 of 177 s, measured in the 261113 plan). Since v2.31.0 they start at
+once in a pool of the run's memory-capped worker count (a check needs less
+memory than the encode before it), only for the TIFFs the cheaper checks
+before them do not already keep, and the gate reads each result where it used
+to run the check: every source is still checked before its own delete, with
+the same checks in the same order. A deleting run of six real TIFFs with 6
+workers, with ExifTool kept open too: 11.3 → 9.0 s.
+
 ### More workers are not always faster
 
 With large photos the curve flattens early. Recompressing 24 files at d=3 e=7:
@@ -216,6 +230,32 @@ a photo passes through several of them. The toolkit starts as few as it can:
   with the uncompressed PNG: eight varied photos (54 MP in all, 4 workers)
   archived in 6.8 s instead of 12.6 and decoded in 10.5 s instead of 14.2;
   four larger ones (146 MP in all) archived in 9.7 s instead of 18.0.
+- **ExifTool kept open.** Since v2.31.0 each script starts ExifTool once
+  (`-stay_open`, on Windows) and hands it every per-file command, one at a
+  time, instead of starting it for each: about 15 ms a command against 197 ms
+  for a fresh process (measured 2026-11-21). A 45 MP two-page TIFF had started
+  nine ExifTools, 3.7 of its 8.6 s. The processes are in a Windows Job Object,
+  so they end with the script however it ends (ExifTool does not end when its
+  input closes); a command it ended without answering is a failure, never sent
+  twice. A command that copies XMP fields from a file still gets a process of
+  its own: after one, ExifTool writes some XMP namespace prefixes its own way
+  in every later command, and a file must come out the same whatever ran
+  before it. `EXIFTOOL_STAY_OPEN = False` goes back to a process per command.
+  Measured on copies of real photos, one after the other with the code before
+  it: four TIFFs archived one call each with every page checked (photo-backup's
+  command) 16.9 → 13.2 s; six TIFFs with 6 workers 6.7 → 6.3 s (folders
+  without a `%`). A JPEG archived one call each gains nothing: each call is a
+  process of its own, and the archive needs almost no ExifTool.
+- **One process for many files (`--serve`).** A program that converts its
+  files one call at a time (photo-backup) pays, per file, Python's start, the
+  imports, the tool checks and a log of its own — more than the work on a
+  JPEG. Since v2.31.0 the encoder, the decoder and the transcoder take
+  `--serve`: started once, they read one job per line and run each exactly as
+  a call of its own, with the kept-open ExifTool shared by all of them.
+  Measured on copies of real photos, the same options both ways: 30 JPEGs
+  archived losslessly 8.9 → 4.8 s, 4 TIFFs archived with every page checked
+  13.5 → 10.8 s; the outputs are the same (the JPEG archives byte for byte,
+  the masters' codestreams). photo-backup does not use it yet.
 - **No new call where one already runs.** The decoder writes its markers in a
   call it already makes: one ExifTool start less per decoded photo (v2.0.0).
 - **A few bytes read directly.** The D50 check decides from the ICC profile
@@ -288,7 +328,13 @@ shared by every worker (per file, 24 workers' copies did not fit in the CPU
 cache); the image is converted in chunks of 65 536 pixels (smaller chunks made
 the threads wait on the GIL). The result is never more than 1 apart in 65 535
 from ImageMagick's on real photos. Other profiles, a resize or a sharpening keep
-ImageMagick. Measured on 60 real masters, sRGB copies at d=0.7 e7 (30 workers
+ImageMagick — and since v2.31.0 ImageMagick's own PNG for cjxl stays in memory
+too (`png:-`, then cjxl's input): no `conv.png` in the temp folder. Its pipe is
+1 MB: ImageMagick writes in small pieces, and through Windows' default pipe each
+piece waited for the reading thread (a 13 MB PNG: 2.0 s against 1.0 s for a
+file). Six masters resized to 2048 px, 6 workers: 4.17 s before v2.31.0, 3.74 s
+now (−10 %, ExifTool kept open included).
+Measured on 60 real masters, sRGB copies at d=0.7 e7 (30 workers
 asked, 23–28 after the memory cap), v2.31.0-rc1 and rc2 one after the other:
 133 → 123 s with the temp folder on an NVMe drive (−8 %), 176–196 → 121 s on a
 SATA SSD (−31 to −38 %), 16 % less CPU; the same quality (40.894 dB against the
@@ -318,6 +364,16 @@ leaves out two ExifTool clean-ups that found nothing to change. ExifTool writes
 a whole temporary copy of a TIFF even for a command that changes nothing —
 241 MB and 0.7 s per 45 MP page, each time. The four ExifTool writes left each
 change something.
+
+Since v2.31.0 those four are one. They were apart because a command that
+writes the XMP as a block (the way it keeps a namespace ExifTool can only read,
+such as SilverFast's) ignores every XMP field it also edits. Now the block goes
+into a small file of its own first, the edits (the markers, the history, the
+orientation) are made there, and one command writes the EXIF, that block and
+the IPTC into the TIFF. On 19 real TIFFs decoded by the code before and after,
+every page's pixels and every tag are the same (only the preview's offset in
+the file moved); with ExifTool kept open, the 19 took 23.3 s instead of 34.3
+(4 workers), and six masters with 6 workers 5.1 → 4.2 s.
 
 ### What it adds up to
 
@@ -378,7 +434,19 @@ A restored TIFF has a new date and its old bytes, and the date alone made the
 encoder's sync encode it again. Since v2.27.0 the sync compares such a TIFF
 with the hash its master records (`jxlphoto-srcsum`) and keeps the master when
 they match: no re-encode, and no master replaced by a worse one when the
-distance changed in between. It costs one read of each such TIFF per run.
+distance changed in between. It costs one read of each such TIFF per run;
+since v2.31.0 four TIFFs are read at once (on a hard disk the total speed is
+the same, 141–159 MB/s with 1 to 32 readers measured; an SSD, and the antivirus
+scan of a file's first open, no longer set the pace one file at a time).
+
+### One decode for the Explorer thumbnail and the page check
+
+With `--verify-roundtrip` and no delete (photo-backup's command), each page is
+decoded and compared with its TIFF page before it takes its final name; with
+an Explorer thumbnail, the same page was decoded a second time for it. Since
+v2.31.0 the thumbnail's decode is kept for the check when the file being
+checked holds the very same image data (its codestream's sha256): one decode
+per page. Normal runs keep nothing.
 
 ### Estimates and scans only where they mean something
 

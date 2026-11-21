@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #684.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #688.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -32,6 +32,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-90 — EXIF values, the generated sRGB, files ExifTool could not open](#round-90--exif-values-the-generated-srgb-files-exiftool-could-not-open-2026-11-21) | 2026-11-21 | v2.31.0-rc3 | #684–#687 (4) |
 | [Round-89 — the review before v2.30.2](#round-89--the-review-before-v2302-2026-11-15) | 2026-11-15 | v2.30.2 | #683 (1) |
 | [Round-88 — the decoder's empty clean-ups](#round-88--the-decoders-empty-clean-ups-2026-11-15) | 2026-11-15 | v2.30.2 | #682 (1) |
 | [Round-87 — what each step writes and reads on disk](#round-87--what-each-step-writes-and-reads-on-disk-2026-11-14) | 2026-11-14 | v2.30.2-rc2 | #672–#676, #679–#681 (8) |
@@ -107,6 +108,20 @@ were never tagged and never shipped.
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
 
 ---
+
+## Round-90 — EXIF values, the generated sRGB, files ExifTool could not open (2026-11-21)
+
+Four old ones found on the way through the speed round of plan 261121 (the
+ExifTool kept open, the decoder's one rewrite) and its reviews: none changes
+pixels; #684 and #685 change bytes of new outputs, #686 and #687 closed ways a
+master could lose metadata with an OK.
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 684 | The EXIF copied into an output (TIFF → master, master → TIFF, a derivative, the transcoder's JPEG/PNG/JXL) went through ExifTool's PRINTED values (`-tagsfromfile <source> -exif:all`), converted back: `MaxApertureValue` f/2.83 came back f/2.8 (12 of 25 of the owner's photos in the round trip of 2026-11-15), a phone's `FocalLength` 6.62 mm came back 6.6 mm, the APEX shutter and aperture values were rounded. A TIFF never gives `-b -Exif` a block (0 bytes for every TIFF), so this copy WAS the master's EXIF. Now `-exif:all#` (the values) in the five places that copy EXIF, and the MIE container of a `%` path (`_exiftool_source`, #550) keeps the EXIF values too. Measured and proven on real photos 2026-11-21. Existing masters keep the values they hold. | encoder, decoder, transcoder, recompressor | Fixed |
+| 685 | The sRGB profile made for the transcoder's `--to-srgb` and the decoder's `--target-icc srgb` carried the moment it was made in its header (bytes 24–35), so two identical outputs made on different days differed. Both use the toolkit's generated sRGB with its fixed date now (`_generated_srgb_icc`, the recompressor's since v2.30.x). The transcoder's cached copy in `TEMP_DIR` is named after its content (`jxl_photo_sRGB_<sha256>.icc`), so the `jxl_photo_sRGB.icc` an older version left is never replaced: replacing it fails when another program holds it open, it is read-only or another account owns it, and `--to-srgb` must never fall back to `-colorspace sRGB` for that (review of the round). | transcoder, decoder | Fixed |
+| 686 | ExifTool answers a `-TAG<=FILE` whose file exists but cannot be opened (another program holding it open without sharing: an antivirus, an indexer, a backup agent, for an instant) with `Error opening file` and exit status 0 whenever the same command wrote anything else. The encoder's XMP block and EXIF preloads (`-XMP<=`, `-Exif<=`) could then be missing from a master that reported OK, and so could the decoder's new XMP block file (found by Fable's review, measured with a file held open). Now such an answer is a failed command in every script (`_unread_source_failed`, at every entry point), and the decoder reads its own `jxlphoto-src` marker back after its one TIFF write. | encoder, decoder, recompressor, transcoder | Fixed |
+| 687 | A `%` in the temp folder (`TEMP_DIR`, or the system's TEMP/TMP when it is unset — photo-backup points those at its work folder): ExifTool reads a `%` in the name of a file it writes (`-o`) or reads a tag from (`<=`) as a format code. The encoder's extraction of a TIFF's XMP block silently gave nothing, and the master kept only the XMP fields ExifTool can write (SilverFast's LSI settings dropped); a `%` source path failed (its container could not be written). Such a temp folder is now refused at the start of every run and serve process, with what to change (`_percent_temp_problem`; the owner's call). | encoder, decoder, recompressor, transcoder | Fixed |
 
 ## Round-89 — the review before v2.30.2 (2026-11-15)
 

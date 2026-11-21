@@ -4,8 +4,9 @@ Converting a photo library means hours of cjxl and djxl, and the toolkit cannot
 make libjxl itself faster. What it controls is everything around the codec, and
 the aim is simple: almost all of a run's time should go to the codec.
 
-None of it costs anything in the files. Each speed change writes the same files
-as the code before it, and every check before a delete still runs.
+None of it costs anything in the files. Each speed change writes the same
+images and the same metadata values as the code before it, and every check
+before a delete still runs.
 
 This page is the summary: where the time went, why, and what changed. Every
 change, with the release that made it and what it measured, is in
@@ -20,6 +21,7 @@ A few measurements from the releases that made the changes (Windows, real
 |---|---|---|---|
 | Eight photos spread over eight folders, 8 workers | 33 s | 10 s | v1.8.2 |
 | Archive eight varied photos, 4 workers | 12.6 s | 6.8 s | v2.30.0 |
+| Archive four TIFFs one call each, every page checked (photo-backup's way) | 16.9 s | 13.2 s | v2.31.0 |
 | Archive one TIFF: written to disk | 520 MB | 79 MB | v2.30.2 |
 | Decode one master to TIFF | 15.8 s | 5.6 s | v2.30.2 |
 | Resized JPEG copy of one master | 14.1 s | 4.5 s | v2.30.2 |
@@ -52,8 +54,9 @@ copies a whole TIFF even for a command that ends up changing nothing.
 **Now.** The metadata lives in small boxes next to the image data, so ExifTool
 works on a stub — the boxes plus the first 4 KB of the image — and the master
 is assembled once at the end, boxes in the right order, thumbnail included. The
-decoder writes the preview together with the image and runs only the ExifTool
-commands that change something.
+decoder writes the preview together with the image, and all of a TIFF's
+metadata in one ExifTool command: the XMP is edited first in a small file of
+its own (v2.31.0).
 
 **What stays.** ExifTool itself: it is what writes EXIF and XMP correctly, and
 replacing it with home-made code would put the metadata at risk. If the stub
@@ -90,14 +93,17 @@ waiting on each other forever, for under a second per photo.
 which loads its whole Perl interpreter each time — and a photo needed several:
 one ExifTool per metadata command, one per question while planning.
 
-**Now.** Planning asks about up to 400 files per ExifTool call; all of a photo's
-metadata commands share one ExifTool process; each tool's version is asked once
-per run; and small things (the colour profile, the orientation, an HDR gain map)
-are read straight from the file's bytes.
+**Now.** Planning asks about up to 400 files per ExifTool call; on Windows each
+script keeps ExifTool open for the whole run and hands it every metadata
+command — about 15 ms a command instead of about 0.2 s for a fresh process
+(v2.31.0); each tool's version is asked once per run; and small things (the
+colour profile, the orientation, an HDR gain map) are read straight from the
+file's bytes.
 
 **What stays.** An ExifTool older than 12.15 keeps one process per command: it
 cannot report each command's result separately, and a failed write must never
-pass for a good one.
+pass for a good one. A program that starts the toolkit once per photo
+(photo-backup's JPEGs) still pays Python's start each time.
 → [Fewer processes](performance_details.md#fewer-processes)
 
 ### Whole files read to answer small questions

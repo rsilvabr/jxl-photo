@@ -1,0 +1,146 @@
+# Known issues by version
+
+The bugs that changed **files the toolkit wrote**, not the ones that only
+stopped a run, refused a file or printed something wrong. For each one: which
+versions wrote such files, how to tell, and what to do. Everything else that
+was fixed is in [bug_tracking_since_v1.0.md](bug_tracking_since_v1.0.md).
+
+None of these lost pixels of a master made from a TIFF. They are metadata, a
+few derived copies, and some lossless JPEG archives (those of v2.0.0–v2.0.3,
+and those made with libjxl 0.13 before v2.30.1-rc2).
+
+## Find the files a version wrote
+
+Since v2.13.0 every file the toolkit writes records the version that wrote it
+in its XMP history (`xmpMM:History`, the *SoftwareAgent* field: `jxl-photo
+2.24.0 (...)`, since v2.30.0 also `with libjxl 0.12.0`). A file touched by
+several versions lists each of them. To list the files a range of versions
+wrote, with [ExifTool](https://exiftool.org/) (in `cmd`, from any folder):
+
+```
+exiftool -r -if "$HistorySoftwareAgent =~ /jxl-photo 2\.1[7-9]\./" -p "$Directory/$FileName" "D:\Photos"
+```
+
+The part between the slashes is a regular expression on the version:
+`2\.1[7-9]\.` is 2.17.x to 2.19.x, `2\.(2[0-9]|30)\.` is 2.20.x to 2.30.x,
+`2\.30\.1-rc` is the 2.30.1 test releases. Add `-ext jxl` (or `-ext jpg`) to
+look at one kind of file.
+
+Some files carry no history, and this command cannot find them: everything
+written before v2.13.0, a **lossless JPEG archive** (its JXL must give back
+the original JPEG byte for byte, so the toolkit never writes into it) and a
+verbatim copy of one. The entries below say how to find those.
+
+## The list, newest first
+
+### EXIF values rounded — every version before v2.31.0 (#684)
+
+**What:** the EXIF copied into an output went through ExifTool's printed
+values: `MaxApertureValue` f/2.83 became f/2.8, a phone's `FocalLength`
+6.62 mm became 6.6 mm, and the APEX shutter and aperture values were rounded
+slightly. Pixels, dates, camera and lens names are not affected.
+**Which files:** masters made from TIFFs, TIFFs decoded from them, and the
+copies (JPEG, PNG, resized or converted JXL).
+**What to do:** nothing is needed for viewing. For the exact values,
+re-encode the masters from their TIFFs with v2.31.0 or newer and
+`--overwrite`; a copy made from a master keeps what the master holds.
+
+### The generated sRGB profile carried its creation time — before v2.31.0 (#685)
+
+**What:** the sRGB profile embedded by the transcoder's `--to-srgb` and the
+decoder's `--target-icc srgb` carried the moment it was made, so two otherwise
+identical outputs differed in a few bytes. The colours are the same.
+**What to do:** nothing.
+
+### An alpha channel with nothing in it was dropped — v2.30.1-rc1 and older, with libjxl 0.13 (#670)
+
+**What:** cjxl 0.13 drops an all-opaque alpha channel in a lossy encode; the
+toolkit asks it to keep it since v2.30.1-rc2. A lossy master or copy of an
+RGBA image (or of a scan whose 4th channel reached cjxl as alpha) came out
+with 3 channels. No pixel of the picture changed.
+**Which files:** lossy outputs of 4-channel images made with libjxl 0.13
+(released 2026-11-12) by jxl-photo v2.30.1-rc1 or older.
+**What to do:** re-encode those from the source with `--overwrite`.
+
+### JPEG archives rebuilt only by djxl 0.13 — v2.30.1-rc1 and older, with libjxl 0.13 (#669)
+
+**What:** with cjxl 0.13, the lossless archive of a 4:4:4 or grey JPEG was
+marked for "LF smoothing": djxl 0.13 rebuilds the original JPEG bit for bit,
+djxl 0.12 and 0.11 do not. Nothing was lost (the delete gate proved the
+rebuild with the djxl installed).
+**Which files:** lossless JPEG → JXL archives made with libjxl 0.13 by
+v2.30.1-rc1 or older. They carry no history: they were made after
+2026-11-12 (libjxl 0.13's release) by a jxl-photo older than v2.30.1-rc2
+while libjxl 0.13 was installed. The proof for one archive: rebuild it with
+djxl 0.12 (`djxl archive.jxl rebuilt.jpg`) and compare the result with the
+original's MD5 in the folder's `checksums.md5`.
+**What to do:** keep djxl 0.13 or newer, or archive those JPEGs again (the
+original JPEG comes back with djxl 0.13).
+
+### A grey copy kept its master's marks — v2.30.2-rc1 and older (#672)
+
+**What:** a JPEG made from the grey page of a film scan (the infrared page)
+kept the master's `jxlphoto-src`/`srcsum` and a broken XMP. It deletes
+nothing; a later run refused to overwrite it.
+**What to do:** delete such a JPEG and make it again.
+
+### HDR gain-map XMP on files without a gain map; TIFF markers in JPEG/PNG — before v2.28.0 (#645, #646)
+
+**What:** a lossy JXL, JPEG or PNG made from an Ultra HDR phone JPEG kept the
+XMP that announces a gain map it does not hold; and every JPEG/PNG decoded
+from a master carried the master's `jxlphoto-tifftag` markers (the IPTC and
+Photoshop blocks in hex, up to 8 KB each).
+**What to do:** nothing is needed; to clean them, make the copies again.
+
+### IPTC-only fields not in the master — before v2.27.0 (#640)
+
+**What:** a TIFF whose capture date, caption or keywords lived only in the
+IPTC block (some SilverFast scans) gave a master without them, and a decoded
+TIFF had no IPTC.
+**What to do:** re-encode those masters from their TIFFs with `--overwrite`.
+
+### InteropIndex lost — before v2.26.1 (#637)
+
+**What:** PNGs, and JPEGs that went through ImageMagick, lost the EXIF
+`InteropIndex` (which DCF colour space the camera used).
+**What to do:** nothing is needed; make the copy again to have it.
+
+### Copies of rotated JPEG archives turned twice — before v2.25.3 / v2.26.0 (#623, #634)
+
+**What:** a JPEG, PNG or TIFF exported from the JXL of a portrait JPEG (a
+phone or camera JPEG archived losslessly, or converted to a lossy JXL: cjxl
+puts the orientation in the codestream both ways) came out rotated twice: the
+pixels were already upright and the copied EXIF Orientation turned them again
+(v2.26.0 also removes the XMP `tiff:Orientation` mirror). Masters made from
+TIFFs are not affected.
+**What to do:** export again with `--overwrite`, or reset the tag and its
+mirror: `exiftool -Orientation#=1 -XMP-tiff:Orientation= -overwrite_original <file>`.
+
+### IrfanView showed no EXIF — v2.17.0 to v2.19.0, and JPEG archives before v2.19.2 (#561, #562)
+
+**What:** IrfanView reads the EXIF only from a plain Exif box placed before
+the XMP box. Masters and their copies written by v2.17.0–v2.19.0 had the XMP
+first; JPEG → JXL archives had their EXIF Brotli-compressed by cjxl. Other
+viewers and ExifTool read both.
+**What to do:** `jxl_recompressor.py --refresh-explorer-thumbnails` (wizard
+menu 6) puts the Exif box first, in place; `jxl_jpeg_transcoder.py
+--repair-jbrd` (menu 7) rewrites archives with plain boxes, the JPEG
+unchanged. The archives carry no history: run the repair over the folders
+they are in; it changes only the ones that need it.
+
+### dc:Relation values doubled — v2.10.0 to v2.12.0 (#531)
+
+**What:** a JXL from another program, recompressed, came back with each of
+its own `dc:Relation` values twice. JXLs written by the toolkit were not
+affected.
+**What to do:** nothing is needed.
+
+### Lossless JPEG archives that do not rebuild — v2.0.0 to v2.0.3 (#323)
+
+**What:** the provenance marks written into a lossless JPEG archive made
+`djxl --reconstruct_jpeg` fail for JPEGs that already had XMP (Lightroom and
+Capture One exports). The pixels are there; the original JPEG does not come
+back bit for bit until the archive is repaired.
+**What to do:** `jxl_jpeg_transcoder.py --repair-jbrd` (wizard menu 7) finds
+and repairs them. JPEG archives carry no history: run the repair over the
+folders those versions wrote.
