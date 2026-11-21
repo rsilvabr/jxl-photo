@@ -33,6 +33,33 @@ verbatim copy of one. The entries below say how to find those.
 
 ## The list, newest first
 
+### A temp folder with `%` in its path — before v2.31.0-rc3 (#687)
+
+**What:** ExifTool reads a `%` in a file name as a format code. With a `%`
+in the temp folder (`TEMP_DIR`, or Windows' TEMP when it is unset), the
+encoder's copy of a TIFF's XMP block gave nothing: the master got only the
+XMP fields ExifTool can write one by one, and the others (a SilverFast scan's
+settings, for instance) were left out. Some other steps failed file by file.
+Since v2.31.0-rc3 such a temp folder is refused at the start of every run.
+**Which files:** masters made from TIFFs while the temp folder had a `%` in
+its path.
+**What to do:** nothing, unless your temp folder ever had a `%`; then encode
+the masters made in that time again from their TIFFs, with `--overwrite`.
+
+### A file held open by another program — before v2.31.0-rc3 (#686)
+
+**What:** ExifTool answers a file it cannot open (another program holding it
+without sharing for an instant: an antivirus, an indexer, a backup agent) with
+an error, yet with exit status 0 when the same command wrote anything else.
+When that hit the temporary file holding a TIFF's XMP block or its EXIF, the
+master came out without them and the run said OK. Rare: it takes another
+program holding that very file at that very moment.
+**Which files:** masters made from TIFFs.
+**How to tell:** the master shows no camera, lens or exposure data although
+its TIFF has them, or lacks the TIFF's own XMP fields (rating, keywords, a
+scanner's settings); its pixels and markers are there.
+**What to do:** encode it again from its TIFF with `--overwrite`.
+
 ### EXIF values rounded — every version before v2.31.0 (#684)
 
 **What:** the EXIF copied into an output went through ExifTool's printed
