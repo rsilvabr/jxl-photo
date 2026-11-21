@@ -29,7 +29,7 @@ from PIL import Image
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.31.0-rc3"
+TOOLKIT_VERSION = "2.31.0-rc4"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 
@@ -2616,7 +2616,7 @@ def _read_record_fields(tiff_path, tmp_dir):
     Empty output with rc=0 is the normal state of a TIFF with none of them."""
     r = _run_exiftool_argfile(_record_fields_read_args(tiff_path), timeout=EXIFTOOL_TIMEOUT)
     if r.returncode != 0:
-        _err = (r.stderr or r.stdout or "no output")[:200]
+        _err = _stderr_tail(r.stderr or r.stdout or "no output")
         raise RuntimeError(f"exiftool could not read Software from {tiff_path.name} "
                            f"(rc={r.returncode}): {_err.strip()}")
     try:
@@ -2650,7 +2650,7 @@ def read_existing_description(xmp_path):
             # split at a colon: a caption "Captured: autumn 1958" is a value.
             if r.stderr:
                 logger.debug(f"Reading description: exiftool stderr: "
-                             f"{r.stderr.strip()[:200]}")
+                             f"{_stderr_tail(r.stderr)}")
             return stdout
     except Exception as e:
         logger.debug(f"Failed to read description: {e}")
@@ -3818,7 +3818,7 @@ def _rewrite_master_relation(jxl_path: Path, arg_lines: list, expect_src: str):
         r = _run_exiftool_argfile(["-overwrite_original"] + list(arg_lines) + [str(tmp)],
                                   timeout=EXIFTOOL_TIMEOUT)
         if r.returncode != 0:
-            return f"exiftool: {(r.stderr or '').strip()[:200]}"
+            return f"exiftool: {_stderr_tail(r.stderr)}"
         reorder_jxl_boxes(tmp)
         if not _verify_jxl_integrity(tmp):
             return "the rewritten file failed the JXL integrity check"
@@ -6314,6 +6314,7 @@ def build_parser():
 
 _work_dir_problem = _common._work_dir_problem
 _percent_temp_problem = _common._percent_temp_problem
+_long_temp_problem = _common._long_temp_problem
 
 
 def _configure_run(parser, args):
@@ -6997,6 +6998,11 @@ def main():
     args = parser.parse_args()
     if args.serve:
         parser.error("--serve runs the serve loop: start the script itself with it")
+    # A TMP of 261 characters or more: every program this run would start
+    # hangs (#689), so it is refused before the first one.
+    _why = _long_temp_problem()
+    if _why:
+        parser.error(_why)
 
     global ICC_CACHE_DIR_OVERRIDE
     global _gen_divergence_logged

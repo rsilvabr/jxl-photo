@@ -45,7 +45,7 @@ import zlib
 from datetime import datetime
 from pathlib import Path
 
-TOOLKIT_VERSION = "2.31.0-rc3"
+TOOLKIT_VERSION = "2.31.0-rc4"
 
 
 class Script:
@@ -1122,6 +1122,38 @@ def _percent_temp_problem(temp_dir):
             f"folder without '%'.")
 
 
+# The length of TMP (TEMP when TMP is not set), in UTF-16 units as Windows
+# counts them, from which a Windows process hangs when it starts a program.
+_TEMP_ENV_HANG = 261
+
+
+def _long_temp_problem(environ=None):
+    """Why this process cannot start a program, or None. On Windows, a
+    process whose TMP — its TEMP only when TMP is not set at all — is
+    _TEMP_ENV_HANG characters long or longer hangs inside GetTempPathW, the
+    call that hands out the temp folder, and starting a program makes that
+    call: the first cjxl, djxl or ExifTool never starts and nothing shows
+    (#689, found by photo-backup, which points TMP at its work folder;
+    measured 2026-11-22 on build 26300 with cmd and djxl alike: 260 runs,
+    261 hangs; counted in UTF-16 units, a trailing backslash included; a long
+    TEMP is harmless while TMP is set, even empty — measured, review of rc4).
+    Checked before the first program of a run, of a serve process and of the
+    wizard. TEMP_DIR does not count: the toolkit never puts it in a child's
+    environment."""
+    if os.name != "nt":
+        return None
+    env = os.environ if environ is None else environ
+    name = "TMP" if "TMP" in env else "TEMP"
+    value = env.get(name) or ""
+    units = len(value.encode("utf-16-le", "surrogatepass")) // 2
+    if units < _TEMP_ENV_HANG:
+        return None
+    return (f"the {name} variable is {units} characters long ({value}): a Windows "
+            f"process with a {name} of {_TEMP_ENV_HANG} characters or more hangs when it "
+            f"starts a program, so cjxl, djxl and ExifTool would never finish. Point TMP "
+            f"and TEMP to a shorter folder.")
+
+
 def _source_path_id(src_path) -> str:
     """Stable id for a source's LOCATION. Free to compute."""
     norm = os.path.normcase(os.path.abspath(str(src_path)))
@@ -1238,15 +1270,70 @@ def _argfile_safe(value) -> str:
     return re.sub(r"[\r\n]+", " ", str(value))
 
 
-def _stderr_tail(stderr, limit=200):
-    """The LAST `limit` characters of a tool's stderr, CRLF folded, for an
-    error message. The head is the wrong end: cjxl prints its version banner
-    and an "Encoding [...]" line first, which filled the old [:200] slice — 97
-    of the 314 errors of the 2026-10-04 run were logged without the line that
-    said what failed."""
+# Lines libjxl's cjxl/djxl print on stderr that never say why a run failed:
+# the version banner ("JPEG XL encoder v0.13.0 5a7da83 [_AVX2_,SSE4,SSE2]
+# {Clang 22.1.3}"), the note about the JPEG default, the progress and the
+# speed lines (cjxl/djxl 0.13, 2026-11-22).
+_STDERR_NOISE = re.compile(
+    r"^(?:JPEG XL (?:en|de)coder v"
+    r"|Note: Implicit-default for JPEG is lossless-transcoding"
+    r"|Encoding \["
+    r"|Compressed to "
+    r"|Decoded to pixels\."
+    r"|Reconstructed to JPEG\."
+    r"|\d+ x \d+, [\d.]+ MP/s)")
+# How long the reason in an error message may be (the serve answer's `error`
+# holds up to _SERVE_ERROR_MAX, photo-backup shows 600).
+_STDERR_LIMIT = 400
+
+
+def _cut_middle(text: str, size: int) -> str:
+    """`text` in at most `size` characters: its start (what failed) and its
+    end (why) around " ... " — an ImageMagick line names the file in the
+    middle and the cause at the end."""
+    if len(text) <= size:
+        return text
+    if size < 7:            # no room for " ... " and both ends
+        return text[:max(size, 0)]
+    keep = size - 5
+    head = (keep * 3) // 5
+    return text[:head] + " ... " + text[len(text) - (keep - head):]
+
+
+def _stderr_tail(stderr, limit=_STDERR_LIMIT):
+    """What a tool said about why it failed, on ONE line, for an error
+    message: the lines of its stderr (or of whatever text is given) that say
+    something — not cjxl/djxl's banner, progress or speed (_STDERR_NOISE) —
+    whole, joined by " | ", the LAST ones, as many as fit in `limit`
+    characters. A line that does not fit whole keeps its start and its end
+    (_cut_middle): the last line always, an earlier one when at least
+    80 characters are left for it. Only noise: the noise, rather than nothing.
+
+    Why: the old tail was the last 200 characters with the line breaks kept.
+    cjxl prints its banner and an "Encoding [...]" line first and the cause
+    after them, so the cut fell inside a line — "cjxl:  be created. Possibly
+    there is too much tail data." — or inside the banner, with the cause on
+    the next lines of the log, which carry no time and do not start with
+    ERROR (photo-backup reads the lines that do). The head is the wrong end
+    as well: it filled the [:200] slice before that — 97 of the 314 errors of
+    the 2026-10-04 run were logged without the line that said what failed."""
     if isinstance(stderr, bytes):
         stderr = stderr.decode(errors="replace")
-    return (stderr or "").replace("\r\n", "\n").strip()[-limit:]
+    lines = [ln.strip() for ln in (stderr or "").splitlines()]
+    lines = [ln for ln in lines if ln]
+    said = [ln for ln in lines if not _STDERR_NOISE.match(ln)] or lines
+    picked, size = [], 0
+    for ln in reversed(said):
+        sep = 3 if picked else 0
+        if size + sep + len(ln) <= limit:
+            picked.append(ln)
+            size += sep + len(ln)
+            continue
+        room = limit - size - sep
+        if not picked or room >= 80:
+            picked.append(_cut_middle(ln, room if picked else limit))
+        break
+    return " | ".join(reversed(picked))
 
 
 # === Encode record and lineage ===
@@ -2296,7 +2383,8 @@ def _log_failure_recap(g, failures) -> None:
         reason = " ".join(str(reason).split())
         # The file as the run recorded it (its path, where it has one): two
         # files of one name in two event folders (modes 6/7) must not look alike.
-        g.logger.warning(f"  -> {name}: {reason[:300]}")
+        # A long reason keeps its start and its end, where the cause is.
+        g.logger.warning(f"  -> {name}: {_cut_middle(reason, 300)}")
     if len(failures) > _RECAP_MAX:
         g.logger.warning(f"  ... and {len(failures) - _RECAP_MAX} more (each one above)")
 
@@ -2573,7 +2661,7 @@ def _run_exiftool_writes(g, writes, timeout):
     results = _exiftool_commands(g, [w[0] for w in writes], timeout)
     for (_cmd, prefix, n), r in zip(writes, results):
         if r.returncode != 0:
-            raise RuntimeError(f"{prefix}{(r.stderr or r.stdout or 'no output')[:n].strip()}")
+            raise RuntimeError(f"{prefix}{g._stderr_tail(r.stderr or r.stdout or 'no output', n)}")
 
 
 # === ExifTool kept open (EXIFTOOL_STAY_OPEN) ===
@@ -4450,7 +4538,7 @@ def _exiftool_source(g, path, tmp_dir) -> str:
     if "Nothing to write" in (r.stderr or "") + (r.stdout or ""):
         return p        # no metadata at all: there is nothing to lose
     raise RuntimeError(f"exiftool could not read the metadata of {os.path.basename(p)} "
-                       f"(a '%' in its path): {(r.stderr or r.stdout or '')[:200].strip()}")
+                       f"(a '%' in its path): {g._stderr_tail(r.stderr or r.stdout)}")
 
 
 _SOURCE_TAG_ARGS = ["-j", "-s", "-s", "-XMP-xmp:CreatorTool", "-XMP-dc:Relation",
@@ -4549,7 +4637,7 @@ def _xmp_block_args(g, path, tmp_dir) -> list:
     r = g._run_exiftool_argfile(["-b", "-XMP", p], timeout=g.EXIFTOOL_TIMEOUT)
     if r.returncode != 0:
         raise RuntimeError(f"exiftool could not read the XMP of {os.path.basename(p)} "
-                           f"(a '%' in its path): {(r.stderr or '')[:200].strip()}")
+                           f"(a '%' in its path): {g._stderr_tail(r.stderr)}")
     if not (r.stdout or "").strip():
         return []
     xmp = os.path.join(str(tmp_dir), "metadata_source.xmp")
@@ -5686,7 +5774,8 @@ def _serve_refusal(g, options):
         if _script_get(g, name):
             return f"{name} = True (the script's setting)"
     # The temp folder is the process's: every job would be refused for it.
-    why = _percent_temp_problem(_script_get(g, "TEMP_DIR"))
+    # A TMP of 261 characters or more would hang its first program (#689).
+    why = _percent_temp_problem(_script_get(g, "TEMP_DIR")) or _long_temp_problem()
     return f"cannot start: {why}" if why else None
 
 

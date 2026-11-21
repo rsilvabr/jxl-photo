@@ -245,8 +245,8 @@ def test_stderr_tail_keeps_the_end(mod):
     payload = b"x" * 300 + b"\r\nthe real error\r\n"
     tail = mod._stderr_tail(payload)
     assert tail.endswith("the real error"), tail
-    assert "\r" not in tail
-    assert len(tail) <= 200
+    assert "\r" not in tail and "\n" not in tail     # one line (#688)
+    assert len(tail) <= 400
 
     tail_str = mod._stderr_tail(payload.decode())
     assert tail_str.endswith("the real error")

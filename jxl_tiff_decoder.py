@@ -38,7 +38,7 @@ import tifffile
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.31.0-rc3"
+TOOLKIT_VERSION = "2.31.0-rc4"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 
@@ -1987,7 +1987,7 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir,
             if r_block.returncode != 0 and "Nothing to write" not in _said:
                 copied = False
                 logger.error(f"  METADATA COPY FAILED (exiftool rc={r_block.returncode}, the "
-                             f"XMP block) | {tiff_path.name} | {_said.strip()[:200]}")
+                             f"XMP block) | {tiff_path.name} | {_stderr_tail(_said)}")
             if not block.is_file():
                 block = None            # the JXL has no XMP: nothing to keep as a block
 
@@ -2131,7 +2131,7 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir,
             if r_write.returncode != 0:
                 copied = False
                 logger.error(f"  METADATA COPY FAILED (exiftool rc={r_write.returncode}) | "
-                             f"{tiff_path.name} | {(r_write.stderr or '').strip()}")
+                             f"{tiff_path.name} | {_stderr_tail(r_write.stderr)}")
             elif ("[minor]" in _said and not EXIFTOOL_IGNORE_MINOR
                   and not _tiff_rewritable_after_copy(_src, tmp_dir)):
                 # Maker notes ExifTool cannot parse: the copy only warns, but the
@@ -2142,7 +2142,7 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir,
                 _minor_metadata_failures.add(_minor_name(tiff_path))
                 logger.error(f"  METADATA COPY FAILED (exiftool calls the maker notes "
                              f"minor and cannot write past them) | {tiff_path.name} | "
-                             f"{(r_write.stderr or '').strip()[:200]}")
+                             f"{_stderr_tail(r_write.stderr)}")
             if direct_block:
                 _note_minor_metadata(res2[i_edit], tiff_path)   # the TIFF's second write
             if i_edit is not None and res2[i_edit].returncode != 0:
@@ -2158,7 +2158,7 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir,
                 logger.warning(
                     f"  PROVENANCE MARKER WRITE FAILED (exiftool rc={r_edit.returncode}) | "
                     f"{tiff_path.name} | "
-                    f"{(r_edit.stderr or r_edit.stdout or 'no output').strip()} — "
+                    f"{_stderr_tail(r_edit.stderr or r_edit.stdout or 'no output')} — "
                     f"a later run will treat this TIFF as an original master"
                     + (" (and the JXL's internal markers may stay in it)"
                        if has_internal else ""))
@@ -2176,7 +2176,7 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir,
                     logger.error(
                         f"  METADATA COPY FAILED (the provenance marker is not in the TIFF "
                         f"after the write: its XMP did not arrive) | {tiff_path.name} | "
-                        f"{(r_write.stderr or '').strip()[:200]}")
+                        f"{_stderr_tail(r_write.stderr)}")
 
             # 3. The clean-ups, only when the reads found what they clear —
             #    tifffile's own defaults, which a master made from a TIFF that
@@ -2773,7 +2773,7 @@ def _read_pixsum_marker(tiff_path: Path):
                               timeout=EXIFTOOL_TIMEOUT)
     if r.returncode != 0 or not r.stdout:
         raise RuntimeError(f"exiftool rc={r.returncode}: "
-                           f"{(r.stderr or 'no output').strip()[:200]}")
+                           f"{_stderr_tail(r.stderr or 'no output')}")
     data = json.loads(r.stdout)
     rel = data[0].get("Relation") if data else None
     values = rel if isinstance(rel, list) else ([] if rel is None else [str(rel)])
@@ -3208,7 +3208,7 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
                     # per-file ERROR, so the delete gate keeps the source that
                     # holds the only copy of that EXIF.
                     meta_ok = False
-                    _err = (r_exif.stderr or r_exif.stdout or "no output")[:200]
+                    _err = _stderr_tail(r_exif.stderr or r_exif.stdout or "no output")
                     logger.error(f" METADATA COPY FAILED (None mode) | "
                                  f"{main_jxl.name} | {_err.strip()}")
                 r_sw0 = _run_exiftool_argfile(
@@ -4694,6 +4694,7 @@ Examples:
 
 _work_dir_problem = _common._work_dir_problem
 _percent_temp_problem = _common._percent_temp_problem
+_long_temp_problem = _common._long_temp_problem
 
 
 def _configure_run(parser, args, _pre_run_globals):
@@ -5025,6 +5026,11 @@ def main():
     args = parser.parse_args()
     if args.serve:
         parser.error("--serve runs the serve loop: start the script itself with it")
+    # A TMP of 261 characters or more: every program this run would start
+    # hangs (#689), so it is refused before the first one.
+    _why = _long_temp_problem()
+    if _why:
+        parser.error(_why)
 
     # (Round 43, D-1 class fix) Restore whatever a PREVIOUS main() call in
     # this process assigned, so every run starts from the settings as the

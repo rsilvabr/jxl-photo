@@ -48,7 +48,7 @@ from typing import Optional
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.31.0-rc3"
+TOOLKIT_VERSION = "2.31.0-rc4"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 
@@ -1049,7 +1049,7 @@ def _copy_metadata(src_path: Path, dst_path: Path) -> None:
             )
         if r_copy.returncode != 0:
             raise RuntimeError(f"metadata copy failed (exiftool rc={r_copy.returncode}): "
-                               f"{(r_copy.stderr or r_copy.stdout or '').strip()[:200]}")
+                               f"{_stderr_tail(r_copy.stderr or r_copy.stdout)}")
         # Strip the ICC copy: jxlphoto-iccprofile tokens from dc:Relation,
         # ICC:<base64> segments from CreatorTool (same logic as the TIFF
         # decoder's cleanup_xmp_icc) — one read, one write. A read that
@@ -1097,7 +1097,7 @@ def _copy_metadata(src_path: Path, dst_path: Path) -> None:
             if r_strip.returncode != 0:
                 raise RuntimeError(
                     f"ICC-copy cleanup failed (exiftool rc={r_strip.returncode}): "
-                    f"{(r_strip.stderr or r_strip.stdout or '').strip()[:200]}")
+                    f"{_stderr_tail(r_strip.stderr or r_strip.stdout)}")
     except RuntimeError:
         raise
     except Exception as e:
@@ -1117,7 +1117,7 @@ def _write_converted_metadata(src_path: Path, write_path: Path) -> None:
     if r_prov.returncode != 0:
         raise RuntimeError(
             f"provenance/history write failed (exiftool rc={r_prov.returncode}): "
-            f"{(r_prov.stderr or r_prov.stdout or '').strip()[:200]}")
+            f"{_stderr_tail(r_prov.stderr or r_prov.stdout)}")
 
 
 def _exif_tag_count(path: Path):
@@ -2513,7 +2513,7 @@ def _strip_provenance_markers(jxl_path: Path, info: dict):
             continue
         if r.returncode == 0:
             break
-        last_err = (r.stderr or r.stdout or f"rc={r.returncode}").strip()[:200]
+        last_err = _stderr_tail(r.stderr or r.stdout or f"rc={r.returncode}")
     else:
         return f"exiftool could not edit the file ({last_err})"
     after_srcs, after_srcsums = _read_all_source_marker_values(jxl_path)
@@ -6047,7 +6047,7 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                 ["-overwrite_original", "-XMP-dc:Relation=", str(actual_out)],
                 timeout=EXIFTOOL_TIMEOUT)
             if rc.returncode != 0:
-                raise RuntimeError(f"derivative metadata clear: {(rc.stderr or '')[:200]}")
+                raise RuntimeError(f"derivative metadata clear: {_stderr_tail(rc.stderr)}")
             r2 = _run_exiftool_argfile(
                 ["-overwrite_original"]
                 + _derivative_metadata_args(jxl_path, _dlabel, size)
@@ -6055,7 +6055,7 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                 + _history_args("derived", jxl_path, actual_out, codec="djxl")
                 + [str(actual_out)], timeout=EXIFTOOL_TIMEOUT)
             if r2.returncode != 0:
-                raise RuntimeError(f"derivative metadata write: {(r2.stderr or '')[:200]}")
+                raise RuntimeError(f"derivative metadata write: {_stderr_tail(r2.stderr)}")
         else:
             # An ERROR for the file when it fails (#571), like the copy above.
             r_prov = _run_exiftool_argfile(
@@ -6067,7 +6067,7 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
             if r_prov.returncode != 0:
                 raise RuntimeError(
                     f"provenance/history write failed (exiftool rc={r_prov.returncode}): "
-                    f"{(r_prov.stderr or r_prov.stdout or '').strip()[:200]}")
+                    f"{_stderr_tail(r_prov.stderr or r_prov.stdout)}")
 
         # Validate EVERY successful output (rc=0 does not guarantee a
         # well-formed file).
@@ -7464,6 +7464,7 @@ _RUN_DEFAULTS = {
 
 _work_dir_problem = _common._work_dir_problem
 _percent_temp_problem = _common._percent_temp_problem
+_long_temp_problem = _common._long_temp_problem
 
 
 def _configure_run(parser, args):
@@ -7843,6 +7844,11 @@ def main():
     args = parser.parse_args()
     if args.serve:
         parser.error("--serve runs the serve loop: start the script itself with it")
+    # A TMP of 261 characters or more: every program this run would start
+    # hangs (#689), so it is refused before the first one.
+    _why = _long_temp_problem()
+    if _why:
+        parser.error(_why)
 
     # Every run-scoped global starts from its SCRIPT setting (captured at
     # import) — a second main() in the same process used to inherit the first

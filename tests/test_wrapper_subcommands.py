@@ -53,6 +53,24 @@ def test_a_usage_error_keeps_the_backend_s_exit_code(name):
     assert "unrecognized arguments: --no-such-flag" in r.stderr
 
 
+def test_a_subcommand_runs_before_the_wizard_loads():
+    """v2.31.0-rc4: `jxl_photo.py encode ARGS` is dispatched at the top of the file,
+    before the wizard's imports and definitions: it used to run all of them
+    first (rich, the option registry, the screens) for nothing. rich is the
+    sign: the wizard imports it, no backend does."""
+    pytest.importorskip("rich")
+    r = subprocess.run([sys.executable, "-X", "importtime", str(REPO / "jxl_photo.py"),
+                        "encode", "--version"], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", timeout=120,
+                       stdin=subprocess.DEVNULL)
+    assert r.returncode == 0
+    assert r.stdout.strip() == f"jxl-photo {wp.TOOLKIT_VERSION}"
+    imported = [ln.rsplit("|", 1)[-1].strip() for ln in r.stderr.splitlines()
+                if ln.startswith("import time:")]
+    assert "tifffile" in imported           # the probe works: the encoder's own imports ran
+    assert not [m for m in imported if m == "rich" or m.startswith("rich.")]
+
+
 def test_the_wrapper_s_help_lists_the_subcommands():
     r = _py(REPO / "jxl_photo.py", "--help")
     assert r.returncode == 0

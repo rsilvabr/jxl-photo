@@ -39,7 +39,7 @@ import numpy as np
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.31.0-rc3"
+TOOLKIT_VERSION = "2.31.0-rc4"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 
@@ -4961,6 +4961,7 @@ def build_parser():
 
 _work_dir_problem = _common._work_dir_problem
 _percent_temp_problem = _common._percent_temp_problem
+_long_temp_problem = _common._long_temp_problem
 
 
 def _configure_run(parser, args):
@@ -5421,6 +5422,11 @@ def main():
     _utf8_console()      # before argparse prints anything (#661)
     parser = build_parser()
     args = parser.parse_args()
+    # A TMP of 261 characters or more: every program this run would start
+    # hangs (#689), so it is refused before the first one.
+    _why = _long_temp_problem()
+    if _why:
+        parser.error(_why)
 
     log_file, _floor, _der_what = _configure_run(parser, args)
 

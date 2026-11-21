@@ -28,7 +28,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.31.0-rc3"
+TOOLKIT_VERSION = "2.31.0-rc4"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 
@@ -74,6 +74,38 @@ except ImportError as _e:
     if __name__ != "__main__":
         raise      # imported by the wrapper or a test: theirs to handle
     sys.exit(f"{Path(__file__).name}: {_e}")
+
+# `python jxl_photo.py encode ARGS` = `python jxl_tiff_encoder.py ARGS`: the
+# names jxl-photo.exe gives its backends.
+_BACKEND_COMMANDS = {
+    "encode": "jxl_tiff_encoder.py",
+    "decode": "jxl_tiff_decoder.py",
+    "recompress": "jxl_recompressor.py",
+    "transcode": "jxl_jpeg_transcoder.py",
+}
+
+
+def _run_backend(command: str, argv: List[str]) -> None:
+    """Run one backend as if it was started directly: the script next to this
+    one, as __main__ (runpy), with `argv` as its arguments, stdout and stderr
+    in UTF-8 as the wizard's own start always made them. Called just below,
+    before the rest of this file runs, so nothing of the wizard runs and the
+    exit code, the output and Ctrl+C are the backend's own."""
+    import runpy
+    _common._utf8_console()
+    script = Path(__file__).parent.resolve() / _BACKEND_COMMANDS[command]
+    sys.argv = [str(script)] + list(argv)
+    runpy.run_path(str(script), run_name="__main__")
+
+
+# A backend call is dispatched HERE, before the wizard's imports and
+# definitions (rich, the option registry, the screens: ~11 000 lines), which
+# it used to run first for nothing (v2.31.0-rc4: 35-40 ms a call; Python
+# still compiles this whole file first, ~60 ms, as for any script it runs).
+if __name__ == "__main__" and len(sys.argv) > 1 and sys.argv[1].lower() in _BACKEND_COMMANDS:
+    _run_backend(sys.argv[1].lower(), sys.argv[2:])
+    sys.exit(0)
+
 _G = _common.Script(globals())
 # Named in the menu's tip when Windows Explorer has no JXL thumbnail handler.
 JXL_THUMB_URL = "https://github.com/rsilvabr/jxl-thumb"
@@ -10717,27 +10749,6 @@ def _jxl_thumbnail_tip() -> Optional[str]:
             f"jxl-thumb adds them: {JXL_THUMB_URL} ([T] in the menu opens it)")
 
 
-# `python jxl_photo.py encode ARGS` = `python jxl_tiff_encoder.py ARGS`: the
-# names jxl-photo.exe gives its backends.
-_BACKEND_COMMANDS = {
-    "encode": "jxl_tiff_encoder.py",
-    "decode": "jxl_tiff_decoder.py",
-    "recompress": "jxl_recompressor.py",
-    "transcode": "jxl_jpeg_transcoder.py",
-}
-
-
-def _run_backend(command: str, argv: List[str]) -> None:
-    """Run one backend as if it was started directly: the script next to this
-    one, as __main__ (runpy), with `argv` as its arguments. Dispatched before
-    main(), so nothing of the wizard runs and the exit code, the output and
-    Ctrl+C are the backend's own."""
-    import runpy
-    script = SCRIPT_DIR / _BACKEND_COMMANDS[command]
-    sys.argv = [str(script)] + list(argv)
-    runpy.run_path(str(script), run_name="__main__")
-
-
 def main():
     try:
         _main()
@@ -10776,6 +10787,11 @@ def _main():
     parser.add_argument("--dry-run", action="store_true",
                         help="With --run-preset: simulate without converting")
     args = parser.parse_args()
+    # A TMP of 261 characters or more: every program the wizard would start
+    # (the dependency check, each backend) hangs (#689).
+    _why = _common._long_temp_problem()
+    if _why:
+        parser.error(_why)
 
     # These two are decisions, not preferences carried over from the stored run,
     # so they only mean something next to --run-preset. Silently ignoring a
@@ -11026,7 +11042,4 @@ def _main():
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1].lower() in _BACKEND_COMMANDS:
-        _run_backend(sys.argv[1].lower(), sys.argv[2:])
-    else:
-        main()
+    main()      # a backend command never gets here: see _run_backend's call
