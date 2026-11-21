@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.31.0-rc3](#v2310-rc3)** | 2026-11-22 | Pre-release. ExifTool kept open and the decoder's TIFF metadata written once: archiving, decoding and deleting runs 18–22 % faster; EXIF values copied exactly; `--serve` for programs that convert file by file; the failed files repeated at the end; a temp folder with `%` refused; a known-issues page; everything in v2.31.0-rc2 |
+| **[v2.31.0-rc4](#v2310-rc4)** | 2026-11-22 | Pre-release. A tool's error message on one line with its whole cause; a TMP of 261 characters or more refused (on Windows such a process hangs when it starts any program); `jxl_photo.py encode` and the other script commands start 35–40 ms sooner; everything in v2.31.0-rc3 |
+| [v2.31.0-rc3](#v2310-rc3) | 2026-11-22 | Pre-release. ExifTool kept open and the decoder's TIFF metadata written once: archiving, decoding and deleting runs 18–22 % faster; EXIF values copied exactly; `--serve` for programs that convert file by file; the failed files repeated at the end; a temp folder with `%` refused; a known-issues page; everything in v2.31.0-rc2 |
 | [v2.31.0-rc2](#v2310-rc2) | 2026-11-20 | Pre-release. sRGB copies (`--output-icc`) converted in Python and handed to cjxl in memory: 8–38 % faster depending on the temp folder's disk, the same copies; everything in v2.31.0-rc1 |
 | [v2.31.0-rc1](#v2310-rc1) | 2026-11-20 | Pre-release. `--verify-roundtrip` without `--delete-source` checks every page of a TIFF → JXL run before it takes its final name (it used to check only before a deletion); photo-backup's encode command relies on it |
 | [v2.30.2](#v2302) | 2026-11-15 | Everything in the two test releases: copies, decodes to TIFF and the check before a delete take between half and a third of the time for a 45 MP photo; far less written to the disk (archiving a 45 MP photo: 79 MB instead of 520 MB); planning reads a few KB per JXL; the same files byte for byte; a grey resized JPEG copy marked as one |
@@ -113,9 +114,67 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.31.0-rc4
+
+**Released 2026-11-22, the fourth test release (pre-release) of v2.31.0**;
+the last stable release is [v2.30.2](#v2302). Everything in
+[v2.31.0-rc3](#v2310-rc3) is in it. Three small changes, two of them found by
+photo-backup while it moved to `--serve`; none changes a file the toolkit
+writes. One thing to check, only for a program that starts the scripts with
+a TMP of its own: a TMP of 261 characters or more is refused
+([upgrading](upgrading.md)).
+
+- **A tool's error message on one line, with its whole cause (#688).** When
+  cjxl, djxl, ImageMagick or ExifTool failed, the file's ERROR line quoted the
+  last 200 characters of what the tool printed, line breaks included. cjxl and
+  djxl print their version banner and their progress first and the cause
+  after them, so the line began inside a sentence (`cjxl:  be created.
+  Possibly there is too much tail data.`) or was the banner itself, the cause
+  on the next lines of the log, which carry no time and do not start with
+  ERROR (photo-backup found it on 19 real JPEGs; a JPEG of the test photos does
+  the same). Now the lines that say something — not libjxl's banner, progress
+  or speed — go on the ERROR line whole, joined by ` | `, the last ones that
+  fit in 400 characters; a line too long keeps its start and its end.
+  ExifTool's messages, quoted by their first 200 characters in 16 places, go
+  the same way. `--summary-json` and a serve answer's `error` carry the same
+  text; the recap at the end of a run keeps a long one's start and its cause.
+- **A TMP of 261 characters or more is refused (#689).** On Windows a process
+  whose TMP — its TEMP when TMP is not set — is 261 characters or longer
+  hangs when it starts another program, before that program runs, with
+  nothing on the screen: a run waited forever on its first `djxl --version`.
+  It is Windows, not the toolkit: the process stops inside the Windows call
+  that hands out the temp folder, which starting a program makes, and Python
+  starting `cmd` hangs the same way (measured on build 26300: 260 runs, 261
+  hangs; counted in UTF-16 units, as Windows counts them; a long TEMP is
+  harmless while TMP is set, even empty). Every script,
+  a serve process and the wizard now stop at their start with exit code 2 and
+  the reason. `TEMP_DIR` is not concerned: the toolkit never puts it in a
+  program's environment. photo-backup, which points TMP at its work folder,
+  found it; it keeps its TMP under 240 characters.
+- **`jxl_photo.py encode` (decode, recompress, transcode) starts the script
+  before the wizard loads.** The dispatch moved from the last line of the
+  file to its top: the wizard's imports and definitions (rich, the option
+  registry, the screens) no longer run first. 35–40 ms less a call, measured
+  with the PC quiet (20 interleaved rounds of `--version`): encode 413 →
+  379 ms, transcode 312 → 272 ms. Python still compiles the whole
+  11 000-line `jxl_photo.py` first (about 60 ms), as it does for any script
+  it runs; started directly, the encoder takes 246 ms and the transcoder
+  110 ms.
+- An independent review of the three changes found three things to fix, all
+  fixed: two decoder messages still quoting ExifTool's text with its line
+  breaks, the recap at the end of a run cutting a long reason's end (where
+  the cause is), and an empty TMP refused although Windows takes it.
+- Tests: 4394 pass; the real-photo battery 182/182; photo-backup's
+  contract 31/31 (JP-1 to JP-23, its v0.14.0-rc7 test); side_by_side against rc3 differs only where a tool's
+  error is quoted (a JPEG of the test photos: `cjxl: Getting pixel data
+  failed.` instead of cjxl's banner with the cause on the next line).
+
+---
+
 ## v2.31.0-rc3
 
-**Released 2026-11-22, the third test release (pre-release) of v2.31.0**;
+**Released 2026-11-22, the third test release (pre-release) of v2.31.0**,
+superseded by [v2.31.0-rc4](#v2310-rc4) the same day;
 the last stable release is [v2.30.2](#v2302). Everything in
 [v2.31.0-rc2](#v2310-rc2) and [v2.31.0-rc1](#v2310-rc1) is in it. A speed
 round in two phases (plan 261121), each checked by an independent review,

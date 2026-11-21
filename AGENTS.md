@@ -114,8 +114,10 @@
   aliases. A New job = task (`TASKS`) → folder → mode step (`[A]`/`[M]`/
   `[D]`) → quality → review (`_review_screen`). `jxl_photo.py
   encode|decode|recompress|transcode ARGS` runs that backend as if started
-  directly (`_run_backend`, runpy, the exe's names; dispatched before
-  `main()`, so its exit code and Ctrl+C are the backend's own).
+  directly (`_run_backend`, runpy, the exe's names; dispatched at the TOP of
+  the file, right after `_import_common()` and before the wizard's imports
+  and definitions — keep it there: v2.31.0-rc4, 35–40 ms a call — so its exit
+  code and Ctrl+C are the backend's own).
 - **Flags are spelled in full (v2.30.0):** the four `build_parser` have
   `allow_abbrev=False`. Never turn it back on: the wrapper's checks of the
   expert flags, presets and manifests assume a flag means exactly its name.
@@ -126,7 +128,7 @@
 The sibling repo `photo-backup` (since its v0.14.0-rc2; JPEG since rc3) runs
 jxl-photo to keep a TIFF or a JPEG as JXL in a backup and to make it again on
 restore, and it reads the marks this repo writes. What it needs is written
-down, item by item (JP-1 to JP-22), in `../photo-backup/docs/jxlphoto_contract.md`
+down, item by item (JP-1 to JP-23), in `../photo-backup/docs/jxlphoto_contract.md`
 (仕様書). In short:
 - `jxl_photo.py encode --version` prints `jxl-photo X.Y.Z` (JP-1); a backup
   refuses a version older than photo-backup's `JXLPHOTO_MIN_VERSION`
@@ -182,6 +184,20 @@ down, item by item (JP-1 to JP-22), in `../photo-backup/docs/jxlphoto_contract.m
   file is touched, the reason on stderr. The contract test runs an encode and
   a transcode with such a folder and wants exit 2, no file written, the source
   unchanged and a `%` in stderr.
+- Since its v0.14.0-rc7 photo-backup converts through `<command> --serve <the
+  single call's options>` (encode JP-2, decode JP-10, transcode JP-15, the
+  rebuild JP-16), one process per worker thread (JP-23, `_serve`,
+  `_serve_job`). It relies on: the first stdout line `{"serve": 1, ...,
+  "script": "<backend>.py"}`; a job line with exactly the string keys `id`,
+  `input`, `output` (absolute, the folder exists); one answer per job with the
+  same `id`, `exit` = the single call's code (WHICH non-zero code is free),
+  `error` not empty when it fails — the first ERROR messages, so the JP-20 page
+  failure stays in the first two, at most 1000 characters; a job's output
+  folder holding what a single call writes; exit 0 when stdin closes; one log,
+  `JXLPHOTO_LOG_DIR\<backend>\..._<pid>.log`, with a job's lines written before
+  its answer (it copies a failed job's part). Free: `outputs`, the end line's
+  numbers, a malformed line's answer, going on after a failed job (it ends the
+  process and starts another).
 - `jxl_photo.py decode <folder> <out> --mode 0 --workers 1 --depth-policy
   preserve_original --no-preview` gives exactly one TIFF with the original's
   pages and bit depths (JP-10) and leaves its input alone (JP-11).
@@ -189,8 +205,8 @@ down, item by item (JP-1 to JP-22), in `../photo-backup/docs/jxlphoto_contract.m
   a backup keeps a copy of this folder's top-level `.py` files (+ README,
   LICENSE, docs) and runs it from there on restore, so every runtime file must
   be one of those (JP-13).
-**After changing the encoder, the decoder, the JPEG transcoder, the marks or
-`_BACKEND_COMMANDS`:**
+**After changing the encoder, the decoder, the JPEG transcoder, the marks,
+`_BACKEND_COMMANDS` or `_serve`:**
 run photo-backup's contract test against this checkout — `set
 PHOTOBACKUP_JXLPHOTO=<this repo>\jxl_photo.py`, then, in photo-backup,
 `python -m pytest tests/test_jxlphoto_contract.py -v` (about 30 s). A failure
@@ -666,8 +682,9 @@ changes first.
   a launcher could start its child before `_put_in_job` (none here; 13.59
   has no child process). `tests/test_exiftool_stay_open.py`.
 - **Serve mode (`--serve`, v2.31.0; encoder, decoder, transcoder).** For a
-  program that converts many files one call at a time (photo-backup does not
-  use it yet: that is its own change, and a contract item to add then). The
+  program that converts many files one call at a time (photo-backup since its
+  v0.14.0-rc7: JP-23 in "photo-backup depends on this repo" lists what it
+  relies on — a change there goes through photo-backup first). The
   script's `__main__` calls `_common._serve(_G, main, argv)` instead of
   `main()` when the command line has `--serve` (`main()` itself refuses the
   flag): one JSON job per stdin line (`id`, `input`, `output`: absolute paths
@@ -706,6 +723,28 @@ changes first.
   the lines that START with ERROR. The transcoder's `main()` resets its
   `_run_summary` first (`record_summary()`), or a serve job could repeat the
   failures of the job before it.
+- **A tool's error text goes through `_stderr_tail` (#688, v2.31.0-rc4).**
+  One line: the lines that say something (not libjxl's banner, progress or
+  speed, `_STDERR_NOISE`), whole, joined by ` | `, the last ones that fit in
+  `_STDERR_LIMIT` (400); a line that does not fit keeps its start and its end
+  (`_cut_middle`). A message that quotes what a tool printed uses it — never
+  `stderr[:N]` or `[-N:]` again: the cut fell inside a sentence or quoted only
+  cjxl's banner, and the cause went to the next log lines, which carry no time
+  and do not start with ERROR (photo-backup reads the lines that do; the serve
+  answer's `error` and `--summary-json` carry the same text, and the recap at
+  the end shortens it in the middle to 300 characters, `_cut_middle`).
+- **A TMP of 261 characters or more (#689, v2.31.0-rc4).** On Windows a
+  process whose TMP (its TEMP only when TMP is not set at all: an empty TMP
+  is taken) is 261 UTF-16 units or longer hangs inside `GetTempPathW`, the
+  call that hands out the temp folder — and starting ANY program makes it
+  (measured: Python starting `cmd` or `djxl --version`; 260 runs; a child
+  GIVEN such a TMP by a normal parent runs). `_long_temp_problem` (common) is
+  checked right after `parse_args` in every backend's `main()`, in
+  `_serve_refusal` and in the wizard's `_main()`, before the first child: a new
+  entry point that starts a program, or calls anything that asks Windows for
+  its temp folder, checks it first. Python's `tempfile` reads the variables
+  itself and does not hang. `TEMP_DIR` is not concerned (never put in a
+  child's environment).
 - **EXIF is copied by VALUE (#684, v2.31.0):** every `-tagsfromfile ...
   -exif:all` is `-exif:all#`, and `_exiftool_source`'s MIE container has
   `-exif:all#` after its `-all:all`. A printed value converted back is lossy

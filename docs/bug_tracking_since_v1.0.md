@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #688.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #690.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -32,6 +32,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-91 — error messages on one line, a long TMP](#round-91--error-messages-on-one-line-a-long-tmp-2026-11-22) | 2026-11-22 | v2.31.0-rc4 | #688–#689 (2) |
 | [Round-90 — EXIF values, the generated sRGB, files ExifTool could not open](#round-90--exif-values-the-generated-srgb-files-exiftool-could-not-open-2026-11-21) | 2026-11-21 | v2.31.0-rc3 | #684–#687 (4) |
 | [Round-89 — the review before v2.30.2](#round-89--the-review-before-v2302-2026-11-15) | 2026-11-15 | v2.30.2 | #683 (1) |
 | [Round-88 — the decoder's empty clean-ups](#round-88--the-decoders-empty-clean-ups-2026-11-15) | 2026-11-15 | v2.30.2 | #682 (1) |
@@ -108,6 +109,16 @@ were never tagged and never shipped.
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
 
 ---
+
+## Round-91 — error messages on one line, a long TMP (2026-11-22)
+
+Two found by photo-backup while it moved to `--serve`; neither changes a file
+the toolkit writes.
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 688 | A tool's error text in a message was the last 200 characters of its stderr with the line breaks kept (`_stderr_tail`). cjxl and djxl print their version banner and their progress first and the cause after them, so a file's ERROR line began inside a sentence (`cjxl:  be created. Possibly there is too much tail data.`) or was the banner itself (`cjxl: JPEG XL encoder v0.13.0 … {Clang 22.1.3}`, photo-backup's 19 real JPEGs and a JPEG of the test photos), and the cause went to the next lines of the log, which carry no time and do not start with ERROR — photo-backup reads the lines that do. ExifTool's messages, quoted by their first 200 characters in 16 places, could break the line the same way. Now one line: the lines that say something (not libjxl's banner, progress or speed, `_STDERR_NOISE`), whole, joined by ` | `, the last ones that fit in 400 characters; a line that does not fit keeps its start and its end (`_cut_middle`). `--summary-json` and a serve answer's `error` carry the same text; the recap at the end of a run shortens a long one in the middle, keeping its start and its cause, where it used to cut its end (review of rc4). | encoder, decoder, transcoder, recompressor | Fixed |
+| 689 | On Windows a process whose TMP (its TEMP only when TMP is not set at all; an empty TMP is taken) is 261 UTF-16 units long or longer hangs when it starts another program, before that program runs, with nothing on the screen — it stops inside Windows' `GetTempPathW`, the call that hands out the temp folder, which starting a program makes (review of rc4): a run started with such a TMP waited forever on its first `djxl --version` (photo-backup points TMP at its work folder; it keeps it under 240 characters since). It is Windows: Python starting `cmd` hangs the same way (measured 2026-11-22 on build 26300: 260 runs, 261 hangs, a trailing backslash counted; a long TEMP is harmless while TMP is set). Every backend (right after its arguments are read), a serve process and the wizard now stop with exit code 2 and the reason (`_long_temp_problem`). `TEMP_DIR` is not concerned: the toolkit never puts it in a program's environment. | encoder, decoder, transcoder, recompressor, wrapper | Fixed |
 
 ## Round-90 — EXIF values, the generated sRGB, files ExifTool could not open (2026-11-21)
 

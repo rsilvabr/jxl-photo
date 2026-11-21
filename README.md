@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.31.0-rc3** (2026-11-22, pre-release; last stable: [v2.30.2](docs/version_history.md#v2302)) · [What's new](#whats-new-in-v2310-rc3) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.31.0-rc4** (2026-11-22, pre-release; last stable: [v2.30.2](docs/version_history.md#v2302)) · [What's new](#whats-new-in-v2310-rc4) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 **Windows program, no Python needed:** [jxl-photo-exe](https://github.com/rsilvabr/jxl-photo-exe/releases/latest) — unzip and double-click; cjxl/djxl, ExifTool, ImageMagick and jxl-thumb included.
 
@@ -205,19 +205,16 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## What's new in v2.31.0-rc3
+## What's new in v2.31.0-rc4
 
-2026-11-22. The third test release (pre-release) of v2.31.0; the last stable release is [v2.30.2](docs/version_history.md#v2302).
+2026-11-22. The fourth test release (pre-release) of v2.31.0; the last stable release is [v2.30.2](docs/version_history.md#v2302).
 
-- **Faster archiving, decoding and deleting.** Each script keeps one ExifTool open for its metadata work instead of starting one per step, and the decoder writes a TIFF's metadata in one pass instead of four. Against rc2, on copies of real photos: archiving TIFFs with every page checked 22 % faster, decoding masters 18 %, a run with `--delete-source` 21 %, resized copies 11 %. Pixels and metadata are unchanged, apart from the exact EXIF values below.
-- **Exact EXIF values.** A few numbers were rounded on the way (a maximum aperture of f/2.83 became f/2.8, a phone's 6.62 mm focal length 6.6 mm); new files keep them exact. The files you have are fine and are not redone.
-- **A temp folder with `%` in its name is refused** before the first file, with what to change: ExifTool reads `%` as a format code. See [upgrading](docs/upgrading.md).
-- **The failed files are listed again at the end** of a run with errors.
-- **For programs: `--serve`.** The encoder, the decoder and the JPEG transcoder can stay open and convert files sent one per line, exactly as single calls (30 JPEGs: 4.8 s instead of 8.9). The wizard does not use it.
-- **[Known issues](docs/known_issues.md):** the bugs that changed files earlier versions wrote, how to find them and what to do — most need nothing.
-- Since v2.31.0-rc1 and rc2: `--verify-roundtrip` also checks when nothing is deleted, and sRGB copies are converted without ImageMagick.
+- **Error messages say why, on one line.** When cjxl, djxl, ImageMagick or ExifTool fail, the log line now carries their whole explanation; it often started mid-sentence or with cjxl's version banner, the cause on the lines below.
+- **A TMP of 261 characters or more is refused** at the start, with what to change: on Windows, a process with such a TMP hangs when it starts any program. Only a program that points TMP at a very deep folder could meet it. See [upgrading](docs/upgrading.md).
+- **`jxl_photo.py encode` and the other script commands start a little sooner** (35–40 ms a call).
+- Since v2.31.0-rc3: archiving, decoding and deleting 18–22 % faster (ExifTool kept open), exact EXIF values, a temp folder with `%` refused, the failed files listed again at the end, `--serve` for programs, a [known issues](docs/known_issues.md) page. Since rc1 and rc2: `--verify-roundtrip` also checks when nothing is deleted, and sRGB copies are converted without ImageMagick.
 
-[Technical notes](docs/version_history.md#v2310-rc3) · [earlier releases, in short](docs/whats_new.md) · [every release](docs/version_history.md#release-history)
+[Technical notes](docs/version_history.md#v2310-rc4) · [earlier releases, in short](docs/whats_new.md) · [every release](docs/version_history.md#release-history)
 
 ---
 

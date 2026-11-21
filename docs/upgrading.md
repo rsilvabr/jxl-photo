@@ -11,8 +11,16 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
-## v2.31.0 (since rc3): a temp folder with `%` is refused; exact EXIF values
+## v2.31.0 (since rc3): a temp folder with `%`, or a TMP of 261 characters, is refused; exact EXIF values
 
+- **A TMP of 261 characters or more is refused (since v2.31.0-rc4).** On
+  Windows a process whose TMP (its TEMP when TMP is not set) is that long
+  hangs when it starts any program, with nothing on the screen; a run used to
+  wait forever on its first cjxl, djxl or ExifTool. Every script, a serve
+  process and the wizard now stop at their start with exit code 2 and the
+  variable's name. **What to check:** only the TMP/TEMP a program gives the
+  scripts when it starts them; Windows' own is far shorter. `TEMP_DIR` is not
+  concerned.
 - **A temp folder with `%` in its path is refused.** ExifTool reads a `%` in
   the name of a file it writes or reads a tag from as a format code, and the
   toolkit keeps such files in its temp folder: there some steps failed file

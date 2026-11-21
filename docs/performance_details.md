@@ -54,7 +54,7 @@ story by theme.
 | [v2.30.2](version_history.md#v2302-rc2) | Full-size decodes stay in memory: the thumbnail, copies, decoded TIFFs, the checks before a delete | resized JPEG copy of a 45 MP master: 14.1 → 4.5 s |
 | [v2.30.2](version_history.md#v2302) | A new master written once instead of seven times; planning reads a stub of each JXL; a decoded TIFF rewritten fewer times | archiving writes 79 MB instead of 520; decoding 15.8 → 5.6 s |
 | [v2.31.0-rc2](version_history.md#v2310-rc2) | sRGB derivative: colour converted in Python, image to cjxl in memory | 60 masters, sRGB copies at d=0.7 e7: 133 → 123 s (temp folder on an NVMe drive), 176–196 → 121 s (on a SATA SSD); 16 % less CPU |
-| v2.31.0 | ExifTool kept open; a decoded TIFF written once; one decode for the thumbnail and the page check; the delete gate's checks in parallel; ImageMagick's PNG in memory; `--serve` | 4 TIFFs archived one call each with every page checked: 16.9 → 13.2 s; 6 masters decoded: 5.1 → 4.2 s; a deleting run of 6 TIFFs: 11.3 → 9.0 s; 6 masters resized to 2048 px: 4.1 → 3.6 s; 30 JPEGs archived through one `--serve` process instead of a call each: 8.9 → 4.8 s |
+| v2.31.0 | ExifTool kept open; a decoded TIFF written once; one decode for the thumbnail and the page check; the delete gate's checks in parallel; ImageMagick's PNG in memory; `--serve`; `jxl_photo.py encode` (and the other script commands) dispatched before the wizard loads | 4 TIFFs archived one call each with every page checked: 16.9 → 13.2 s; 6 masters decoded: 5.1 → 4.2 s; a deleting run of 6 TIFFs: 11.3 → 9.0 s; 6 masters resized to 2048 px: 4.1 → 3.6 s; 30 JPEGs archived through one `--serve` process instead of a call each: 8.9 → 4.8 s; `jxl_photo.py encode`/`transcode --version`: 413 → 379 ms, 312 → 272 ms |
 
 ## The starting design
 
@@ -255,7 +255,9 @@ a photo passes through several of them. The toolkit starts as few as it can:
   Measured on copies of real photos, the same options both ways: 30 JPEGs
   archived losslessly 8.9 → 4.8 s, 4 TIFFs archived with every page checked
   13.5 → 10.8 s; the outputs are the same (the JPEG archives byte for byte,
-  the masters' codestreams). photo-backup does not use it yet.
+  the masters' codestreams). photo-backup uses it since its v0.14.0-rc7; its
+  own measurement (16 workers, a quiet PC): 160 JPEGs of 24 MP backed up
+  20.0 → 18.1 s, 32 TIFFs restored 6.85 → 4.55 s.
 - **No new call where one already runs.** The decoder writes its markers in a
   call it already makes: one ExifTool start less per decoded photo (v2.0.0).
 - **A few bytes read directly.** The D50 check decides from the ICC profile
@@ -447,6 +449,20 @@ an Explorer thumbnail, the same page was decoded a second time for it. Since
 v2.31.0 the thumbnail's decode is kept for the check when the file being
 checked holds the very same image data (its codestream's sha256): one decode
 per page. Normal runs keep nothing.
+
+### A script command that does not load the wizard
+
+`python jxl_photo.py encode ARGS` (decode, recompress, transcode) runs that
+script as if it was started directly. Until v2.31.0-rc3 the dispatch sat on
+the last line of the 11 000-line wizard file, so every such call ran the
+wizard's imports and definitions first (rich, the option registry, the
+screens) for nothing. Since v2.31.0-rc4 it sits at the top of the file:
+35–40 ms less a call (20 interleaved rounds of `--version` with the PC
+quiet: encode 413 → 379 ms, transcode 312 → 272 ms). What is left is Python
+compiling the whole wizard file before it runs a line of it (about 60 ms: a
+script run directly is never read from the bytecode cache, an imported module
+is) — started directly, the encoder takes 246 ms and the transcoder 110 ms.
+photo-backup starts the scripts with `runpy.run_module` and never paid it.
 
 ### Estimates and scans only where they mean something
 
