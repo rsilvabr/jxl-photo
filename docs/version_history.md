@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.31.0-rc2](#v2310-rc2)** | 2026-11-20 | Pre-release. sRGB copies (`--output-icc`) converted in Python and handed to cjxl in memory: 8–38 % faster depending on the temp folder's disk, the same copies; everything in v2.31.0-rc1 |
+| **[v2.31.0-rc3](#v2310-rc3)** | 2026-11-21 | Pre-release. ExifTool kept open and the decoder's TIFF metadata written once: archiving, decoding and deleting runs 18–22 % faster; EXIF values copied exactly; `--serve` for programs that convert file by file; the failed files repeated at the end; a temp folder with `%` refused; a known-issues page; everything in v2.31.0-rc2 |
+| [v2.31.0-rc2](#v2310-rc2) | 2026-11-20 | Pre-release. sRGB copies (`--output-icc`) converted in Python and handed to cjxl in memory: 8–38 % faster depending on the temp folder's disk, the same copies; everything in v2.31.0-rc1 |
 | [v2.31.0-rc1](#v2310-rc1) | 2026-11-20 | Pre-release. `--verify-roundtrip` without `--delete-source` checks every page of a TIFF → JXL run before it takes its final name (it used to check only before a deletion); photo-backup's encode command relies on it |
 | [v2.30.2](#v2302) | 2026-11-15 | Everything in the two test releases: copies, decodes to TIFF and the check before a delete take between half and a third of the time for a 45 MP photo; far less written to the disk (archiving a 45 MP photo: 79 MB instead of 520 MB); planning reads a few KB per JXL; the same files byte for byte; a grey resized JPEG copy marked as one |
 | [v2.30.2-rc2](#v2302-rc2) | 2026-11-14 | Pre-release. Resized copies, decoded TIFFs and deleting runs no longer write a full-size temporary image per photo; a new master is written once instead of seven times; planning reads a few KB of each JXL instead of the whole file — the same files, byte for byte; a grey resized JPEG copy is marked as one (round 87, 8 fixes) |
@@ -112,9 +113,127 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.31.0-rc3
+
+**Released 2026-11-21, the third test release (pre-release) of v2.31.0**;
+the last stable release is [v2.30.2](#v2302). Everything in
+[v2.31.0-rc2](#v2310-rc2) and [v2.31.0-rc1](#v2310-rc1) is in it. A speed
+round in two phases (plan 261121), each checked by an independent review,
+then a focused review of the four places where a bug costs files (the delete
+gate, the kept-open ExifTool, the decoder's single write, serve mode); every
+finding fixed. One thing to check when upgrading: a temp folder with `%` in
+its path is refused ([upgrading](upgrading.md)).
+
+- **ExifTool kept open** (`EXIFTOOL_STAY_OPEN = True`, Windows; in the
+  settings overlay too). Each script starts ExifTool once
+  (`-stay_open True -@ -`) and hands it the per-file commands one at a time:
+  about 15 ms a command against 197 ms for a fresh process (a 45 MP two-page
+  TIFF had started nine). Each process is in a Windows Job Object of its own:
+  it ends with the script however the script ends, and a timeout ends a
+  launcher's child too. Idle processes are kept up to eight, the most recently
+  used first, so the others close after two idle minutes. A command written to
+  it that it ended without answering is a failure and is never sent again (a
+  write could run twice); one it refused before running (an option that took
+  the marker line) is answered at once from its `{ready<N>}` line, instead of
+  after the whole timeout. Two kinds of command still get a process of their
+  own, because ExifTool changes how LATER commands of the same process write
+  or read XMP after them: a copy of XMP fields from a file (Google's container
+  item then came out `GItem:` instead of the file's `Item:`) and a struct
+  write other than `xmpMM:History` (a flattened tag of that struct was then
+  read back empty). The History append, then the reads the scripts make,
+  answer exactly as in a fresh process (pinned by a test). `False` goes back
+  to one process per command.
+- **The decoder writes a TIFF's metadata in one pass.** ExifTool rewrites the
+  whole TIFF for every command that writes (241 MB and 0.7 s for a 45 MP
+  page), and a decode made four. Now the JXL's XMP block goes into a small
+  file of its own, the XMP edits (dc:Relation, the provenance markers, the
+  pixel sum, the History entry, the orientation's XMP line) are made there,
+  and one command writes the EXIF, that block and the IPTC into the TIFF.
+  Maker notes ExifTool cannot parse are still an error with the
+  `--exiftool-ignore-minor` hint (a 1x1 probe asks what the old second write
+  would have said). The marker is read back at the end of the same batch: a
+  copy whose XMP did not arrive fails, never reports OK. On 19 real TIFFs
+  (film scans, SilverFast, NX Studio, phones) decoded by rc2 and by this
+  release: the same pixels and the same tags, only the preview's offset in
+  the file moves; 34.3 → 23.3 s with 4 workers.
+- **EXIF values copied exactly (#684).** Every EXIF copy goes by value
+  (`-exif:all#`), the container of a `%` path too: `MaxApertureValue` f/2.83
+  no longer comes back f/2.8, a phone's `FocalLength` 6.62 mm no longer
+  6.6 mm. New masters, decoded TIFFs and copies therefore differ in those
+  bytes from what an older version made of the same file; existing files are
+  not redone.
+- **The generated sRGB profile has a fixed date everywhere (#685):** the
+  transcoder's `--to-srgb` and the decoder's `--target-icc srgb` gave outputs
+  a few bytes apart on different days. The transcoder's cached profile is
+  named after its content, so an older cached file it cannot replace (held
+  open, read-only, another account's) never sends `--to-srgb` back to
+  `-colorspace sRGB`.
+- **"Error opening file" is a failure (#686).** ExifTool answers a
+  `-TAG<=FILE` that exists but cannot be opened (held by another program)
+  with that line and exit status 0 when the command wrote anything else; the
+  encoder's XMP and EXIF preloads could then be missing from a master that
+  reported OK. Every script now treats it as a failed command.
+- **A temp folder with `%` is refused (#687)** at the start of every run and
+  serve process: `TEMP_DIR`, or the system's TEMP/TMP when it is unset.
+  ExifTool reads a `%` in a file name as a format code; in such a folder some
+  steps failed file by file and the encoder kept only the XMP fields ExifTool
+  can write.
+- **One decode per page for the Explorer thumbnail and the page check** of
+  `--verify-roundtrip` without `--delete-source` (photo-backup's command):
+  the check takes the thumbnail's decode when the file's codestream is the
+  same (sha256).
+- **The checks before a delete start in parallel**, in the run's
+  memory-capped worker count, only for the TIFFs the cheaper checks do not
+  already keep; each TIFF still has the same checks in the same order before
+  its own delete, and a check that fails with an exception keeps its TIFF and
+  lets the gate go on. A deleting run of 6 TIFFs: 11.3 → 9.0 s.
+- **The content sync hashes up to 4 TIFFs at once.**
+- **The recompressor's ImageMagick PNG stays in memory** (no `conv.png` in
+  the temp folder for table/LUT profiles, resized or sharpened copies),
+  through a 1 MB pipe: through Windows' default pipe ImageMagick waited for
+  the reading thread on every piece (a 13 MB PNG took 2.0 s instead of 1.0
+  for a file). Six masters resized to 2048 px: 4.1 → 3.6 s.
+- **Serve mode (`--serve`; encoder, decoder, transcoder).** For a program
+  that converts many files one call at a time (photo-backup does not use it
+  yet). Started once, a serve process reads one JSON job per line (`id`,
+  absolute `input` and `output`), runs each exactly as a single call with the
+  serve line's options, and answers one JSON line per job (`exit`, the new
+  `outputs` of the folder, `error` = the first two ERROR lines or what the job
+  printed on stderr), after a presentation line with the version and before an
+  end line at EOF. It never deletes and never asks: the delete and
+  confirmation flags, `--clean-staging`, each script's maintenance modes and
+  `DELETE_SOURCE`/`DELETE_SKIPPED` set in the script refuse it before the
+  first job. One log for all its jobs; fds 0 and 1 point at NUL, so nothing a
+  run prints can reach the answers or fill a pipe nobody reads; the per-file
+  caches are emptied before each job; an unexpected exception is answered and
+  ends the process; on Windows its cjxl, djxl and ExifTool end with it. 30
+  JPEGs archived through one serve process instead of a call each: 8.9 →
+  4.8 s; 4 TIFFs with every page checked: 13.5 → 10.8 s; the same outputs.
+  The wizard refuses it in the expert flags. Each script's page has a "Serve
+  mode" section.
+- **The failed files again at the end** of a run with errors: `Errors (N):`
+  and the first ten `  -> file: reason` as WARNING lines, for whoever reads
+  only the last lines (not with `--summary-json`: the wizard prints its own
+  list; photo-backup counts only the lines that start with ERROR).
+- **[known_issues.md](known_issues.md):** the bugs that changed files the
+  toolkit wrote, which versions, how to find those files (an ExifTool `-if`
+  on the History's version) and what to do.
+- Measured on copies of real photos in folders without `%`, rc2 against this
+  release: 4 TIFFs archived one call each with every page checked (photo-
+  backup's way) 16.9 → 13.2 s; 6 TIFFs with 6 workers 6.7 → 6.3 s; 6 masters
+  decoded 5.1 → 4.2 s; a deleting run of 6 TIFFs 11.3 → 9.0 s; 6 masters
+  resized to 2048 px 4.1 → 3.6 s.
+- Tests: 4369 pass; the real-photo battery 182/182; photo-backup's contract
+  22/22; side_by_side against rc2 shows only the intended differences (the
+  EXIF-derived Composite values, one DEBUG line, the usage line naming
+  `--serve`).
+
+---
+
 ## v2.31.0-rc2
 
-**Released 2026-11-20, the second test release (pre-release) of v2.31.0**;
+**Released 2026-11-20, the second test release (pre-release) of v2.31.0**,
+superseded by [v2.31.0-rc3](#v2310-rc3) the next day;
 the last stable release is [v2.30.2](#v2302). Everything in
 [v2.31.0-rc1](#v2310-rc1) is in it. One change, in the recompressor; nothing
 to do when upgrading.

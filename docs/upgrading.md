@@ -11,6 +11,27 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
+## v2.31.0 (since rc3): a temp folder with `%` is refused; exact EXIF values
+
+- **A temp folder with `%` in its path is refused.** ExifTool reads a `%` in
+  the name of a file it writes or reads a tag from as a format code, and the
+  toolkit keeps such files in its temp folder: there some steps failed file
+  by file and the encoder kept only part of a TIFF's XMP. From v2.31.0-rc3
+  every script stops before its first file, with exit code 2 and the folder's
+  name, when `TEMP_DIR` (or, when it is unset, Windows' TEMP and TMP) has a
+  `%`. **What to check:** `TEMP_DIR` at the top of each script or in the
+  settings overlay, and the TEMP/TMP of a program that runs the scripts.
+- **New files carry the exact EXIF values.** A few numbers used to be copied
+  through their printed form: a maximum aperture of f/2.83 came out f/2.8, a
+  phone's focal length of 6.62 mm came out 6.6 mm. They are copied by value
+  now, so a master made again from the same TIFF differs in those bytes from
+  one an older version made. Nothing to do: the files you have keep what
+  they hold; a comparison of files by their hash across versions will see the
+  difference.
+- **A run with errors repeats the failed files at its end** (`Errors (N):`,
+  WARNING lines). A program that reads the log may see these new lines; they
+  never start with ERROR.
+
 ## v2.31.0: `--verify-roundtrip` without `--delete-source` checks every page
 
 - **The TIFF encoder's `--verify-roundtrip`, given without `--delete-source`,

@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.31.0-rc2** (2026-11-20, pre-release; last stable: [v2.30.2](docs/version_history.md#v2302)) · [What's new](#whats-new-in-v2310-rc2) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.31.0-rc3** (2026-11-21, pre-release; last stable: [v2.30.2](docs/version_history.md#v2302)) · [What's new](#whats-new-in-v2310-rc3) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 **Windows program, no Python needed:** [jxl-photo-exe](https://github.com/rsilvabr/jxl-photo-exe/releases/latest) — unzip and double-click; cjxl/djxl, ExifTool, ImageMagick and jxl-thumb included.
 
@@ -196,6 +196,7 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 | [docs/related_projects.md](docs/related_projects.md) | The Windows program, Explorer thumbnails, the TIFF-only alternative, the backup script |
 | [docs/whats_new.md](docs/whats_new.md) | What changed in each release, in a few lines |
 | [docs/upgrading.md](docs/upgrading.md) | What to check when you upgrade from an older version |
+| [docs/known_issues.md](docs/known_issues.md) | The bugs that changed files an earlier version wrote: which versions, how to find those files, what to do |
 | [docs/version_history.md](docs/version_history.md) | Every release in detail, and the full release table |
 | [docs/bug_tracking_since_v1.0.md](docs/bug_tracking_since_v1.0.md) | Every bug fix since v1.0, numbered and dated |
 | [docs/new_features_since_v1.0.md](docs/new_features_since_v1.0.md) | Every new feature since v1.0 |
@@ -204,14 +205,19 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## What's new in v2.31.0-rc2
+## What's new in v2.31.0-rc3
 
-2026-11-20. The second test release (pre-release) of v2.31.0; the last stable release is [v2.30.2](docs/version_history.md#v2302).
+2026-11-21. The third test release (pre-release) of v2.31.0; the last stable release is [v2.30.2](docs/version_history.md#v2302).
 
-- **sRGB copies are faster.** A colour-converted copy of a master (`--output-icc`, such as the sRGB copy) no longer goes through ImageMagick and a temporary image of up to 270 MB per photo: for the usual working spaces (sRGB, AdobeRGB, ProPhoto) the recompressor converts the colour itself, with the same math. On 60 photos: 8 % faster with the temp folder on a fast SSD, about a third faster on a slower one. The copies are the same — at most 1 level apart in 65 535, the same quality and size — and the ones you already have are not redone.
-- **`--verify-roundtrip` now also checks when nothing is deleted** (since v2.31.0-rc1). In a TIFF → JXL run without `--delete-source`, every page is compared with its TIFF page before it gets its final name. Runs without the flag, deleting runs and the wizard's presets do not change; a command line of your own that passes it without deleting takes about a fifth longer on TIFFs and needs djxl: see [upgrading](docs/upgrading.md).
+- **Faster archiving, decoding and deleting.** Each script keeps one ExifTool open for its metadata work instead of starting one per step, and the decoder writes a TIFF's metadata in one pass instead of four. Against rc2, on copies of real photos: archiving TIFFs with every page checked 22 % faster, decoding masters 18 %, a run with `--delete-source` 21 %, resized copies 11 %. Pixels and metadata are unchanged, apart from the exact EXIF values below.
+- **Exact EXIF values.** A few numbers were rounded on the way (a maximum aperture of f/2.83 became f/2.8, a phone's 6.62 mm focal length 6.6 mm); new files keep them exact. The files you have are fine and are not redone.
+- **A temp folder with `%` in its name is refused** before the first file, with what to change: ExifTool reads `%` as a format code. See [upgrading](docs/upgrading.md).
+- **The failed files are listed again at the end** of a run with errors.
+- **For programs: `--serve`.** The encoder, the decoder and the JPEG transcoder can stay open and convert files sent one per line, exactly as single calls (30 JPEGs: 4.8 s instead of 8.9). The wizard does not use it.
+- **[Known issues](docs/known_issues.md):** the bugs that changed files earlier versions wrote, how to find them and what to do — most need nothing.
+- Since v2.31.0-rc1 and rc2: `--verify-roundtrip` also checks when nothing is deleted, and sRGB copies are converted without ImageMagick.
 
-[Technical notes](docs/version_history.md#v2310-rc2) · [earlier releases, in short](docs/whats_new.md) · [every release](docs/version_history.md#release-history)
+[Technical notes](docs/version_history.md#v2310-rc3) · [earlier releases, in short](docs/whats_new.md) · [every release](docs/version_history.md#release-history)
 
 ---
 
