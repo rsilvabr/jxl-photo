@@ -10,7 +10,7 @@ as [GitHub Releases](https://github.com/rsilvabr/jxl-photo/releases).
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.31.0-rc3](version_history.md#v2310-rc3)** | 2026-11-21 | Pre-release. Archiving, decoding and deleting runs 18–22 % faster; exact EXIF values; a temp folder with `%` refused; the failed files listed again at the end; `--serve` for programs; a known-issues page; everything in v2.31.0-rc2 |
+| **[v2.31.0-rc3](version_history.md#v2310-rc3)** | 2026-11-22 | Pre-release. Archiving, decoding and deleting runs 18–22 % faster; exact EXIF values; a temp folder with `%` refused; the failed files listed again at the end; `--serve` for programs; a known-issues page; everything in v2.31.0-rc2 |
 | [v2.31.0-rc2](version_history.md#v2310-rc2) | 2026-11-20 | Pre-release. sRGB copies converted without ImageMagick or a temporary image: 8–38 % faster depending on the temp folder's disk, the same copies; everything in v2.31.0-rc1 |
 | [v2.31.0-rc1](version_history.md#v2310-rc1) | 2026-11-20 | Pre-release. `--verify-roundtrip` also checks when nothing is deleted: every page of a TIFF → JXL run is compared with its TIFF before it gets its final name |
 | [v2.30.2](version_history.md#v2302) | 2026-11-15 | Copies and decodes take between half and a third of the time for a 45 MP photo; far less written to the disk (archiving a 45 MP photo: 79 MB instead of 520 MB); the same files byte for byte |
@@ -47,7 +47,7 @@ Every release since v1.0: [version_history.md](version_history.md#release-histor
 
 ## v2.31.0-rc3
 
-2026-11-21. The third test release (pre-release) of v2.31.0; the last stable release is [v2.30.2](#v2302). Everything in [v2.31.0-rc2](#v2310-rc2) and [v2.31.0-rc1](#v2310-rc1) is in it.
+2026-11-22. The third test release (pre-release) of v2.31.0; the last stable release is [v2.30.2](#v2302). Everything in [v2.31.0-rc2](#v2310-rc2) and [v2.31.0-rc1](#v2310-rc1) is in it.
 
 - **Faster archiving, decoding and deleting.** Each script keeps one ExifTool open for its metadata work instead of starting one per step, and the decoder writes a TIFF's metadata in one pass instead of four. Against rc2, on copies of real photos: archiving TIFFs with every page checked 22 % faster, decoding masters 18 %, a run with `--delete-source` 21 %, resized copies 11 %. Pixels and metadata are unchanged, apart from the exact EXIF values below.
 - **Exact EXIF values.** A few numbers were rounded on the way (a maximum aperture of f/2.83 became f/2.8, a phone's 6.62 mm focal length 6.6 mm); new files keep them exact. The files you have are fine and are not redone.

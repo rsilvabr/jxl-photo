@@ -14,7 +14,7 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.31.0-rc3](#v2310-rc3)** | 2026-11-21 | Pre-release. ExifTool kept open and the decoder's TIFF metadata written once: archiving, decoding and deleting runs 18–22 % faster; EXIF values copied exactly; `--serve` for programs that convert file by file; the failed files repeated at the end; a temp folder with `%` refused; a known-issues page; everything in v2.31.0-rc2 |
+| **[v2.31.0-rc3](#v2310-rc3)** | 2026-11-22 | Pre-release. ExifTool kept open and the decoder's TIFF metadata written once: archiving, decoding and deleting runs 18–22 % faster; EXIF values copied exactly; `--serve` for programs that convert file by file; the failed files repeated at the end; a temp folder with `%` refused; a known-issues page; everything in v2.31.0-rc2 |
 | [v2.31.0-rc2](#v2310-rc2) | 2026-11-20 | Pre-release. sRGB copies (`--output-icc`) converted in Python and handed to cjxl in memory: 8–38 % faster depending on the temp folder's disk, the same copies; everything in v2.31.0-rc1 |
 | [v2.31.0-rc1](#v2310-rc1) | 2026-11-20 | Pre-release. `--verify-roundtrip` without `--delete-source` checks every page of a TIFF → JXL run before it takes its final name (it used to check only before a deletion); photo-backup's encode command relies on it |
 | [v2.30.2](#v2302) | 2026-11-15 | Everything in the two test releases: copies, decodes to TIFF and the check before a delete take between half and a third of the time for a 45 MP photo; far less written to the disk (archiving a 45 MP photo: 79 MB instead of 520 MB); planning reads a few KB per JXL; the same files byte for byte; a grey resized JPEG copy marked as one |
@@ -115,7 +115,7 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ## v2.31.0-rc3
 
-**Released 2026-11-21, the third test release (pre-release) of v2.31.0**;
+**Released 2026-11-22, the third test release (pre-release) of v2.31.0**;
 the last stable release is [v2.30.2](#v2302). Everything in
 [v2.31.0-rc2](#v2310-rc2) and [v2.31.0-rc1](#v2310-rc1) is in it. A speed
 round in two phases (plan 261121), each checked by an independent review,
@@ -233,7 +233,7 @@ its path is refused ([upgrading](upgrading.md)).
 ## v2.31.0-rc2
 
 **Released 2026-11-20, the second test release (pre-release) of v2.31.0**,
-superseded by [v2.31.0-rc3](#v2310-rc3) the next day;
+superseded by [v2.31.0-rc3](#v2310-rc3) two days later;
 the last stable release is [v2.30.2](#v2302). Everything in
 [v2.31.0-rc1](#v2310-rc1) is in it. One change, in the recompressor; nothing
 to do when upgrading.
