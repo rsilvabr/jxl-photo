@@ -126,12 +126,14 @@
 The sibling repo `photo-backup` (since its v0.14.0-rc2; JPEG since rc3) runs
 jxl-photo to keep a TIFF or a JPEG as JXL in a backup and to make it again on
 restore, and it reads the marks this repo writes. What it needs is written
-down, item by item (JP-1 to JP-21), in `../photo-backup/docs/jxlphoto_contract.md`
+down, item by item (JP-1 to JP-22), in `../photo-backup/docs/jxlphoto_contract.md`
 (仕様書). In short:
 - `jxl_photo.py encode --version` prints `jxl-photo X.Y.Z` (JP-1); a backup
   refuses a version older than photo-backup's `JXLPHOTO_MIN_VERSION`
-  (2.31.0-rc1, the first that checks every page, JP-20; a test version counts
-  as older than its release) and a restore one older than
+  (2.31.0-rc3 since its v0.14.0-rc6: the first that refuses a temp folder with
+  a `%`, JP-22, and takes ExifTool's `Error opening file` as a failure, #686;
+  a test version counts as older than its release, and test versions of one
+  number go by their own number) and a restore one older than
   `JXLPHOTO_RESTORE_MIN_VERSION` (2.30.0, the first whose `jxl_photo.py` has
   `_BACKEND_COMMANDS`).
 - `jxl_photo.py encode <TIFF> <folder> --mode 0 --distance D --scan-distance S
@@ -174,6 +176,12 @@ down, item by item (JP-1 to JP-21), in `../photo-backup/docs/jxlphoto_contract.m
   with the settings written in the scripts, never an overlay made for the
   owner's presets. Its test looks for the setting's name in the INFO line
   `Script settings overlay: ...` (`_log_settings_overlay`): keep that wording.
+- photo-backup never gives jxl-photo a temp folder (TMPDIR/TEMP/TMP; `TEMP_DIR`
+  is empty without the overlay) with a `%` in its path, and every backend
+  refuses one at its start (JP-22, `_percent_temp_problem`): exit 2 before any
+  file is touched, the reason on stderr. The contract test runs an encode and
+  a transcode with such a folder and wants exit 2, no file written, the source
+  unchanged and a `%` in stderr.
 - `jxl_photo.py decode <folder> <out> --mode 0 --workers 1 --depth-policy
   preserve_original --no-preview` gives exactly one TIFF with the original's
   pages and bit depths (JP-10) and leaves its input alone (JP-11).
@@ -186,7 +194,9 @@ down, item by item (JP-1 to JP-21), in `../photo-backup/docs/jxlphoto_contract.m
 run photo-backup's contract test against this checkout — `set
 PHOTOBACKUP_JXLPHOTO=<this repo>\jxl_photo.py`, then, in photo-backup,
 `python -m pytest tests/test_jxlphoto_contract.py -v` (about 30 s). A failure
-names its item. A change on purpose to an item: photo-backup changes first.
+names its item; the contract doc's table of versions says which jxl-photo
+version passes which items. A change on purpose to an item: photo-backup
+changes first.
 
 ## Settings are never hardcoded
 - Every script's user-editable settings live at the TOP of the script
