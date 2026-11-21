@@ -587,7 +587,9 @@ python jxl_jpeg_transcoder.py --serve --mode 0 --workers 1 --effort 7 --force-tr
 - It never deletes and never asks: `--delete-source`, `--delete-skipped`,
   `--delete-confirm-off`, `--clean-staging`, `--repair-jbrd`, `-h`,
   `--version` — or `DELETE_SOURCE` / `DELETE_SKIPPED` set to True in the
-  script — make it exit 2 before the first job.
+  script — make it exit 2 before the first job. So does a temp folder with
+  `%` in its path, as it stops a single run (`--serve cannot start: the temp
+  folder has a '%' ...` on stderr).
 - A job that raises an unexpected error is answered (`exit` 2) and the
   process ends, so nothing half done reaches the next job. On Windows it and
   everything it started (cjxl, djxl, magick, ExifTool) end together, however

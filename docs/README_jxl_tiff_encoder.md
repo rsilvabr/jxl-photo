@@ -733,7 +733,9 @@ python jxl_tiff_encoder.py --serve --mode 0 --distance 0.1 --workers 1 --verify-
   maintenance modes (`--restamp-moved`, `--restamp-then-sync`,
   `--clear-icc-cache`, `--provenance adopt`) — or `DELETE_SOURCE` /
   `DELETE_SKIPPED` set to True in the script — make it exit 2 before the
-  first job.
+  first job. So does a temp folder with `%` in its path, as it stops a
+  single run (`--serve cannot start: the temp folder has a '%' ...` on
+  stderr).
 - A job that raises an unexpected error is answered (`exit` 2) and the
   process ends, so nothing half done reaches the next job. On Windows it and
   everything it started (cjxl, djxl, ExifTool) end together, however it ends.

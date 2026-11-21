@@ -129,6 +129,10 @@ A decode to TIFF (16-bit integers, first frame) or to a 16-bit PNG is not a full
 
 If the finished output cannot be moved from the staging folder to its destination (the old file is open in a viewer, say), the file counts as an error: the summary says so and the exit code is 1. The source is kept, and the next `--sync` run does the file again.
 
+## No `%` in the temp folder
+
+ExifTool reads a `%` in the name of a file it writes, or reads a tag from, as a format code, and the scripts keep such files in their temp folder. So every script stops before its first file (exit code 2, the folder named) when that folder has a `%` in its path: `TEMP_DIR` at the top of the script or in the overlay, else Windows' TEMP and TMP. Photos and folders with `%` in their names are fine; only the temp folder is concerned. Since v2.31.0-rc3; before it, some steps failed file by file there and the encoder kept only part of a TIFF's XMP.
+
 ## Modes 6/7: which `_EXPORT` counts, and what is left out
 
 The anchor is the first folder matching the marker at or below the input folder; only when there is none below it, the closest one above it. A library kept under a folder whose name also matches (`Lightroom_Export`, `C1_Export`) is not anchored there — unless the run is pointed at that very folder, which then counts as the marker: point it at the year or event folder inside. Below the marker, the decoder and the recompressor leave out the other scripts' output folders (by the names in their settings), and these two and the transcoder's decode leave out every derivative (by its `jxlphoto-derived` marker, wherever it sits), unless mode 7 asks for that folder by name.
