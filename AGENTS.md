@@ -31,10 +31,15 @@
   or not (#699): compared with what THIS page read (`_stat_identity` at the
   start of the page's reads, not the planning's record); a TIFF gone
   meanwhile keeps its JXL. Each page's master takes its own IFD's EXIF
-  (#696: `-ifd0:all#` after `-exif:all#` for page 0, `-IFD0:all<IFDn:all#`
-  for page N — `-ifdN:all#` would write IFDN of the master;
+  (#696: `-ifd0:all#` after `-exif:all#` for page 0, `-IFD0:all#<IFDn:all#`
+  for page N — `-ifdN:all#` would write IFDN of the master; the `#` on BOTH
+  sides, #713: rc5's `-IFD0:all<IFDn:all#` wrote the printed form, and
+  Orientation 1 matched "Rotate 180";
   `_exiftool_source(ifd=)` for the MIE container of a `%` path, which holds
-  IFD0 and IFD1 only). The cautious ICC probe (#693): cjxl's own error exit,
+  IFD0 and IFD1 only: it is built with the page's values forced into its
+  IFD0, `-IFD0:all#<IFDn:all#`, and the encoder's last copy from such a
+  container is `-ifd0:all#`, or page 2 and after took other pages' values —
+  rc6's reviews S5 and second S2). The cautious ICC probe (#693): cjxl's own error exit,
   twice, is the verdict "skip" (cached); a timeout, a killed process or a
   djxl failure is "cannot tell" — that file keeps its profile in XMP only,
   nothing cached
@@ -95,7 +100,11 @@
   existing output with no derived label whose marks name THIS source
   (`_check_derivative_targets`, `_provenance_ok`) — never forced: such a file
   may be an older version's colour export, a faithful export or the user's
-  retouch of it, and nothing tells them apart (second review of rc5, M1)
+  retouch of it, and nothing tells them apart (second review of rc5, M1).
+  Every derivative (resize, sharpen, colour) leaves out a scanner's IR channel
+  (`jxlphoto-extrasamples:0`: `-alpha off` in `_output_magick_args`,
+  `_master_has_ir_channel`) and drops that marker (#714, rc6); a faithful
+  decode keeps the JXL's channels (the owner's call)
 - `jxl_recompressor.py` — JXL → JXL recompressor (v2.1.0): reads the recorded
   lineage chain (`gen=N | cjxl d=/e= | …`, append-only — the encoder and the
   recompressor both append one entry per encode and reconcile `gen` as
@@ -294,7 +303,12 @@ changes first.
   overlay's folder names. Helpers parity-pinned. The suite (conftest) and
   the battery run with `JXLPHOTO_SETTINGS=""`; the battery's
   `--settings-overlay <file>` runs with one. The wrapper's menu S edits the
-  file from the child's own table (no copy of types in the wrapper).
+  file from the child's own table (no copy of types in the wrapper), then
+  applies it again to the scripts the wizard has imported
+  (`_refresh_child_overlays`: from `_SETTINGS_OVERLAY["script"]`, the values
+  each script had before the overlay, and `_RUN_DEFAULTS` follows) — the
+  wizard reads its children's settings in process and sends some of them on
+  the command line, where they win over the file (#716).
 
 ## The common module (`jxl_photo_common.py`)
 - The helpers the scripts share live there, ONE copy each (plan
@@ -582,6 +596,23 @@ changes first.
   checks (`_abort_on_duplicate_outputs`, the output-vs-input collision guard)
   can therefore never see a problem that spans two entries — those guards have
   to live in the wrapper. Two v1.8.1 bugs came from exactly this blind spot.
+  Each row's options (`_row_effs`) are COPIES of the run's: a question that
+  changes the run's options (`_confirm_lossy_delete_skipped`) is followed by
+  making them again (#712). A file Source's tree is its folder in
+  `_manifest_needs_collision_scan` (#715); a mode-2 Destination inside its
+  folder Source is in place when the recompressor's plan says so
+  (`_folder_row_replaces_files`, #723); a missing Source is that row's error,
+  the others run (#724); a cancelled row of an unattended manifest is no
+  success (#723). "Does this JXL → JXL run replace its sources in place?" has
+  ONE answer for the direct run, a repeat and a preset:
+  `_jxl_run_replaces_in_place` — the wizard's in-place confirmation, the
+  unattended refusal and the child's `--delete-confirm-off` (`_policy_delete`,
+  through `_recompress_entry_in_place`) must never disagree (rc6's review M1:
+  the flag went out for a mode-2 run whose confirmation was keyed on modes
+  0/8, and nobody was asked). A manifest decides each row's answer ONCE,
+  before its confirmation, and hands it to the row's command
+  (`_in_place_planned`): read again at build time, the disk showed the JXLs an
+  earlier row had just written (second review S1).
 - **`--delete-source` works in every mode** (since v2.0.0). Every delete path is gated
   by an integrity check plus (for JPEG recovery) `djxl --reconstruct_jpeg` or a
   same-run MD5 match. Keep those gates fail-CLOSED: an unverifiable output must
@@ -834,12 +865,15 @@ changes first.
 - **One decode per page for the Explorer thumbnail and the page check
   (v2.31.0):** while `_VERIFY_EACH_PAGE` (photo-backup's
   `--verify-roundtrip`), `convert_one` sets the encoder's thread-local
-  `_KEPT_DECODE.wanted`; `_make_explorer_thumbnail` then also writes
-  `--orig_icc_out` and keeps its PAM with `_codestream_digest` (sha256 of the
-  codestream payloads), and `_decode_jxl_for_verify` takes it (`_take_kept_decode`,
+  `_KEPT_DECODE.wanted`; `_make_explorer_thumbnail` then keeps its PAM with
+  `_codestream_digest` (sha256 of the codestream payloads), and
+  `_decode_jxl_for_verify` takes it (`_take_kept_decode`,
   once) only when the file it checks has the same digest — pixels and profiles
-  come from the codestream only. Normal runs keep nothing and pass no extra
-  flag. Anything else decodes as before. Since rc5 the thumbnail comes from
+  come from the codestream only. Normal runs keep nothing. (Since rc6 the
+  thumbnail's djxl always writes `--orig_icc_out`: a decode in the file's own
+  space takes the profile the master carries in XMP when it fits the pixels,
+  `_carried_profile_of` — a lossy "skip" master's thumbnail was in sRGB's
+  colours, #722.) Anything else decodes as before. Since rc5 the thumbnail comes from
   the page in memory (V2), so the check decodes once on its own; the kept
   decode serves only when that route fails and the file is decoded for the
   thumbnail.
@@ -1125,7 +1159,27 @@ changes first.
   value on a new-job path goes through `_task_memory`. **The last job saved
   is the run:** `_RUN_SCOPED_SESSION_FIELDS` are cleared before each save and
   `_pending_session_fields` are read, not popped — [s], [d] and [r] each save
-  the same job (#706, #707).
+  the same job (#706, #707). The legacy shortcut of `_task_memory` (a config
+  with no task memory at all) never applies to a conversion two tasks share
+  (`_CONVERSIONS_OF_TWO_TASKS`, #717). A mode-6/7/99 job saves the export
+  marker it ran with, even the wrapper's (#720). Menu 9's TIFF distance is
+  the last job's only when that job archived TIFFs (#718); its staging folder
+  is the next job's (#719).
+- **A delete typed in the expert flags is a delete** for every check before
+  the HHMM (#725, the owner's call): `_job_deletes(wf)`, `_registry_rule_problem`
+  merges it — and every registry option the flags set
+  (`_flags_set_options`: the child's own parse, by argparse dest, never the
+  spelling: the decoder's `--none` is `force_none`) counts for the
+  `conflicts` — the gate `guard_with_delete` (a `--no-overwrite-guard` next to a
+  delete is refused; a remembered 'off' is left out by
+  `_append_overwrite_guard_flag(deletes=)`), a derivative typed there is
+  refused next to a delete by the scripts' own rule (`_flags_derivative_refused`:
+  resize/sharpen on every route, a colour conversion everywhere but the
+  transcoder's bit-exact route, `_BIT_EXACT_CONVERSIONS`) or in place, the
+  decoder's `--none` like its decode mode, and a
+  manifest whose rows cannot all delete is refused (the wizard cannot take a
+  flag out of a row, as `_policy_delete` does for [D]). A new check of "does
+  this run delete?" uses `_job_deletes`, never `advanced_options` alone.
 - **Pre-run refusals live in `_GATE_RULES`** (`_job_gates(menu, wf, path)`,
   paths `common`/`direct`/`manifest`/`preset`), called by
   `execute_workflow`, `_execute_manifest_workflow` and `_run_saved_session`

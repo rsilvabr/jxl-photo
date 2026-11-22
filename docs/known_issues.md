@@ -33,6 +33,54 @@ verbatim copy of one. The entries below say how to find those.
 
 ## The list, newest first
 
+### A later page of a multi-page TIFF with the wrong orientation — v2.31.0-rc5 only (#713)
+
+**What:** the master of page 1 (and after) of a multi-page TIFF came out with
+a wrong EXIF Orientation — 3 ("Rotate 180") where the page said 1 or 8, page
+0's value where it said anything else — and with page 0's ResolutionUnit. A
+viewer can show that page's JXL turned, and so are the JPEG the transcoder
+makes of it and the TIFF of that page alone (`--no-reconstruct-multipage`).
+The whole TIFF the decoder rebuilds is right: it takes its tags from page 0.
+The pixels are untouched.
+**Which files:** the JXLs of pages 1 and after (`<name>_page1.jxl`, …) that
+v2.31.0-rc5 wrote — mostly camera TIFFs with a thumbnail page (Fuji, NX
+Studio). Page 0's master is right.
+**How to tell:** this lists every master of a page 1 or after that rc5 wrote
+(in `cmd`; in PowerShell put the condition and the `-p` in single quotes):
+
+```
+exiftool -r -ext jxl -if "$XMP-xmpMM:HistorySoftwareAgent =~ /jxl-photo 2\.31\.0-rc5/ and $XMP-dc:Relation =~ /jxlphoto-page:[1-9]/" -p "$Directory/$FileName" "D:\Photos"
+```
+
+**What to do:** encode the TIFFs of those masters again with `--overwrite`
+(v2.31.0-rc6 or later): the TIFF has the right values. These pages are
+usually small (a camera's thumbnail page), so it is quick.
+
+### The Explorer thumbnail of a lossy scan whose profile is in XMP only — before v2.31.0-rc6 (#722)
+
+**What:** a lossy master whose colour profile went to XMP only (the encoder's
+"skip" for a profile cjxl cannot carry, typically a scanner's) got an Explorer
+thumbnail in the wrong colours wherever the thumbnail was made from the file:
+the recompressor, `--refresh-explorer-thumbnails`, the encoder's fallback.
+Only the thumbnail; the image and its profile are right.
+**Which files:** lossy JXLs of scans with a scanner profile that have an
+Explorer thumbnail (since v2.16.0).
+**What to do:** make their thumbnails again (v2.31.0-rc6 or later): run
+`--refresh-explorer-thumbnails --explorer-thumbnail off` on their folder (the
+thumbnails are removed), then again with `--explorer-thumbnail on`. The
+refresh rewrites a thumbnail only when it is missing or names other pixels,
+hence the two steps.
+
+### A transcoder copy of an RGB+IR scan coloured by its IR — before v2.31.0-rc6 (#714)
+
+**What:** a resized, sharpened or colour-converted JPEG/PNG the transcoder
+made from a 4-sample scan (RGB + infrared, ExtraSamples 0) had its colours
+weighted by the IR (red where it should be purple), and a PNG copy carried
+the IR as its transparency.
+**Which files:** such copies of RGB+IR scans (VueScan's RGBI); a scanner that
+writes the IR as a page of its own (SilverFast) is not concerned.
+**What to do:** make them again with `--overwrite`.
+
 ### A master that failed its check before a delete kept its name — before v2.31.0-rc5 (#701)
 
 **What:** with `--delete-source`, a JXL that failed its round-trip check in
@@ -50,8 +98,10 @@ FAILED`; the TIFF is still beside its JXL.
 flattened on white through the IR channel, taken as alpha: paler colours.
 Only the thumbnail; the image is right.
 **Which files:** JXLs of RGB+IR scans with an Explorer thumbnail.
-**What to do:** `--refresh-explorer-thumbnails` on their folder (encoder or
-recompressor) makes the thumbnails again.
+**What to do:** run `--refresh-explorer-thumbnails --explorer-thumbnail off`
+on their folder (encoder or recompressor: the thumbnails are removed), then
+again with `--explorer-thumbnail on`. The refresh rewrites a thumbnail only
+when it is missing or names other pixels, hence the two steps.
 
 ### A TIFF re-exported during its encode — before v2.31.0-rc5 (#699)
 

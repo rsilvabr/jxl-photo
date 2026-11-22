@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.31.0-rc5** (2026-11-22, pre-release; last stable: [v2.30.2](docs/version_history.md#v2302)) · [What's new](#whats-new-in-v2310-rc5) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.31.0-rc6** (2026-11-22, pre-release; last stable: [v2.30.2](docs/version_history.md#v2302)) · [What's new](#whats-new-in-v2310-rc6) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 **Windows program, no Python needed:** [jxl-photo-exe](https://github.com/rsilvabr/jxl-photo-exe/releases/latest) — unzip and double-click; cjxl/djxl, ExifTool, ImageMagick and jxl-thumb included.
 
@@ -205,18 +205,17 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## What's new in v2.31.0-rc5
+## What's new in v2.31.0-rc6
 
-2026-11-22. The fifth test release (pre-release) of v2.31.0; the last stable release is [v2.30.2](docs/version_history.md#v2302).
+2026-11-22. The sixth test release (pre-release) of v2.31.0; the last stable release is [v2.30.2](docs/version_history.md#v2302).
 
-- **Safer deletes in a few unusual setups.** A colour-converted JPEG/PNG of a master (`--to-srgb`, `--icc-profile`) never deletes it, and a 16-bit PNG converted by an older version no longer passes for a copy of its master; a JPEG archive is never deleted by a decode of its pixels; the recompressor leaves alone a file whose encode record it could not read.
-- **A failed check before a delete is an error:** the TIFF is kept, the JXL stays beside it as `<name>_jxlphoto-error.jxl`, and the next run encodes the TIFF again.
-- **Ctrl+C finishes the files in progress**, deletes nothing after it and prints the summary, in every script; a second Ctrl+C stops at once.
-- **The wizard remembers each task's own values:** an 8-bit PNG export no longer sets the bit depth of the next restore, nor the copies' folder that of the masters.
-- **Faster, the same files:** cjxl's threads shared among the encodes running at once, and the Explorer thumbnail made from the image in memory instead of a second decode — archiving 37 varied exports with 8 workers 22.3 → 17.6 s, their sRGB copies 32.5 → 26.0 s, decoding them 13.5 → 11.8 s.
-- Smaller fixes for film scans with an infrared channel, the EXIF of multi-page TIFFs, captions with `|`, private TIFF tags and a TIFF re-exported during its encode. What to check: [upgrading](docs/upgrading.md); files older versions wrote: [known issues](docs/known_issues.md).
+- **A fix for rc5:** the JXL of page 1 and after of a multi-page TIFF (a camera TIFF's thumbnail page, for example) could come out with a wrong EXIF orientation ("Rotate 180", or the first page's). If you archived multi-page TIFFs with rc5, [known issues](docs/known_issues.md) shows how to find those masters and redo them.
+- **Manifests:** a "no" to deleting already-converted originals reaches every row; a row whose Source is missing (a drive not plugged in) is an error of its own and the other rows still run; two file rows that would write one output are caught before the run.
+- **The wizard:** a setting changed in Settings reaches the next job of the same session; a preset keeps the export marker it ran with; a `--delete-source` typed in the expert flags gets the same checks as [D], before the confirmation.
+- **Smaller fixes:** the transcoder's resized copies of scans with an infrared channel, the colours of some Explorer thumbnails of lossy scans, and a few wizard edge cases.
+- **Faster:** a plain JXL → JXL recompression now shares the cores among its encodes too (40 masters with 8 workers: 23.3 → 19.7 s, the same files).
 
-[Technical notes](docs/version_history.md#v2310-rc5) · [earlier releases, in short](docs/whats_new.md) · [every release](docs/version_history.md#release-history)
+[Technical notes](docs/version_history.md#v2310-rc6) · [earlier releases, in short](docs/whats_new.md) · [every release](docs/version_history.md#release-history)
 
 ---
 

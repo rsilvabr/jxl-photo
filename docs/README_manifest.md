@@ -58,7 +58,9 @@ Rules that apply to the file itself:
   or without it. In Excel, save as **`CSV UTF-8 (comma delimited)`** — plain
   `CSV` writes the system ANSI codepage, and the wrapper *refuses* such a file
   rather than guess an encoding and run against a wrongly-decoded path (these
-  paths drive a converter that can delete sources).
+  paths drive a converter that can delete sources). The columns are separated
+  by **commas**: a file Excel saved with `;` (it does in some languages) is
+  refused when it loads, with a message that says so (v2.31.0-rc6).
 - **Comments:** a row whose `Source` is empty or starts with `#` is ignored.
 - **Relative paths** resolve against the CSV's own folder, not against wherever
   the wrapper happened to start (a scheduled run starts in
@@ -365,7 +367,9 @@ explicit mode ≠ 7.
   written. The scan that proves this is expensive, so it is skipped when a
   collision is impossible: rows that write inside their own Source tree (modes
   1/3/8, mode 0 in place, 6/7 whose marker sits below the Source) with
-  non-overlapping Sources. Modes 2/4/5 always scan; mode 0 with a real
+  non-overlapping Sources — a **file** Source counts as its folder, so two
+  file rows of one folder (`a.tif`, `a.tiff`) always scan (v2.31.0-rc6).
+  Modes 2/4/5 always scan; mode 0 with a real
   Destination scans; 6/7 rows sharing a marker dir scan; nested per-row
   markers scan. For TIFF → JXL the scan also knows the split pages: with the
   run's multi-page mode `foto.tif`'s second page writes `foto_page1.jxl`, so a
@@ -378,6 +382,16 @@ explicit mode ≠ 7.
   derivative columns.
 - **Mode 7 above the marker** — the warning/refusal listed with
   `ExportSubfolder`.
+- **In place** — a JXL → JXL row that replaces its sources (mode 0/8 without
+  a Destination, and since v2.31.0-rc6 a mode-2 row whose Destination is a
+  folder inside its Source that already holds JXLs: the run puts them back on
+  themselves) asks the in-place confirmation up front; unattended, refused.
+
+**Run-time:** a row whose Source is not there (a drive not plugged in, a
+renamed folder) is an error of that row: the other rows run, and the
+manifest ends with an error (v2.31.0-rc6; it used to stop every row). An
+unattended manifest with a row cancelled by its script's own question ends
+with an error too.
 
 * * *
 

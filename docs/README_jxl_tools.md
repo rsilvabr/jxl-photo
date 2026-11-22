@@ -699,7 +699,12 @@ Multi-page TIFFs: split — one JXL per page (thumbnail pages excluded)
   last: they are checked against the script's own command line at once — a
   typo, another script's flag or a value outside its choices is refused with
   the reason, and so is a `--mode` (the mode is chosen in the mode step or the
-  manifest's Mode column, and every check before the run uses that one).
+  manifest's Mode column, and every check before the run uses that one). A
+  `--delete-source` typed there is a delete like `[D]` for every check before
+  the confirmation (v2.31.0-rc6): next to `--no-overwrite-guard`, a
+  derivative flag or an option that never goes with a delete, the run is
+  refused before the HHMM token; in a manifest whose rows cannot all delete
+  (a lossy JPEG export), use `[D]`, which the wizard leaves out of those rows.
 - **`[d]`** runs the job as a dry run and comes back to the review; **`[r]`**
   runs it for real. Both save it as the last job. A run that deletes, or a
   JXL → JXL run in place, still asks for the current time (HHMM) first; a
@@ -732,9 +737,14 @@ Persistent defaults saved to `~/.jxl_tools_config.json`.
   what `Enter` picks in the quality list of *Archive TIFFs*, so if you always
   work at `0.05`, set it once here and accept it with `Enter` on every run. A
   value that is not in the list (`0.2`, say) is offered as "your distance",
-  pre-filled.
-- **Confirm deletes** — safety confirmation before destructive operations
-- **Export marker** — the folder name anchor for modes 6/7 (default: `_EXPORT`)
+  pre-filled. It is the next value of "Repeat last job" only when that job
+  archived TIFFs.
+- **Staging folder** — a new one (or `none`) is the next job's too.
+- **Export marker** — the folder name anchor for modes 6/7 (default: `_EXPORT`).
+  A mode-6/7 job saves the marker it ran with: its preset and "Repeat last
+  job" keep it when you change this later (v2.31.0-rc6).
+- (No "Confirm deletes" since v2.31.0-rc6: nothing read it — every delete asks
+  for its HHMM token.)
 - **Explorer thumbnail tip** — whether the menu shows the
   [thumbnail tip](#explorer-thumbnail-tip-windows). Asked only while the tip
   applies (no JXL thumbnail handler on this PC) or after you turned it off.
@@ -815,7 +825,6 @@ Some options are available directly in the wizard, others must be edited in the 
 | Default quality | Persisted |
 | Default effort | Persisted |
 | Default distance (TIFF→JXL) | Drives the second quality choice of *Archive TIFFs*. Default: `0.1` |
-| Confirm deletes | Safety toggle |
 | Export marker | Default: `_EXPORT` |
 | Explorer thumbnail tip | On by default; asked only when it applies |
 

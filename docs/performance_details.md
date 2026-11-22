@@ -54,7 +54,7 @@ story by theme.
 | [v2.30.2](version_history.md#v2302-rc2) | Full-size decodes stay in memory: the thumbnail, copies, decoded TIFFs, the checks before a delete | resized JPEG copy of a 45 MP master: 14.1 → 4.5 s |
 | [v2.30.2](version_history.md#v2302) | A new master written once instead of seven times; planning reads a stub of each JXL; a decoded TIFF rewritten fewer times | archiving writes 79 MB instead of 520; decoding 15.8 → 5.6 s |
 | [v2.31.0-rc2](version_history.md#v2310-rc2) | sRGB derivative: colour converted in Python, image to cjxl in memory | 60 masters, sRGB copies at d=0.7 e7: 133 → 123 s (temp folder on an NVMe drive), 176–196 → 121 s (on a SATA SSD); 16 % less CPU |
-| v2.31.0 | ExifTool kept open; a decoded TIFF written once; one decode for the thumbnail and the page check, then none (the thumbnail from the image in memory); cjxl's threads shared among the encodes; the decoder's preview by a table; the delete gate's checks in parallel; ImageMagick's PNG in memory; `--serve`; `jxl_photo.py encode` (and the other script commands) dispatched before the wizard loads | 4 TIFFs archived one call each with every page checked: 16.9 → 13.2 s; 6 masters decoded: 5.1 → 4.2 s; a deleting run of 6 TIFFs: 11.3 → 9.0 s; 6 masters resized to 2048 px: 4.1 → 3.6 s; 30 JPEGs archived through one `--serve` process instead of a call each: 8.9 → 4.8 s; `jxl_photo.py encode`/`transcode --version`: 413 → 379 ms, 312 → 272 ms; since rc5 (cjxl's threads shared among the encodes, the Explorer thumbnail from the image in memory, the decoder's preview by a table), 37 varied exports with 8 workers: archived 22.3 → 17.6 s, sRGB copies 32.5 → 26.0 s, decoded 13.5 → 11.8 s |
+| v2.31.0 | ExifTool kept open; a decoded TIFF written once; one decode for the thumbnail and the page check, then none (the thumbnail from the image in memory); cjxl's threads shared among the encodes; the decoder's preview by a table; the delete gate's checks in parallel; ImageMagick's PNG in memory; `--serve`; `jxl_photo.py encode` (and the other script commands) dispatched before the wizard loads | 4 TIFFs archived one call each with every page checked: 16.9 → 13.2 s; 6 masters decoded: 5.1 → 4.2 s; a deleting run of 6 TIFFs: 11.3 → 9.0 s; 6 masters resized to 2048 px: 4.1 → 3.6 s; 30 JPEGs archived through one `--serve` process instead of a call each: 8.9 → 4.8 s; `jxl_photo.py encode`/`transcode --version`: 413 → 379 ms, 312 → 272 ms; since rc5 (cjxl's threads shared among the encodes, the Explorer thumbnail from the image in memory, the decoder's preview by a table), 37 varied exports with 8 workers: archived 22.3 → 17.6 s, sRGB copies 32.5 → 26.0 s, decoded 13.5 → 11.8 s; since rc6 the plain recompression too, 40 masters: 23.3 → 19.7 s |
 
 ## The starting design
 
@@ -469,7 +469,10 @@ hundreds of threads on 32 cores, waiting on each other. Since v2.31.0-rc5, when
 several encodes run at once each gets `--num_threads = max(4, 2 × cores ÷
 encodes at once)`; one encode alone keeps every core. The files are byte for
 byte the same with any thread count (measured: lossy and lossless,
-`--buffering 0`, 16-bit RGB and 8-bit gray).
+`--buffering 0`, 16-bit RGB and 8-bit gray). rc5 gave it to the encoder and to
+the recompressor's derivatives only; since rc6 the plain JXL → JXL
+recompression has it too: 40 masters d=0.1 → d=1 at effort 7 with 8 workers,
+23.3 → 19.7 s (three runs each, the PC quiet, the 40 codestreams identical).
 
 ### The decoder's preview by a table
 

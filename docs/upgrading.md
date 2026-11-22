@@ -11,6 +11,42 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
+## v2.31.0 (since rc6): masters of later TIFF pages; manifests; expert-flag deletes
+
+- **Masters of page 1 and after of a multi-page TIFF made by rc5** can carry
+  a wrong EXIF orientation ("Rotate 180", or page 0's) and page 0's
+  resolution unit (#713). **What to check:** if you archived multi-page TIFFs
+  with v2.31.0-rc5, list those masters with the command in
+  [known_issues.md](known_issues.md) and encode their TIFFs again with
+  `--overwrite`. No other version wrote them.
+- **A manifest row whose Source is missing** (a drive not plugged in, a
+  renamed folder) is an error of that row now: the other rows run, and the
+  run ends with an error. It used to stop the whole manifest.
+- **An unattended manifest (a preset) ends with an error when a row was
+  cancelled** — a script's own question with nobody to answer it. It used to
+  exit 0. A JXL → JXL row in mode 2 whose Destination sits inside its Source
+  folder and already holds JXLs replaces those files in place: the wizard asks
+  its in-place confirmation for it up front, and refuses it unattended — a
+  direct run, a repeat and a preset of that layout too (the script used to
+  ask its own question).
+- **A `--delete-source` typed in the expert flags is a delete like [D]** for
+  every check before the run: next to `--no-overwrite-guard`, a derivative
+  flag (`--resize-*`, `--sharpen`, `--output-icc`, `--to-srgb`,
+  `--icc-profile` — not a profile on the bit-exact JPEG route, which ignores
+  it), the decoder's `--none` or an option that never goes with a delete
+  (`--restamp-then-sync`, `--exiftool-ignore-minor`), typed there or chosen in
+  the wizard, the run is refused before the confirmation instead of by the
+  script after it; the overwrite guard a job remembered as "off" stays on. In a manifest whose rows cannot all delete (a lossy JPEG export,
+  an OutputICC row), use 'Delete originals' ([D]): the wizard leaves the
+  delete out of those rows, which it cannot do for a flag.
+- **A preset of a mode-6/7 job keeps the export marker it ran with** from now
+  on; a preset saved before keeps following the marker in Settings.
+- **Settings (menu 9) no longer asks "Confirm before delete?"**: nothing ever
+  read the answer — every delete asks for its HHMM token.
+- **The transcoder's resized, sharpened or colour-converted copy of an RGB+IR
+  scan** has no fourth channel any more (the infrared made its colours wrong);
+  a faithful decode keeps it.
+
 ## v2.31.0 (since rc5): colour-converted exports never delete; a failed check renames the JXL; Ctrl+C
 
 - **A JXL → JPEG/PNG with its colour converted is a derivative** (the

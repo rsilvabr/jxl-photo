@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.31.0-rc5](#v2310-rc5)** | 2026-11-22 | Pre-release. The fixes of a full sweep of rc4 (#690–#711): a colour-converted JPEG/PNG never deletes its master, a JPEG archive is never deleted by a decode of its pixels, an unreadable encode record leaves the file alone, a failed check before a delete is an error; Ctrl+C finishes the files in progress; each wizard task remembers its own values; cjxl's threads shared among the encodes and the Explorer thumbnail made from the image in memory, faster with the same files; everything in v2.31.0-rc4 |
+| **[v2.31.0-rc6](#v2310-rc6)** | 2026-11-22 | Pre-release. The fixes of a second sweep, of rc5 (#712–#728): a later page of a multi-page TIFF no longer comes out with the orientation "Rotate 180" (rc5's own bug); a manifest's "no" to deleting converted originals reaches every row, a missing Source no longer stops the other rows, file rows of one output are caught; settings changed in the wizard reach the next job, a preset keeps its marker, a delete typed in the expert flags gets [D]'s checks; plain JXL → JXL recompression 15 % faster; everything in v2.31.0-rc5 |
+| [v2.31.0-rc5](#v2310-rc5) | 2026-11-22 | Pre-release. The fixes of a full sweep of rc4 (#690–#711): a colour-converted JPEG/PNG never deletes its master, a JPEG archive is never deleted by a decode of its pixels, an unreadable encode record leaves the file alone, a failed check before a delete is an error; Ctrl+C finishes the files in progress; each wizard task remembers its own values; cjxl's threads shared among the encodes and the Explorer thumbnail made from the image in memory, faster with the same files; everything in v2.31.0-rc4 |
 | [v2.31.0-rc4](#v2310-rc4) | 2026-11-22 | Pre-release. A tool's error message on one line with its whole cause; a TMP of 261 characters or more refused (on Windows such a process hangs when it starts any program); `jxl_photo.py encode` and the other script commands start 35–40 ms sooner; everything in v2.31.0-rc3 |
 | [v2.31.0-rc3](#v2310-rc3) | 2026-11-22 | Pre-release. ExifTool kept open and the decoder's TIFF metadata written once: archiving, decoding and deleting runs 18–22 % faster; EXIF values copied exactly; `--serve` for programs that convert file by file; the failed files repeated at the end; a temp folder with `%` refused; a known-issues page; everything in v2.31.0-rc2 |
 | [v2.31.0-rc2](#v2310-rc2) | 2026-11-20 | Pre-release. sRGB copies (`--output-icc`) converted in Python and handed to cjxl in memory: 8–38 % faster depending on the temp folder's disk, the same copies; everything in v2.31.0-rc1 |
@@ -115,10 +116,140 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.31.0-rc6
+
+**Released 2026-11-22, the sixth test release (pre-release) of v2.31.0**;
+the last stable release is [v2.30.2](#v2302). Everything in
+[v2.31.0-rc5](#v2310-rc5) is in it. The fixes of a second independent sweep,
+of rc5 (Fable's, every reproduction run again before it was cited, the wizard
+read by two more agents): 17 bugs, #712–#728 — one of them rc5's own, most of
+the others in the wizard — and the plain recompression made faster. What to
+check is in [upgrading](upgrading.md); the masters rc5 wrote wrong are in
+[known issues](known_issues.md).
+
+**rc5's own bug.**
+- **A later page of a multi-page TIFF turned upside down (#713).** rc5's fix
+  for the EXIF of a later page (#696, review N1: `-IFD0:all<IFDn:all#`)
+  copied the page's values through their printed form: Orientation 1 (or 8)
+  matched "Rotate 180" (3), any other value gave page 0's, and the page's
+  ResolutionUnit was page 0's. The values go across as numbers on both sides
+  now (`-IFD0:all#<IFDn:all#`), in a `%` folder too — where page 2 and after
+  had taken other pages' values since #696 (page 0's Orientation and
+  resolution, page 1's Make, Artist, PageNumber…): the MIE container of such a
+  path holds a TIFF's IFD0 and IFD1 only, so the page's values are put in its
+  IFD0 and copied from there (the reviews' S5 and second S2). The masters of pages 1 and after that rc5 wrote can carry
+  wrong values — mostly camera TIFFs with a thumbnail page; the whole TIFF the
+  decoder rebuilds was right (it takes its tags from page 0), so a backup
+  restored by photo-backup was not concerned. The known-issues command lists
+  every such master. The real-photo battery checks each page's Orientation
+  and ResolutionUnit now (it did not, which is how rc5 shipped it).
+
+**Manifests.**
+- **The "no" to deleting already-converted originals reaches every row
+  (#712).** Each row's options were a copy of the run's made before the
+  question, so every child got `--delete-skipped` after "Already-converted
+  originals will be KEPT", and deleted them (each with its provenance mark).
+  The rows' options are made again after the answer. Already in rc4.
+- **Two file rows of one folder with one stem are a collision (#715):**
+  `a.tif` and `a.tiff` both write `a.jxl`, and the walk was skipped because a
+  file Source counted as its own tree. Its tree is its folder now.
+- **A mode-2 Destination inside its Source (#723).** The recompressor puts the
+  JXLs already in that folder back on themselves; its own HHMM came up in the
+  middle of the manifest, and unattended the row was "Cancelled" while the run
+  exited 0. The wizard asks the recompressor's own plan for such a row (its
+  in-place confirmation up front, refused unattended), and a cancelled row of
+  an unattended manifest is no success. The same test decides a direct run's,
+  a repeat's and a preset's confirmation (`_jxl_run_replaces_in_place`): the
+  first version of this fix sent such a direct run `--delete-confirm-off`
+  without asking anything (the review's M1, never released). Each manifest
+  row keeps the in-place answer its confirmation covered (`_in_place_planned`:
+  a row whose Destination an EARLIER row had just filled got the flag with no
+  confirmation, the second review's S1), and a derivative or a rename in such
+  a layout is refused before the token (N1); the folders are compared through
+  junctions and 8.3 short names (N5).
+- **A missing Source is that row's error (#724).** It stopped every other row
+  with a message calling it a wizard bug; now the other rows run and the run
+  ends with an error (the owner's call). A CSV saved with `;` between its
+  columns is refused when it loads, naming the separator; a cell over 128 KB
+  is a message, not a traceback (#726).
+
+**The wizard.**
+- **Menu S reaches the jobs of the same session (#716):** each script applied
+  the overlay when the wizard imported it, and the wizard sent the old value
+  on the command line. Menu S applies the file again to the loaded scripts
+  (`_refresh_child_overlays`, from the values they had before the overlay;
+  the other tools' folder names are read again, the review's S3). The suite
+  puts those values back after every test (the review's S2: a menu-S test
+  had left its setting for the next test of its worker).
+- **Menu 9 (#718, #719, #728):** the TIFF → JXL distance changes the last job
+  only when that job archived TIFFs (a JXL → JXL repeat ran at it); a new
+  staging folder, or "none", reaches the next job; "Confirm before delete?",
+  saved and read by nothing, is gone.
+- **Presets and repeats (#717, #720, #721):** an auto JPEG export no longer
+  becomes the memory of "Get the original JPEGs back" (two tasks share that
+  conversion; it happened with rc5's own configs too, until a recovery had
+  run); a mode-6/7 job saves the export marker it ran with (the owner's call);
+  a mode-2 repeat compares its folder as a path and shows its output folder.
+- **A `--delete-source` typed in the expert flags counts like [D] (#725,** the
+  owner's call**):** the option rules see it, the overwrite guard a task
+  remembered as "off" stays on (said), `--no-overwrite-guard` or a derivative
+  flag next to it is refused before the HHMM, and so is a manifest whose rows
+  cannot all delete (use [D] there: the wizard leaves the delete out of those
+  rows). Each of these was refused by the script after the token. The option
+  rules read every registry option typed in the flags, by the child's own
+  parse (`_flags_set_options`: `--restamp-then-sync`, `--exiftool-ignore-minor`
+  typed there, the review's S1), the decoder's `--none` counts like its decode
+  mode, the JPEG → JXL convert's `--icc-profile`/`--resize-*` too, and a
+  profile on the bit-exact route, which ignores it, is not refused (N3); a
+  maintenance mode typed there (`--restamp-moved`,
+  `--refresh-explorer-thumbnails`) is refused next to a delete, and a lone
+  `--delete-skipped` conflicts with nothing (the second review's N3, N2). The review
+  names where such a delete comes from, and a [D] manifest whose every row
+  loses its delete asks no "will be DELETED" token.
+- **A distance typed as `nan` (#727)** was 0, lossless, without a word.
+
+**Copies and thumbnails.**
+- **The transcoder's copies of an RGB+IR scan (#714):** a resized, sharpened
+  or colour-converted JPEG/PNG weighted its colour by the infrared (taken as
+  alpha) and a PNG copy carried it as transparency. Every transcoder
+  derivative leaves it out now, with its `jxlphoto-extrasamples` marker; a
+  faithful decode keeps the JXL's channels (the owner's call). #695 had fixed
+  the recompressor.
+- **The Explorer thumbnail made from the file (#722)** of a lossy master whose
+  profile is in XMP only (the encoder's "skip") was in the wrong colours. A
+  decode in the file's own space takes the carried profile when it fits the
+  pixels, as the transcoder's direct decode does (#568); djxl now always
+  writes `--orig_icc_out` for the thumbnail (a few hundred bytes).
+
+**Speed.**
+- **The plain recompression shares the cores too (P1).** rc5 gave each
+  derivative's cjxl its share of the cores (`--num_threads`, V1) but not the
+  plain JXL → JXL recompression's. Measured by the sweep on C: with the PC
+  quiet, 40 masters d=0.1 → d=1 e7, 8 workers, three runs each: 23.3 → 19.7 s
+  (−15 %), the 40 codestreams identical.
+
+**Left as it is.** A preset saved before rc5 can still replay the [D] answers
+#706 stopped saving (`--provenance adopt`); the owner's presets are clean, and
+a new save of the preset clears them.
+
+**Verification.** With libjxl 0.13.0: 4526 tests pass (1 skipped); the
+real-photo battery passes all 183 checks, one of them new (each page's
+master keeps its page's Orientation and ResolutionUnit — rc5 fails it on the
+real Fuji and NX Studio TIFFs), in folders named with Japanese characters,
+`[ ]`, a space and `%`. A side-by-side run against rc5 on real photos
+differs only in the version written into the logs and into each file's
+history. photo-backup's contract test passes (33, JP-1 to JP-24). Every fix
+has a test that fails without it. Two independent reviews (Opus) checked the
+fixes: the first found one must-fix (the first version of #723's fix let a
+direct mode-2 run replace files in place without asking) and five should-fix
+items; the second, of those fixes, found no must-fix and two should-fix
+items (#723 in a manifest chain, the rest of #713's `%` case). All are fixed.
+
 ## v2.31.0-rc5
 
-**Released 2026-11-22, the fifth test release (pre-release) of v2.31.0**;
-the last stable release is [v2.30.2](#v2302). Everything in
+**Released 2026-11-22, the fifth test release (pre-release) of v2.31.0**,
+superseded by [v2.31.0-rc6](#v2310-rc6) the same day; the last stable
+release is [v2.30.2](#v2302). Everything in
 [v2.31.0-rc4](#v2310-rc4) is in it. The fixes of an independent full sweep of
 rc4 (Fable's, its reproduction scripts run on real photos in hostile
 folders): 22 bugs, #690–#711, most of them unusual combinations, three that

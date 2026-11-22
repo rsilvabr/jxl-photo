@@ -10,7 +10,8 @@ as [GitHub Releases](https://github.com/rsilvabr/jxl-photo/releases).
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.31.0-rc5](version_history.md#v2310-rc5)** | 2026-11-22 | Pre-release. Safer deletes in a few unusual setups; a failed check before a delete is an error; Ctrl+C finishes the files in progress; each wizard task remembers its own values; faster archiving and sRGB copies, the same files; everything in v2.31.0-rc4 |
+| **[v2.31.0-rc6](version_history.md#v2310-rc6)** | 2026-11-22 | Pre-release. A later page of a multi-page TIFF no longer comes out turned upside down (rc5); a manifest's "no" to deleting converted originals reaches every row, and a missing Source no longer stops the other rows; settings changed in the wizard reach the next job; plain JXL → JXL recompression 15 % faster |
+| [v2.31.0-rc5](version_history.md#v2310-rc5) | 2026-11-22 | Pre-release. Safer deletes in a few unusual setups; a failed check before a delete is an error; Ctrl+C finishes the files in progress; each wizard task remembers its own values; faster archiving and sRGB copies, the same files; everything in v2.31.0-rc4 |
 | [v2.31.0-rc4](version_history.md#v2310-rc4) | 2026-11-22 | Pre-release. Error messages on one line with their whole cause; a TMP of 261 characters or more refused; `jxl_photo.py encode` and the other script commands start a little sooner; everything in v2.31.0-rc3 |
 | [v2.31.0-rc3](version_history.md#v2310-rc3) | 2026-11-22 | Pre-release. Archiving, decoding and deleting runs 18–22 % faster; exact EXIF values; a temp folder with `%` refused; the failed files listed again at the end; `--serve` for programs; a known-issues page; everything in v2.31.0-rc2 |
 | [v2.31.0-rc2](version_history.md#v2310-rc2) | 2026-11-20 | Pre-release. sRGB copies converted without ImageMagick or a temporary image: 8–38 % faster depending on the temp folder's disk, the same copies; everything in v2.31.0-rc1 |
@@ -46,6 +47,18 @@ as [GitHub Releases](https://github.com/rsilvabr/jxl-photo/releases).
 | [v2.17.0](version_history.md#v2170) | 2026-10-24 | Film scans archived lossless and never recompressed lossy unless asked; they keep what their scanner software needs (whole XMP, private tags); thumbnail pages kept by default, except Capture One's |
 
 Every release since v1.0: [version_history.md](version_history.md#release-history).
+
+## v2.31.0-rc6
+
+2026-11-22. The sixth test release (pre-release) of v2.31.0; the last stable release is [v2.30.2](version_history.md#v2302).
+
+- **A fix for rc5:** the JXL of page 1 and after of a multi-page TIFF (a camera TIFF's thumbnail page, for example) could come out with a wrong EXIF orientation ("Rotate 180", or the first page's). If you archived multi-page TIFFs with rc5, [known issues](known_issues.md) shows how to find those masters and redo them.
+- **Manifests:** a "no" to deleting already-converted originals reaches every row; a row whose Source is missing (a drive not plugged in) is an error of its own and the other rows still run; two file rows that would write one output are caught before the run.
+- **The wizard:** a setting changed in Settings reaches the next job of the same session; a preset keeps the export marker it ran with; a `--delete-source` typed in the expert flags gets the same checks as [D], before the confirmation.
+- **Smaller fixes:** the transcoder's resized copies of scans with an infrared channel, the colours of some Explorer thumbnails of lossy scans, and a few wizard edge cases.
+- **Faster:** a plain JXL → JXL recompression now shares the cores among its encodes too (40 masters with 8 workers: 23.3 → 19.7 s, the same files).
+
+[Technical notes](version_history.md#v2310-rc6)
 
 ## v2.31.0-rc5
 
