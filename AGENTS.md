@@ -1617,6 +1617,13 @@ must-fix / should-fix items and a commit verdict.
   rule, 2026-11-08): `> **Windows program, no Python needed:**
   [jxl-photo-exe](https://github.com/rsilvabr/jxl-photo-exe/releases/latest)
   — …`; the README says it right under "Current version" too.
+- **A final's notes compare it with the previous FINAL release, never with
+  its last test release** (owner's rule, 2026-11-23): the GitHub notes, the
+  README's "What's new", `whats_new.md` and the final's `version_history.md`
+  section say what changed since the last stable release (the rc sections
+  keep the per-test detail). A final's code is its last rc's, with the
+  version number only; it is still verified on real photos against the
+  previous final (old × new on the same copies) before it is tagged.
 - **Every release bumps `TOOLKIT_VERSION` in ALL FIVE scripts and in
   `jxl_photo_common.py`** (each script refuses a common module of another
   version), even when only one changed, to the version of the newest
