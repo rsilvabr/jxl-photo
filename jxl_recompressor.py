@@ -39,7 +39,7 @@ import numpy as np
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.31.0-rc7"
+TOOLKIT_VERSION = "2.31.0-rc8"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 
@@ -99,6 +99,31 @@ logger = logging.getLogger(_LOGGER_NAME)
 
 
 def _verify_jxl_integrity(*a, **k): return _common._verify_jxl_integrity(_G, *a, **k)
+
+
+_same_file_bytes = _common._same_file_bytes
+_run_with_ctrl_c_held = _common._run_with_ctrl_c_held
+
+
+def _is_bare_codestream(path) -> bool:
+    """A JXL with no container (FF 0A): another program's file — every output
+    the toolkit writes is a container. A file that cannot be read: False."""
+    try:
+        with open(path, "rb") as f:
+            return f.read(2) == b"\xff\x0a"
+    except OSError:
+        return False
+
+
+def _verbatim_copy_verified(src, copy) -> bool:
+    """A verbatim copy is proven by its bytes: the same size and MD5 as its
+    source (rc8, Fable's S2). The box walk of _verify_jxl_integrity refuses a
+    bare codestream by design — no output the toolkit WRITES is one — and so
+    refused another program's JXL copied as it is (an error on every run); a
+    container still gets the walk too."""
+    if not _same_file_bytes(src, copy):
+        return False
+    return _is_bare_codestream(copy) or _verify_jxl_integrity(Path(copy))
 
 
 _is_relative_to = _common._is_relative_to
@@ -161,6 +186,9 @@ _changed_since = _common._changed_since
 _CHANGED_IN_PLACE = ("the source changed while it was being re-encoded (another "
                      "program or run wrote it) — replacing it would overwrite "
                      "that newer version with a re-encode of the old one")
+_ORIGIN_UNREAD_IN_PLACE = ("its marks could not be read: the re-encode carries no "
+                           "jxlphoto-origin, which only this file can give it — "
+                           "kept as it is (run again once ExifTool reads it)")
 
 
 def _discard_in_place_temp(it) -> None:
@@ -182,6 +210,10 @@ def _discard_in_place_temp(it) -> None:
 # BEFORE the judgment, checked right before every swap. A path this run never
 # recorded (a direct caller, a test) is not checked. Cleared per run.
 _planned_outputs = {}
+# The inputs whose marks _read_origin_inputs could not read this run
+# (normcased absolute paths, rc8): their outputs carry no jxlphoto-origin, so
+# the delete gate keeps them (_origin_unread_of). Cleared per run.
+_ORIGIN_UNREAD = set()
 
 
 def _record_planned_outputs(*a, **k): return _common._record_planned_outputs(_G, *a, **k)
@@ -1206,10 +1238,66 @@ def _memory_capped_pipeline(requested, max_pixels, distance, effort,
 # about to write: those cannot belong to a live run (two writers on one output
 # is what the duplicate-output abort exists to stop). The temps of any other
 # output, and files without the 32-hex-digit prefix, are never touched.
-_ORPHAN_TEMP_RE = re.compile(r"^(?:[0-9a-f]{32}_)+(?:repair_)?(.+?)(?:\.tmp)+$")
+# rc8 (Fable's C5): ExifTool's own temp of one of ours, "<temp>_exiftool_tmp"
+# (left by an ExifTool killed while it rewrote the temp), is one too.
+_ORPHAN_TEMP_RE = re.compile(
+    r"^(?:[0-9a-f]{32}_)+(?:repair_)?(.+?)(?:\.tmp)+(?:_exiftool_tmp)?$")
 
 
 def _sweep_orphan_temps(*a, **k): return _common._sweep_orphan_temps(_G, *a, **k)
+
+
+# The second name an in-place group swap gives each original while the group
+# is replaced (_swap_group_in_place, rc8): <page name>.<8 hex>.jxlphoto-swap.
+_SWAP_LEFTOVER_RE = re.compile(r"^(?P<page>.+)\.[0-9a-f]{8}\.jxlphoto-swap$")
+
+
+def _sweep_swap_leftovers(finals) -> None:
+    """The second names a killed in-place group swap left beside these outputs
+    (the review of rc8's fixes, M1). One that is the same file as its page (the
+    run died before the page was replaced) is removed; one that is another file
+    — the original of a page that was replaced — is named at WARNING and never
+    touched: the document may be in two generations, and only the user can
+    tell which pages to put back."""
+    folders = {Path(str(f)).parent for f in finals if f is not None}
+    for folder in folders:
+        try:
+            entries = list(os.scandir(folder))
+        except OSError:
+            continue
+        for e in entries:
+            m = _SWAP_LEFTOVER_RE.match(e.name)
+            if not m:
+                continue
+            try:
+                if not e.is_file(follow_symlinks=False):
+                    continue
+            except OSError:
+                continue
+            page = Path(folder) / m.group("page")
+            try:
+                same = page.exists() and os.path.samefile(e.path, str(page))
+            except OSError:
+                same = False
+            if same:
+                try:
+                    os.unlink(e.path)
+                    logger.info(f"Removed {e.name}: a second name of {page.name} left by "
+                                f"an interrupted in-place recompression")
+                except OSError as exc:
+                    logger.warning(f"Could not remove {e.path}, a second name of "
+                                   f"{page.name} ({exc})")
+            elif page.exists():
+                logger.warning(f"{e.path} is the original of {page.name}, kept by an "
+                               f"in-place recompression that was interrupted: "
+                               f"{page.name} is its re-encode. If the pages of that "
+                               f"document are now in two generations, rename this file "
+                               f"back over {page.name}; otherwise delete it")
+            else:
+                logger.warning(f"{e.path} is the original of {page.name}, kept by an "
+                               f"in-place recompression that was interrupted, and "
+                               f"{page.name} is missing: rename this file back to "
+                               f"{page.name}")
 
 
 def _abort_on_duplicate_outputs(*a, **k): return _common._abort_on_duplicate_outputs(_G, *a, **k)
@@ -2250,6 +2338,49 @@ def _is_own_output_path(parts_lower) -> bool:
                for p in parts_lower)
 
 
+def _has_source_near(path: Path, folder_index: int, suffix: str, cache: dict) -> bool:
+    """Is there a source for `path`, which sits in the folder path.parts[
+    folder_index] (or below it), where a mode writing that folder would have
+    read it: beside the folder (modes 1/3: <A>/<folder>/x from <A>/x) or in a
+    sibling folder (modes 4-7: <P>/<folder>/rel from <P>/<sibling>/rel)? The
+    source's suffix is `suffix`. For the custom-name warning only (rc8, the
+    review of the S5 fix: a folder of this tool's own outputs is the common
+    case, and must not warn on every run). `cache` keeps the sibling folders
+    of each parent. A folder that cannot be read: True (no warning)."""
+    try:
+        folder = Path(*path.parts[:folder_index + 1])
+        rel = Path(*path.parts[folder_index + 1:]).with_suffix(suffix)
+        parent = folder.parent
+        if (parent / rel).exists():
+            return True
+        sibs = cache.get(parent)
+        if sibs is None:
+            sibs = [e.path for e in os.scandir(parent)
+                    if e.is_dir(follow_symlinks=False)
+                    and os.path.normcase(e.path) != os.path.normcase(str(folder))]
+            cache[parent] = sibs
+        return any((Path(sp) / rel).exists() for sp in sibs)
+    except OSError:
+        return True
+
+
+def _custom_output_folder(parts_lower):
+    """The folder name that ALONE makes _is_own_output_path skip these parts
+    when only a custom setting (changed from its shipped name) names it, else
+    None (rc8, Fable's S5): a folder of the user's own may carry that name —
+    JXL_FOLDER_NAME = "JXL" hid every master in a "JXL" folder, and
+    JXL_SUFFIX_REPLACE = "JXL" every folder ending in "_JXL". The skip stays
+    (#710: a second run took the first run's outputs as sources); the finder
+    says it at WARNING."""
+    shipped_suffix = "_jxl_small"
+    if any(p in _RECOMPRESSOR_OUTPUT_FOLDERS or p.endswith(shipped_suffix)
+           for p in parts_lower):
+        return None
+    own = _own_output_folder_names()
+    suffix = "_" + JXL_SUFFIX_REPLACE.lower()
+    return next((p for p in parts_lower if p in own or p.endswith(suffix)), None)
+
+
 def _iter_jxls(*a, **k): return _common._iter_jxls(_G, *a, **k)
 
 
@@ -2263,6 +2394,7 @@ def find_jxls_recursive(input_path: Path):
     # root itself: pointing the run AT a "recompressed_jxl" folder to compress
     # it again is a legitimate use, and the files there are its direct content.
     filtered = []
+    custom_hits, sib_cache = {}, {}
     for f in raw:
         try:
             below = [p.lower() for p in f.relative_to(input_path).parts[:-1]]
@@ -2270,6 +2402,11 @@ def find_jxls_recursive(input_path: Path):
             below = [p.lower() for p in f.parts[:-1]]
         if not _is_own_output_path(below):
             filtered.append(f)
+            continue
+        _c = _custom_output_folder(below)
+        if _c and not _has_source_near(f, len(f.parts) - 1 - len(below) + below.index(_c),
+                                       f.suffix, sib_cache):
+            custom_hits[_c] = custom_hits.get(_c, 0) + 1
     skipped = len(raw) - len(filtered)
     if skipped:
         # Name the suffix too: with item 16's fix a folder like
@@ -2280,6 +2417,14 @@ def find_jxls_recursive(input_path: Path):
                     f"({', '.join(sorted(_own_output_folder_names()))}, "
                     f"or any folder ending in _{JXL_SUFFIX_REPLACE}) — "
                     f"those are this tool's own outputs")
+    if custom_hits:
+        logger.warning(
+            f"{sum(custom_hits.values())} JXL(s) left out in folder(s) named "
+            f"{', '.join(sorted(custom_hits))}, with no source beside them that they could "
+            f"be made from: this script's settings name that folder as its own output "
+            f"(CONVERTED_JXL_FOLDER, JXL_FOLDER_NAME, JXL_SUFFIX_REPLACE or EXPORT_JXL_FOLDER, "
+            f"changed from the shipped name). If they are your own files, point the run at "
+            f"that folder or give the setting another name.")
     return filtered
 
 
@@ -3127,6 +3272,7 @@ def _decode_in_memory_for_derivative(jxl_path: Path, icc_args: list,
 
 
 def _read_origin_inputs(*a, **k): return _common._read_origin_inputs(_G, *a, **k)
+def _origin_unread_of(*a, **k): return _common._origin_unread_of(_G, *a, **k)
 
 
 _origin_for_output = _common._origin_for_output
@@ -3576,8 +3722,9 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
             write_path.parent.mkdir(parents=True, exist_ok=True)
             output_dirty = True
             shutil.copy2(str(jxl_path), str(write_path))
-            if not _verify_jxl_integrity(write_path):
-                raise RuntimeError("copied file failed the JXL integrity check")
+            if not _verbatim_copy_verified(jxl_path, write_path):
+                raise RuntimeError("the copy is not the source byte for byte (size/MD5), "
+                                   "or failed the JXL integrity check")
             logger.info(f"[{n}/{total}] COPY | {jxl_path.name} -> {final_path.name}")
             return (str(jxl_path), "copied", str(final_path))
 
@@ -3612,8 +3759,9 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
                                 f"| {jxl_path.name}")
                     return (str(jxl_path), "skipped", str(final_path))
                 shutil.copy2(str(jxl_path), str(write_path))
-                if not _verify_jxl_integrity(write_path):
-                    raise RuntimeError("copied file failed the JXL integrity check")
+                if not _verbatim_copy_verified(jxl_path, write_path):
+                    raise RuntimeError("the copy is not the source byte for byte "
+                                       "(size/MD5), or failed the JXL integrity check")
                 logger.info(f"[{n}/{total}] COPY (lossy ICC blob) | {jxl_path.name} "
                             f"-> {final_path.name}")
                 return (str(jxl_path), "copied", str(final_path))
@@ -3725,8 +3873,10 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
                         logger.info(f"[{n}/{total}] SKIP (not smaller, original kept) | {jxl_path.name}")
                         return (str(jxl_path), "skipped", str(final_path))
                     shutil.copy2(str(jxl_path), str(write_path))
-                    if not _verify_jxl_integrity(write_path):
-                        raise RuntimeError("kept-smaller copy failed the JXL integrity check")
+                    if not _verbatim_copy_verified(jxl_path, write_path):
+                        raise RuntimeError("the kept-smaller copy is not the source byte "
+                                           "for byte (size/MD5), or failed the JXL "
+                                           "integrity check")
                     status = "copied"
                     logger.info(f"[{n}/{total}] COPY (not smaller) | {jxl_path.name}")
             except OSError:
@@ -3849,6 +3999,16 @@ def process_group(items, workers: int):
             _error_details[src_str] = _CHANGED_IN_PLACE
             logger.error(f"  REPLACE REFUSED, source kept | {final_path.name} | "
                          f"{_CHANGED_IN_PLACE}")
+            return
+        if _origin_unread_of(it["src"]):
+            # rc8 (W3 in place, the review of rc8's fixes): replacing the
+            # source is deleting it — its re-encode has no jxlphoto-origin,
+            # and only this file can give it one.
+            _discard_in_place_temp(it)
+            results[src_str] = ("error", str(final_path))
+            _error_details[src_str] = _ORIGIN_UNREAD_IN_PLACE
+            logger.error(f"  REPLACE REFUSED, source kept | {final_path.name} | "
+                         f"{_ORIGIN_UNREAD_IN_PLACE}")
             return
         if staging_used:
             # Same .tmp rule as the in-place write temps: if the promotion
@@ -3989,15 +4149,183 @@ def process_group(items, workers: int):
                         f"of the same multi-page document changed during the run "
                         f"— no page of the group was replaced")
             return
-        for it in ready:
-            try:
-                _replace_in_place(it, Path(str(it["final"])))
-            except Exception as e:
-                # Runs in THIS thread, outside convert_one's own try: an
-                # unexpected failure must settle the item, not kill the run.
+        try:
+            _swap_group_in_place(ready)
+        except Exception as e:
+            # Runs in THIS thread, outside convert_one's own try: an
+            # unexpected failure must settle the items, not kill the run.
+            for it in ready:
                 results[str(it["src"])] = ("error", str(it["final"]))
                 _error_details[str(it["src"])] = f"promotion failed: {e}"
                 logger.error(f"  PROMOTION FAILED | {it['src'].name} | {e}")
+
+    def _swap_group_in_place(ready):
+        """Replace every page of a group, or none (rc8, Fable's W2: a page that
+        could not be swapped — open in a viewer, a failed copy out of staging
+        — left its siblings replaced, one document in two generations, and
+        every later run held it that way).
+        1) Each verified re-encode into its destination folder (#572's check
+           for a copy out of staging: size, MD5, integrity) — nothing replaced.
+        2) Right before the swap, every page must still be the file this run
+           read (#559) and its marks must have been read (#753): else the
+           group is held.
+        3) Page by page, with Ctrl+C held (_run_with_ctrl_c_held): the original
+           keeps a second name, <name>.<id>.jxlphoto-swap — a hard link, so
+           the page's own name never goes missing (a rename where a volume
+           has no hard links) —, and the re-encode takes the page's name. Any
+           failure, of any kind, puts every original back.
+        4) The second names are removed. A run killed in step 3 leaves one:
+           the next run removes it when it is a second name of the same file
+           and names it otherwise (_sweep_swap_leftovers; the review of rc8's
+           fixes, M1)."""
+        prepared = []           # (it, final, the new file in the destination folder)
+
+        def _drop_prepared():
+            for it2, _f2, new2 in prepared:
+                if new2 != it2["write"]:
+                    try:
+                        new2.unlink()
+                    except OSError:
+                        pass
+
+        def _held(failed):
+            """failed: {source path: why}; the others are held with it."""
+            _drop_prepared()
+            why_all = "; ".join(sorted(set(failed.values())))
+            for it2 in ready:
+                _discard_in_place_temp(it2)
+                s2 = str(it2["src"])
+                if s2 in failed:
+                    results[s2] = ("error", str(it2["final"]))
+                    _error_details[s2] = failed[s2]
+                    logger.error(f"  REPLACE FAILED, group kept | {it2['src'].name} | "
+                                 f"{failed[s2]}")
+                else:
+                    results[s2] = ("skipped", str(it2["final"]))
+                    logger.warning(f" GROUP HELD IN PLACE | {it2['src'].name} | a sibling "
+                                   f"page of the same multi-page document could not be "
+                                   f"replaced ({why_all}) — no page of the group was "
+                                   f"replaced")
+
+        # 1) Every re-encode in its destination folder, verified.
+        for it in ready:
+            final = Path(str(it["final"]))
+            new = Path(str(it["write"]))
+            if new.parent == final.parent:
+                prepared.append((it, final, new))
+                if not _verify_jxl_integrity(new):
+                    _held({str(it["src"]): "the re-encode failed its integrity check"})
+                    return
+                continue
+            # Same .tmp rule as the in-place write temps: a temp left behind
+            # must not be adoptable as a NEW input.
+            dest = final.parent / f"{uuid.uuid4().hex}_{final.stem}.tmp"
+            try:
+                size, md5 = new.stat().st_size, md5_of_file(new)
+                shutil.move(str(new), str(dest))
+                ok = (dest.stat().st_size == size and md5_of_file(dest) == md5
+                      and _verify_jxl_integrity(dest))
+            except OSError:
+                ok = False
+            prepared.append((it, final, dest))
+            if not ok:
+                _held({str(it["src"]): "the copy out of staging is not the verified "
+                                       "re-encode (size/MD5/integrity)"})
+                return
+
+        # 2) Still the files this run read, and their marks read.
+        failed = {}
+        for it, _final, _new in prepared:
+            if _source_changed_since_read(it["src"]):
+                failed[str(it["src"])] = _CHANGED_IN_PLACE
+            elif _origin_unread_of(it["src"]):
+                failed[str(it["src"])] = _ORIGIN_UNREAD_IN_PLACE
+        if failed:
+            _held(failed)
+            return
+
+        # 3) Page by page, Ctrl+C held: the original keeps a second name.
+        baks = [final.with_name(f"{final.name}.{uuid.uuid4().hex[:8]}.jxlphoto-swap")
+                for _it, final, _new in prepared]
+        logger.info(f"  In-place swap of a {len(prepared)}-page document: until every "
+                    f"page is replaced, each original keeps a second name "
+                    f"({', '.join(b.name for b in baks)})")
+        swapped = []            # (final, its original's second name)
+        state = {"failed": None}
+
+        def _put_back():
+            for f2, b2 in reversed(swapped):
+                try:
+                    os.replace(str(b2), str(f2))       # the original back, over the new one
+                except OSError as e2:
+                    logger.error(f"  The original of {f2.name} is {b2.name}: rename it "
+                                 f"back over {f2.name} ({e2})")
+            swapped.clear()
+
+        def _swap_all():
+            try:
+                for (it, final, new), bak in zip(prepared, baks):
+                    try:
+                        os.link(str(final), str(bak))
+                        linked = True
+                    except OSError:
+                        try:
+                            os.replace(str(final), str(bak))   # no hard links here
+                        except OSError as e:
+                            state["failed"] = (it, str(e))
+                            return
+                        linked = False
+                    try:
+                        os.replace(str(new), str(final))
+                    except OSError as e:
+                        if linked:
+                            try:
+                                os.unlink(str(bak))
+                            except OSError as e2:
+                                logger.warning(f"  {bak.name} is a second name of {final.name} "
+                                               f"(the same file): the next run removes it "
+                                               f"({e2})")
+                        else:
+                            try:
+                                os.replace(str(bak), str(final))
+                            except OSError as e2:
+                                logger.error(f"  The original of {final.name} is {bak.name}: "
+                                             f"rename it back ({e2})")
+                        state["failed"] = (it, str(e))
+                        return
+                    swapped.append((final, bak))
+                    if not _verify_jxl_integrity(final):
+                        state["failed"] = (it, "the replaced file failed the final "
+                                               "integrity check")
+                        return
+            except BaseException:
+                _put_back()
+                raise
+
+        def _swap_and_settle():
+            # Everything up to the group's last line runs in the hold: a press
+            # handed on afterwards finds the group settled either way.
+            _swap_all()
+            if state["failed"] is not None:
+                _put_back()
+                it_f, why = state["failed"]
+                _held({str(it_f["src"]): why})
+                return
+            # 4) The second names removed; the staged re-encodes went with the move.
+            for _f2, b2 in swapped:
+                try:
+                    b2.unlink()
+                except OSError as e:
+                    logger.warning(f"  Could not remove {b2.name}, the old page's second "
+                                   f"name (the new one is in place; the next run removes "
+                                   f"it): {e}")
+            for it, final, _new in prepared:
+                promoted.add(str(it["src"]))
+                logger.info(f" REPLACED (in place) | {final.name}")
+
+        _run_with_ctrl_c_held(
+            _swap_and_settle, on_deferred=lambda: logger.warning(
+                "  Ctrl+C waited until this document's pages were all replaced"))
 
     def _settle_in_place(it, converted: bool) -> None:
         """Called once per settled in-place item (converted or not). A single
@@ -4463,6 +4791,14 @@ def _delete_gate(items, results, promoted):
                               "not converted in this run", False))
             continue
         ok, reason = True, ""
+        if _interrupted():
+            # A Ctrl+C keeps every source (#702), so none of the checks below
+            # — a round-trip decode each — is worth starting (the review of
+            # rc8's fixes: the gate ran inside the handler, and one press no
+            # longer stopped it before the decodes).
+            decisions.append((it, status, final_path, False,
+                              "interrupted with Ctrl+C", True))
+            continue
         _replaced = (_changed_since_promoted(src_str, final_path)
                      if processed_this_run else None)
         if _source_changed_since_read(src):
@@ -4471,10 +4807,20 @@ def _delete_gate(items, results, promoted):
             ok, reason = False, "output missing"
         elif _replaced:
             ok, reason = False, _replaced                   # #618
-        elif not _verify_jxl_integrity(final_path):
+        elif not (((it["action"] == "copy" or status == "copied")
+                   and _is_bare_codestream(final_path))
+                  or _verify_jxl_integrity(final_path)):
+            # A verbatim copy of another program's bare codestream: the box
+            # walk cannot read one (and would log a refusal), and the MD5
+            # against its source below is the proof (rc8, S2).
             ok, reason = False, "output failed integrity check"
         elif not _flush_to_disk(final_path):
             ok, reason = False, "output could not be flushed to disk"   # #617
+        elif _origin_unread_of(src):
+            # rc8 (Fable's W3): the re-encode got no jxlphoto-origin, and only
+            # this file can give it one; a page kept so keeps its group.
+            ok, reason = False, ("its marks could not be read: its re-encode carries no "
+                                 "jxlphoto-origin, which only this file can give it")
         elif it["action"] == "copy" or status == "copied":
             # A verbatim copy is provable byte-for-byte — the strongest gate
             # there is, so it is required, not optional. Status "copied" covers
@@ -4560,10 +4906,17 @@ def _delete_gate(items, results, promoted):
                      for _g, members in by_group.items() if _g in _short
                      for m in members}
 
-    # Pass 3: apply.
-    for it, status, final_path, ok, reason, settled in decisions:
+    # Pass 3: apply. A multi-page group's deletes run with Ctrl+C held
+    # (_run_with_ctrl_c_held): a press during them waits until the group is
+    # done (rc8, Fable's W1: one press cut a group, and every later run kept
+    # the rest "for good"), then a first one stops the run and a second one
+    # raises. A press before the group keeps it whole (_interrupted).
+    group_of = {str(m[0]["src"]): _g for _g, members in by_group.items()
+                if len(members) > 1 for m in members}
+
+    def _apply(it, status, final_path, ok, reason, settled):
         if not settled:
-            continue
+            return
         if ok and _interrupted():
             # #702 (review S2): no source is deleted after a Ctrl+C (the
             # recompressor used to run its gate after one, as in rc4).
@@ -4583,7 +4936,7 @@ def _delete_gate(items, results, promoted):
         if not ok:
             _delete_stats["kept"] += 1
             logger.warning(f" KEEP ({reason}) | {src.name}")
-            continue
+            return
         try:
             src.unlink()
             if status == "skipped":
@@ -4595,6 +4948,22 @@ def _delete_gate(items, results, promoted):
             logger.error(f" DELETE FAILED | {src.name} | {e}")
             _delete_stats["kept"] += 1
 
+    done = set()
+    for _d in decisions:
+        _s = str(_d[0]["src"])
+        if _s in done:
+            continue
+        _grp = group_of.get(_s)
+        if _grp is None:
+            done.add(_s)
+            _apply(*_d)
+            continue
+        _members = [x for x in decisions if group_of.get(str(x[0]["src"])) == _grp]
+        done.update(str(x[0]["src"]) for x in _members)
+        _run_with_ctrl_c_held(
+            lambda _m=_members: [_apply(*x) for x in _m],
+            on_deferred=lambda: logger.warning(
+                "  Ctrl+C waited until this group's deletes were done"))
 
 def _preflight_space(items):
     """Advisory free-space check: the destination volume should hold the worst
@@ -5236,7 +5605,9 @@ def _configure_run(parser, args):
                                     ALLOW_UPSCALE, SHARPEN)
     _der_what = "--output-icc" if OUTPUT_ICC else "--resize-*/--sharpen"
 
-    if DERIVATIVE and (DELETE_SOURCE or args.delete_skipped):
+    # A lone --delete-skipped deletes nothing (the warning above): never
+    # refused for it (rc8, Fable's S3).
+    if DERIVATIVE and DELETE_SOURCE:
         parser.error(f"{_der_what} writes a derivative, it never replaces or deletes "
                      f"the source: drop --delete-source")
     if DERIVATIVE and VERIFY_ROUNDTRIP:
@@ -5511,6 +5882,7 @@ def main():
     # not — in particular --staging must not erase a configured TEMP2_DIR.
     for _gname, _gvalue in _RUN_DEFAULTS.items():
         globals()[_gname] = _gvalue
+    _ORIGIN_UNREAD.clear()              # per run (the delete gate, W3)
 
     _utf8_console()      # before argparse prints anything (#661)
     parser = build_parser()
@@ -5825,6 +6197,7 @@ def main():
     if not args.dry_run:
         _sweep_orphan_temps(it["final"] for it in items
                             if _action_writes(it["action"]))
+        _sweep_swap_leftovers(it["final"] for it in items if it.get("in_place"))
         _record_planned_outputs((it["src"], it["final"]) for it in items
                                 if _action_writes(it["action"])
                                 and not it.get("in_place"))
@@ -6151,36 +6524,45 @@ def main():
 
     results, promoted = {}, set()
     interrupted = False
+    # #702: the first Ctrl+C stops the queue (no file starts after it) and lets
+    # the files in progress finish; a second one raises. The delete gate runs
+    # inside the same handler, as in the other three scripts (rc8, Fable's
+    # W1: it ran after the block, and one press during the deletes cut a
+    # multi-page group) — never a second entry, which would forget a press.
     try:
-        if work_items:
-            workers = args.workers
-            _slots = None
-            _to_encode = [it for it in work_items if it["action"] == "convert"]
-            if _to_encode:
-                workers, _slots = _memory_capped_pipeline(
-                    args.workers, max(it.get("pixels", 0) for it in _to_encode),
-                    CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING,
-                    cjxl_pixels=_largest_encode_pixels(_to_encode))
-            # The semaphore only matters when some workers must wait for a slot.
-            _set_cjxl_slots(_slots if _slots is not None and _slots < workers
-                            else None)
-            # #702: the first Ctrl+C stops the queue (no file starts after
-            # it) and lets the files in progress finish; a second one raises.
-            # V1: each of the cjxl running at once gets its share of the threads.
-            with _ctrl_c_finishes_the_run(), _cjxl_threads_while(min(
-                    _slots if _slots is not None and _slots < workers else workers,
-                    max(1, len(_to_encode)))):
-                results, promoted = process_group(work_items, workers)
+        with _ctrl_c_finishes_the_run():
+            try:
+                if work_items:
+                    workers = args.workers
+                    _slots = None
+                    _to_encode = [it for it in work_items if it["action"] == "convert"]
+                    if _to_encode:
+                        workers, _slots = _memory_capped_pipeline(
+                            args.workers, max(it.get("pixels", 0) for it in _to_encode),
+                            CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING,
+                            cjxl_pixels=_largest_encode_pixels(_to_encode))
+                    # The semaphore only matters when some workers must wait for a slot.
+                    _set_cjxl_slots(_slots if _slots is not None and _slots < workers
+                                    else None)
+                    # V1: each of the cjxl running at once gets its share of the threads.
+                    with _cjxl_threads_while(min(
+                            _slots if _slots is not None and _slots < workers else workers,
+                            max(1, len(_to_encode)))):
+                        results, promoted = process_group(work_items, workers)
+            except KeyboardInterrupt:
+                interrupted = True
+                logger.error("Interrupted (Ctrl+C) — finishing the summary with what is done.")
+                # Fall through to the summary with partial results; exit 130 below.
+            finally:
+                _set_cjxl_slots(None)
+
+            # EVERY planned item, not just the ones that ran: policy-skipped and
+            # refused pages must still veto the deletion of their multi-page siblings.
+            _delete_gate(items + provenance_refused, results, promoted)
     except KeyboardInterrupt:
         interrupted = True
-        logger.error("Interrupted (Ctrl+C) — finishing the summary with what is done.")
-        # Fall through to the summary with partial results; exit 130 below.
-    finally:
-        _set_cjxl_slots(None)
-
-    # EVERY planned item, not just the ones that ran: policy-skipped and
-    # refused pages must still veto the deletion of their multi-page siblings.
-    _delete_gate(items + provenance_refused, results, promoted)
+        logger.error("Interrupted (Ctrl+C) in the delete gate — no group was left half "
+                     "deleted; the summary follows with what is done.")
 
     # --- Summary -------------------------------------------------------------
     counts = _count_results(results)

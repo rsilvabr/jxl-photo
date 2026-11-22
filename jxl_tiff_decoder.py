@@ -38,7 +38,7 @@ import tifffile
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.31.0-rc7"
+TOOLKIT_VERSION = "2.31.0-rc8"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 
@@ -1034,7 +1034,10 @@ def next_count(*a, **k): return _common.next_count(_G, *a, **k)
 # about to write: those cannot belong to a live run (two writers on one output
 # is what the duplicate-output abort exists to stop). The temps of any other
 # output, and files without the 32-hex-digit prefix, are never touched.
-_ORPHAN_TEMP_RE = re.compile(r"^(?:[0-9a-f]{32}_)+(?:repair_)?(.+?)(?:\.tmp)+$")
+# rc8 (Fable's C5): ExifTool's own temp of one of ours, "<temp>_exiftool_tmp"
+# (left by an ExifTool killed while it rewrote the temp), is one too.
+_ORPHAN_TEMP_RE = re.compile(
+    r"^(?:[0-9a-f]{32}_)+(?:repair_)?(.+?)(?:\.tmp)+(?:_exiftool_tmp)?$")
 
 
 def _sweep_orphan_temps(*a, **k): return _common._sweep_orphan_temps(_G, *a, **k)
@@ -1072,14 +1075,20 @@ def extract_icc_from_xmp(jxl_path):
     """
     The original ICC profile the encoder carried in XMP: the
     jxlphoto-iccprofile token in dc:Relation, else (JXLs written up to
-    v2.18.x) the ICC:<base64> segment of CreatorTool. Returns ICC bytes or None.
+    v2.18.x) the ICC:<base64> segment of CreatorTool. Returns ICC bytes, or
+    None when the read SUCCEEDED and found none. A read that fails raises:
+    "cannot tell" is not "no profile" (#563's rule; rc8, Fable's L1 — it was
+    swallowed, the TIFF of a "skip" master came out with no ICC tag, OK, and
+    --delete-source deleted the JXL; the transcoder and the recompressor
+    already raise on the same read). The group is then an error, its JXLs kept.
     """
     try:
         creator, tokens = _read_creator_and_relation(Path(jxl_path))
         return _carried_icc(creator, tokens)
     except Exception as e:
-        logger.debug(f"XMP ICC extraction failed: {e}")
-    return None
+        raise RuntimeError(f"the profile this JXL carries in XMP could not be read "
+                           f"({e}) — nothing proves which profile its TIFF should "
+                           f"get") from e
 
 
 _xmp_icc_from_creator_tool = _common._xmp_icc_from_creator_tool
@@ -2074,7 +2083,10 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir,
                 # Same verdict as any other failed metadata step (#582): the
                 # TIFF may carry the JXL's internal tokens next to its own.
                 copied = False
-                logger.warning(
+                # ERROR, like every other failed copy step (rc8, Fable's C6:
+                # the file's only ERROR line said "see above", and a serve
+                # answer, which carries ERROR lines, had no cause).
+                logger.error(
                     f"  RELATION READ FAILED (exiftool rc={rr.returncode}) | "
                     f"{tiff_path.name} — the JXL's internal markers may stay in the TIFF")
             edit = []
@@ -2175,7 +2187,7 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir,
                 # skip: warn and fail the file, like a failed copy.
                 r_edit = res2[i_edit]
                 copied = False
-                logger.warning(
+                logger.error(
                     f"  PROVENANCE MARKER WRITE FAILED (exiftool rc={r_edit.returncode}) | "
                     f"{tiff_path.name} | "
                     f"{_stderr_tail(r_edit.stderr or r_edit.stdout or 'no output')} — "
@@ -3530,8 +3542,8 @@ def process_group(group_tasks, workers, target_icc=None):
         # #624: an output that did not reach its folder is an error, not "ok".
         results = [(r[0], "error",
                     f"MOVE FAILED: {Path(r[2]).name if len(r) > 2 else r[0]} did not "
-                    f"reach its folder (see MOVE FAILED above) — the file under that "
-                    f"name is the OLD one, and the source is kept")
+                    f"reach its folder cleanly (MOVE FAILED above says what the folder "
+                    f"holds now) — the source is kept")
                    if r[0] in failed_moves else r for r in results]
 
     # Any mode, not just 8: the mode decides where the TIFF lands, deleting the
@@ -3543,6 +3555,21 @@ def process_group(group_tasks, workers, target_icc=None):
         _delete_decoded_sources(results, tasks, moved_finals, use_staging)
 
     return results
+
+
+def _unlink_group_whole(entries, unlink_one) -> None:
+    """Run unlink_one on every entry of ONE group, a Ctrl+C pressed meanwhile
+    waiting until the group is done (rc8, Fable's C3: a second press raised
+    between two deletes — page 0 gone, pages 1-2 left — and every later
+    deleting run refused the group as "the marker of a DIFFERENT JXL"). The
+    presses are then handed to the run's own handler in order: a first one
+    latches the abort (no other group is deleted), a second one raises. Only
+    in the main thread (where handlers live); elsewhere as before
+    (_run_with_ctrl_c_held, common)."""
+    _common._run_with_ctrl_c_held(
+        lambda: [unlink_one(e) for e in entries],
+        on_deferred=lambda: logger.warning(
+            "  Ctrl+C waited until this group's deletes were done"))
 
 
 def _delete_decoded_sources(results, tasks, moved_finals, use_staging):
@@ -3824,20 +3851,27 @@ def _delete_decoded_sources(results, tasks, moved_finals, use_staging):
                                       + len(task.get("ignored_thumbs", [])))
             logger.warning(f" KEEP (interrupted with Ctrl+C) | {task['main_jxl'].name}")
             continue
-        for jxl_path, _, _, _, _, _, _ in task["entries"]:
+        _done = []
+
+        def _unlink_one(entry, _tag=_tag, was_skipped=was_skipped, _done=_done):
+            jxl_path = entry[0]
             try:
                 jxl_path.unlink()
                 # Named apart from a fresh delete: this source was cleared
                 # by a TIFF this run did not write.
                 logger.info(f" DELETED source{_tag} | {jxl_path.name}")
-                deleted += 1
+                _done.append(was_skipped)
                 _delete_stats["deleted"] += 1
                 if was_skipped:
-                    deleted_skipped += 1
                     _delete_stats["deleted_archived"] += 1
             except Exception as e:
                 _delete_stats["kept"] += 1
                 logger.warning(f" KEEP (could not delete) | {jxl_path.name}: {e}")
+        try:
+            _unlink_group_whole(task["entries"], _unlink_one)
+        finally:
+            deleted += len(_done)
+            deleted_skipped += sum(1 for w in _done if w)
     if deleted:
         _sk = f" ({deleted_skipped} already archived)" if deleted_skipped else ""
         logger.info(f" >Deleted {deleted} source JXL(s){_sk}")

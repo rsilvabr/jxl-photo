@@ -146,6 +146,12 @@ def test_t1_own_lossy_output_still_certifies_the_skip(tmp_path):
     r = _run("jxl_jpeg_transcoder.py", jxl, "--force-convert", *png, "--delete-source",
              "--delete-skipped", "--delete-confirm-off")
     assert r.returncode == 0, _out(r)
+    # rc8 (Fable's L2): an export the run did not write never deletes its
+    # master (it may have been edited since); one this run writes does.
+    assert jxl.exists(), _out(r)
+    r = _run("jxl_jpeg_transcoder.py", jxl, "--force-convert", *png, "--overwrite",
+             "--delete-source", "--delete-confirm-off")
+    assert r.returncode == 0, _out(r)
     assert not jxl.exists(), _out(r)
 
 

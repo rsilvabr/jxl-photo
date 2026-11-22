@@ -29,7 +29,7 @@ from PIL import Image
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.31.0-rc7"
+TOOLKIT_VERSION = "2.31.0-rc8"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 
@@ -161,6 +161,10 @@ _changed_since = _common._changed_since
 # BEFORE the judgment, checked right before every swap. A path this run never
 # recorded (a direct caller, a test) is not checked. Cleared per run.
 _planned_outputs = {}
+# The inputs whose marks _read_origin_inputs could not read this run
+# (normcased absolute paths, rc8): their outputs carry no jxlphoto-origin, so
+# the delete gate keeps them (_origin_unread_of). Cleared per run.
+_ORIGIN_UNREAD = set()
 
 
 def _record_planned_outputs(*a, **k): return _common._record_planned_outputs(_G, *a, **k)
@@ -1483,7 +1487,10 @@ def _log_discard_summary():
 # about to write: those cannot belong to a live run (two writers on one output
 # is what the duplicate-output abort exists to stop). The temps of any other
 # output, and files without the 32-hex-digit prefix, are never touched.
-_ORPHAN_TEMP_RE = re.compile(r"^(?:[0-9a-f]{32}_)+(?:repair_)?(.+?)(?:\.tmp)+$")
+# rc8 (Fable's C5): ExifTool's own temp of one of ours, "<temp>_exiftool_tmp"
+# (left by an ExifTool killed while it rewrote the temp), is one too.
+_ORPHAN_TEMP_RE = re.compile(
+    r"^(?:[0-9a-f]{32}_)+(?:repair_)?(.+?)(?:\.tmp)+(?:_exiftool_tmp)?$")
 
 
 def _sweep_orphan_temps(*a, **k): return _common._sweep_orphan_temps(_G, *a, **k)
@@ -1739,7 +1746,7 @@ _EXIFTOOL_POOL = _common._ExiftoolPool()
 # facts about the tools a serve process keeps on purpose; this script's
 # options a serve process refuses (maintenance modes).
 _SERVE_LOG = None
-_SERVE_FILE_CACHES = ("_content_id_cache", "_planned_outputs")
+_SERVE_FILE_CACHES = ("_content_id_cache", "_planned_outputs", "_ORIGIN_UNREAD")
 _SERVE_TOOL_FACTS = ("_EXIFTOOL_BATCH",)
 _SERVE_REFUSED = ("restamp_moved", "restamp_then_sync", "clear_icc_cache")
 # Per thread: while --verify-roundtrip checks every page (_VERIFY_EACH_PAGE),
@@ -4026,6 +4033,7 @@ def _restamp_moved(all_items, dry_run):
 
 
 def _read_origin_inputs(*a, **k): return _common._read_origin_inputs(_G, *a, **k)
+def _origin_unread_of(*a, **k): return _common._origin_unread_of(_G, *a, **k)
 
 
 _origin_for_output = _common._origin_for_output
@@ -4145,12 +4153,18 @@ def _mark_sync_same_bytes(items: list, dry_run: bool) -> int:
     if wanted:
         with ThreadPoolExecutor(max_workers=min(_SYNC_HASH_THREADS, len(wanted))) as pool:
             futures = {pool.submit(_file_content_id, cands[n][0]): n for n in wanted}
-            for done, fut in enumerate(as_completed(futures), 1):
-                try:
-                    digests[futures[fut]] = fut.result()
-                except OSError:
-                    digests[futures[fut]] = None
-                _batch_read_tick(prog, done)
+            try:
+                for done, fut in enumerate(as_completed(futures), 1):
+                    try:
+                        digests[futures[fut]] = fut.result()
+                    except OSError:
+                        digests[futures[fut]] = None
+                    _batch_read_tick(prog, done)
+            except BaseException:
+                # rc8 (Fable's C2): a Ctrl+C in the planning stops at once —
+                # the pool's exit waited for every hash still queued.
+                pool.shutdown(wait=False, cancel_futures=True)
+                raise
     proven = []
     for n, (t, j) in enumerate(cands):
         if _sync_same_bytes(t, j):
@@ -5861,9 +5875,9 @@ def process_group(group_items: list, workers: int, mode: int = 0):
     if failed_moves:
         # #624: an output that did not reach its folder is an error, not "ok".
         results = [(r[0], "error",
-                    f"MOVE FAILED: {Path(r[2]).name} did not reach its folder (see "
-                    f"MOVE FAILED above) — the file under that name is the OLD one, "
-                    f"and the source is kept", None)
+                    f"MOVE FAILED: {Path(r[2]).name} did not reach its folder cleanly "
+                    f"(MOVE FAILED above says what the folder holds now) — the source "
+                    f"is kept", None)
                    if r[0] in failed_moves else r for r in results]
 
     # Delete source TIFFs after confirmed encode, in ANY mode, only after staging.
@@ -5968,7 +5982,8 @@ def _check_worth_starting(tiff_key, tiff_results, skip_proof) -> bool:
     if not all(_gate_page_settled(r) for r in tiff_results):
         return False
     key = os.path.normcase(tiff_key)
-    if key in _discarded_real_page_sources or _unarchived_content_sources.get(key):
+    if (key in _discarded_real_page_sources or _unarchived_content_sources.get(key)
+            or _origin_unread_of(tiff_key)):
         return False
     return all(skip_proof.get((key, os.path.normcase(r[2])), False)
                for r in tiff_results if r[1] == "skipped")
@@ -6045,6 +6060,14 @@ def _delete_checked_sources(results_by_tiff, tasks, moved_finals, use_staging, c
             logger.warning(
                 f"  KEEP source ({_held}, which its JXL does not keep as they "
                 f"are — deleting would lose them) | {Path(tiff_key).name}")
+            continue
+        if _origin_unread_of(tiff_key):
+            # rc8 (Fable's W3): the master got no jxlphoto-origin, and only
+            # this TIFF can give it one (the class mark JP-17 reads).
+            _delete_stats["kept"] += 1
+            logger.warning(
+                f"  KEEP source (its marks could not be read: its JXL carries no "
+                f"jxlphoto-origin, which only this TIFF can give it) | {Path(tiff_key).name}")
             continue
 
         # All final JXLs must exist and pass integrity check
@@ -6351,11 +6374,65 @@ def _skip_decoder_output(parts_below_marker, honor_requested_subfolder: bool = T
                for b in parts_below_marker)
 
 
+def _custom_decoder_folder(parts_below_marker, honor_requested_subfolder: bool = True):
+    """The decoder folder name that ALONE makes _skip_decoder_output skip
+    these parts when it is a custom one (a decoder setting changed from its
+    shipped value), else None (rc8, Fable's S5). Such a name may be the
+    folder the user's own exports live in — a symmetric round trip,
+    _EXPORT/TIFF16 <-> _EXPORT/16B_JXL —, so the finders say it at WARNING;
+    the skip stays (a decoded TIFF archived again at a lossy distance loses
+    a generation)."""
+    requested = EXPORT_TIFF_SUBFOLDER.lower() if honor_requested_subfolder else ""
+    hits = [b for b in parts_below_marker if b in _DECODER_OUTPUT_FOLDERS and b != requested]
+    if not hits or any(b in _DECODER_DEFAULT_OUTPUT_FOLDERS for b in hits):
+        return None
+    return hits[0]
+
+
+def _has_source_near(path: Path, folder_index: int, suffix: str, cache: dict) -> bool:
+    """Is there a source for `path`, which sits in the folder path.parts[
+    folder_index] (or below it), where a mode writing that folder would have
+    read it: beside the folder (modes 1/3: <A>/<folder>/x from <A>/x) or in a
+    sibling folder (modes 4-7: <P>/<folder>/rel from <P>/<sibling>/rel)? The
+    source's suffix is `suffix`. For the custom-name warning only (rc8, the
+    review of the S5 fix: a folder of this tool's own outputs is the common
+    case, and must not warn on every run). `cache` keeps the sibling folders
+    of each parent. A folder that cannot be read: True (no warning)."""
+    try:
+        folder = Path(*path.parts[:folder_index + 1])
+        rel = Path(*path.parts[folder_index + 1:]).with_suffix(suffix)
+        parent = folder.parent
+        if (parent / rel).exists():
+            return True
+        sibs = cache.get(parent)
+        if sibs is None:
+            sibs = [e.path for e in os.scandir(parent)
+                    if e.is_dir(follow_symlinks=False)
+                    and os.path.normcase(e.path) != os.path.normcase(str(folder))]
+            cache[parent] = sibs
+        return any((Path(sp) / rel).exists() for sp in sibs)
+    except OSError:
+        return True
+
+
+def _warn_custom_decoder_folders(custom_hits) -> None:
+    """One WARNING for the TIFFs a custom decoder folder name left out."""
+    if custom_hits:
+        logger.warning(
+            f"{sum(custom_hits.values())} TIFF(s) left out in folder(s) named "
+            f"{', '.join(sorted(custom_hits))}, with no JXL beside them that they could be "
+            f"decoded from: the DECODER's settings name that folder as its output "
+            f"(EXPORT_TIFF_FOLDER, TIFF_FOLDER_NAME or CONVERTED_TIFF_FOLDER, changed from "
+            f"the shipped name). If these are your exports, give the decoder another "
+            f"folder name (its settings or the script settings overlay).")
+
+
 def find_tiffs_mode6(input_path: Path):
     """Mode 6: only TIFFs inside folders containing EXPORT_MARKER in their path (any subfolder)."""
     all_tiffs = find_tiffs_recursive(input_path)
     filtered = []
     skipped_decoder_out = 0
+    custom_hits, sib_cache = {}, {}
     marker_lower = EXPORT_MARKER.lower()
     for t in all_tiffs:
         # Match only directory parts; the filename itself is not an anchor
@@ -6369,11 +6446,16 @@ def find_tiffs_mode6(input_path: Path):
             below = [p.lower() for p in parts_str[export_idx + 1:]]
             if _skip_decoder_output(below, honor_requested_subfolder=False):
                 skipped_decoder_out += 1
+                _c = _custom_decoder_folder(below, honor_requested_subfolder=False)
+                if _c and not _has_source_near(
+                        t, export_idx + 1 + below.index(_c), ".jxl", sib_cache):
+                    custom_hits[_c] = custom_hits.get(_c, 0) + 1
                 continue
             filtered.append(t)
     if skipped_decoder_out:
         logger.info(f"Ignored {skipped_decoder_out} TIFF(s) in decoder output folders "
                     f"({', '.join(sorted(_DECODER_OUTPUT_FOLDERS))}) — use a different mode to re-encode them")
+    _warn_custom_decoder_folders(custom_hits)
     return sorted(filtered)
 
 def find_tiffs_mode7(input_path: Path):
@@ -6381,6 +6463,7 @@ def find_tiffs_mode7(input_path: Path):
     all_tiffs = find_tiffs_recursive(input_path)
     filtered = []
     skipped_decoder_out = 0
+    custom_hits, sib_cache = {}, {}
     marker_lower = EXPORT_MARKER.lower()
     subfolder_lower = EXPORT_TIFF_SUBFOLDER.lower()
     for t in all_tiffs:
@@ -6393,6 +6476,10 @@ def find_tiffs_mode7(input_path: Path):
         below = [p.lower() for p in parts_str[export_idx + 1:]]
         if _skip_decoder_output(below):
             skipped_decoder_out += 1
+            _c = _custom_decoder_folder(below)
+            if _c and not _has_source_near(
+                    t, export_idx + 1 + below.index(_c), ".jxl", sib_cache):
+                custom_hits[_c] = custom_hits.get(_c, 0) + 1
             continue
         if EXPORT_TIFF_SUBFOLDER:
             if export_idx + 1 < len(parts_str) and parts_str[export_idx + 1].lower() == subfolder_lower:
@@ -6402,6 +6489,7 @@ def find_tiffs_mode7(input_path: Path):
     if skipped_decoder_out:
         logger.info(f"Ignored {skipped_decoder_out} TIFF(s) in decoder output folders "
                     f"({', '.join(sorted(_DECODER_OUTPUT_FOLDERS))}) — use a different mode to re-encode them")
+    _warn_custom_decoder_folders(custom_hits)
     return sorted(filtered)
 
 def build_parser():
@@ -6681,8 +6769,13 @@ def _configure_run(parser, args):
 
     # --restamp-then-sync is a sync that fixes the records first: it must be
     # checked here, and it sets args.sync BEFORE the block below reads it.
-    if args.restamp_then_sync and (args.delete_source or args.delete_skipped
-                                   or args.overwrite or args.restamp_moved):
+    # A lone --delete-skipped deletes nothing (warned below): never refused
+    # for it (rc8, Fable's S3).
+    # The EFFECTIVE delete: the flag, or DELETE_SOURCE set at the top of the
+    # script (merged just below) — the rc8 review's M2: reading the flag alone
+    # let a script set to delete restamp-then-sync with --delete-skipped.
+    if args.restamp_then_sync and (args.delete_source or DELETE_SOURCE or args.overwrite
+                                   or args.restamp_moved):
         parser.error("--restamp-then-sync cannot be combined with --delete-source, "
                      "--delete-skipped, --overwrite or --restamp-moved: a record "
                      "rewritten in this run must not decide a deletion.")
@@ -6709,7 +6802,7 @@ def _configure_run(parser, args):
         PROVENANCE_CHECK = args.provenance
     if args.no_overwrite_guard:
         OVERWRITE_GUARD = False
-    if args.restamp_moved and (args.delete_source or args.delete_skipped or args.overwrite):
+    if args.restamp_moved and (DELETE_SOURCE or args.overwrite):
         parser.error("--restamp-moved only rewrites provenance records: it cannot be "
                      "combined with --delete-source, --delete-skipped or --overwrite.")
     if args.no_adopt_scan:
@@ -6845,6 +6938,7 @@ def _configure_run(parser, args):
         _thumbnails_dropped["archived"] = 0
         _discarded_real_page_sources.clear()
         _unarchived_content_sources.clear()
+        _ORIGIN_UNREAD.clear()
         _discarded_thumb_sources.clear()
         _discard_warned["count"] = 0
         _discard_warned["suppressed"] = 0
@@ -7466,15 +7560,22 @@ def main():
     with ThreadPoolExecutor(max_workers=scan_workers) as pool:
         futures = {pool.submit(_plan_one, t): i for i, t in enumerate(tiffs)}
         done_count = 0
-        for fut in as_completed(futures):
-            idx = futures[fut]
-            try:
-                results_by_index[idx] = fut.result()
-            except Exception as e:  # defensive: _plan_one already catches its own
-                results_by_index[idx] = ("error", str(e))
-            done_count += 1
-            if progress_step and done_count % progress_step == 0:
-                logger.info(f"  Analyzed {done_count}/{len(tiffs)} TIFF(s)...")
+        try:
+            for fut in as_completed(futures):
+                idx = futures[fut]
+                try:
+                    results_by_index[idx] = fut.result()
+                except Exception as e:  # defensive: _plan_one already catches its own
+                    results_by_index[idx] = ("error", str(e))
+                done_count += 1
+                if progress_step and done_count % progress_step == 0:
+                    logger.info(f"  Analyzed {done_count}/{len(tiffs)} TIFF(s)...")
+        except BaseException:
+            # rc8 (Fable's C2): a Ctrl+C in the planning stops at once — the
+            # pool's exit waited for every TIFF still queued (37 of 40 were
+            # analysed after the press). The ones in progress finish.
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise
 
     # Which files actually failed, for the wrapper's end-of-run FAILURES list.
     # Counts alone don't answer "did something break in the middle?" — the user

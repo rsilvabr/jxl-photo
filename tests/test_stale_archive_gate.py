@@ -172,9 +172,11 @@ def test_transcoder_lossy_keeps_a_jxl_replaced_since_its_jpeg(tmp_path):
     assert (src / "a.jxl").exists(), (
         "the replaced JXL was deleted on the strength of a JPEG made from its "
         "OLD version:\n" + _log(r))
-    assert not (src / "b.jxl").exists(), (
-        "control: an untouched JXL with a proven JPEG must still be deleted\n"
-        + _log(r))
+    # rc8 (Fable's L2): an export the run did not write never deletes its
+    # master on the decode direction, proven or not — the untouched one stays
+    # too, for that reason.
+    assert (src / "b.jxl").exists(), _log(r)
+    assert "was not written by this run" in _log(r), _log(r)
 
 
 @real

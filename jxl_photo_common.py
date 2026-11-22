@@ -45,7 +45,7 @@ import zlib
 from datetime import datetime
 from pathlib import Path
 
-TOOLKIT_VERSION = "2.31.0-rc7"
+TOOLKIT_VERSION = "2.31.0-rc8"
 
 
 class Script:
@@ -2006,6 +2006,16 @@ def _reduced_by_integer_decode(info_text, frames_kept: bool):
     b = re.search(r"\b(\d+)-bit\b", line)
     if b and int(b.group(1)) > 16:
         return f"{b.group(1)}-bit samples"
+    # rc8 (Fable's L5): the channels jxlinfo names after the depth ("8-bit
+    # RGB+Alpha+Depth"). A TIFF or a 16-bit PNG holds the colour and ONE
+    # alpha: more extra channels, or one that is not Alpha (a depth map, a
+    # spot colour), are left out. The toolkit's own RGB+IR masters read
+    # "RGB+Alpha" (the IR rides as the alpha) and are full copies.
+    ch = re.search(r"\b\d+-bit (?:RGB|Grayscale)((?:\+[^,+\n]+)*)", line)
+    extras = ([e.strip() for e in ch.group(1).split("+") if e.strip()]
+              if ch and ch.group(1) else [])
+    if len(extras) > 1 or (extras and extras[0].lower() != "alpha"):
+        return f"extra channels ({'+'.join(extras)}) that a decode cannot keep whole"
     return None
 
 
@@ -2210,6 +2220,27 @@ def _batch_read_tick(g, st, done: int) -> None:
     st["next"] = now + st["gap"]
 
 
+def _same_file_bytes(a, b) -> bool:
+    """Same size and same MD5 (rc8, L4). A file that cannot be read: False."""
+    try:
+        if os.path.getsize(a) != os.path.getsize(b):
+            return False
+        return md5_of_file(Path(a)) == md5_of_file(Path(b))
+    except OSError:
+        return False
+
+
+def _same_volume(a, b) -> bool:
+    """Do these two paths live on one volume — a move between them a rename,
+    whose bytes cannot change (rc8, L4)? Unknown (a stat that fails, a volume
+    with no serial number: st_dev 0) is False: the copy is then compared."""
+    try:
+        da, db = os.stat(a).st_dev, os.stat(b).st_dev
+    except OSError:
+        return False
+    return da == db and da != 0
+
+
 def _promote_from_staging(g, write_path, final_path) -> bool:
     """Move one finished output out of staging. True when it landed.
 
@@ -2235,9 +2266,30 @@ def _promote_from_staging(g, write_path, final_path) -> bool:
     except OSError:
         size = 0
     tmp = final_path.parent / f"{uuid.uuid4().hex}_{final_path.name}.tmp"
+    compare = False
     try:
         final_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(write_path), str(tmp))
+        # rc8 (Fable's L4): a move to another volume is a copy. In a run that
+        # deletes, the copy is compared with the staged file BEFORE the staged
+        # file goes and before the copy replaces anything — #572's check lived
+        # in the recompressor's in-place swap only, and after a copy that
+        # damaged bytes without an error three gates deleted their source on a
+        # proof made on the staged file. One volume: a rename, nothing to compare.
+        compare = bool(g.DELETE_SOURCE) and not _same_volume(write_path, final_path.parent)
+        if compare:
+            shutil.copy2(str(write_path), str(tmp))
+            if not _same_file_bytes(write_path, tmp):
+                g.logger.error(f"  MOVE FAILED, kept in staging | {write_path.name} -> "
+                               f"{final_path} | the copy in the destination folder is not "
+                               f"the staged file byte for byte (a damaged copy)")
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+                return False
+            write_path.unlink()
+        else:
+            shutil.move(str(write_path), str(tmp))
         os.replace(str(tmp), str(final_path))
         return True
     except OSError as e:
@@ -2248,7 +2300,10 @@ def _promote_from_staging(g, write_path, final_path) -> bool:
         except OSError:
             landed = None
         if landed is not None:
-            if size > 0 and landed == size:
+            complete = size > 0 and landed == size
+            if complete and compare and write_path.exists():
+                complete = _same_file_bytes(write_path, tmp)
+            if complete:
                 try:
                     os.replace(str(tmp), str(final_path))
                     g.logger.error("    The copy itself finished — the destination now "
@@ -2349,8 +2404,15 @@ def _report_staging_leftovers(g, staging_dir):
         g.logger.warning(f"    {f.name}")
     if len(found) > 5:
         g.logger.warning(f"    ... and {len(found) - 5} more")
-    g.logger.warning("  These are outputs whose conversion failed, kept for inspection. "
-                   "Pass --clean-staging on a later run to sweep the older ones.")
+    if g._staging_used_by_another_run(staging_dir):
+        # rc8 (Fable's C6): a live run's outputs wait there for their folder.
+        g.logger.warning("  Another run is using this staging folder: some of these are "
+                         "its outputs, waiting for their folder to finish; the others are "
+                         "outputs whose conversion failed, kept for inspection. Pass "
+                         "--clean-staging on a later run to sweep the older ones.")
+    else:
+        g.logger.warning("  These are outputs whose conversion failed, kept for inspection. "
+                         "Pass --clean-staging on a later run to sweep the older ones.")
 
 
 def _holds_staging(g, fn):
@@ -4842,7 +4904,8 @@ def _exiftool_source(g, path, tmp_dir, ifd=0) -> str:
     if "Nothing to write" in (r.stderr or "") + (r.stdout or ""):
         return p        # no metadata at all: there is nothing to lose
     raise RuntimeError(f"exiftool could not read the metadata of {os.path.basename(p)} "
-                       f"(a '%' in its path): {g._stderr_tail(r.stderr or r.stdout)}")
+                       f"(a '%' in its path): "
+                       f"{g._stderr_tail(r.stderr or r.stdout) or f'exit {r.returncode}, no message'}")
 
 
 _SOURCE_TAG_ARGS = ["-j", "-s", "-s", "-XMP-xmp:CreatorTool", "-XMP-dc:Relation",
@@ -4957,18 +5020,40 @@ def _origin_read_args(path):
             "-XMP-xmpMM:HistoryParameters", str(path)]
 
 
+def _origin_unread(g, path):
+    """The marks of an input could not be read (rc8, Fable's W3): its output
+    gets no jxlphoto-origin — written only from a clean input, never guessed,
+    and never again once that input is gone. The file is named in
+    g._ORIGIN_UNREAD (state of the script, emptied per run), so a run that
+    deletes keeps it (_origin_unread_of in each gate). Returns
+    _read_origin_inputs' "cannot tell"."""
+    g._ORIGIN_UNREAD.add(os.path.normcase(os.path.abspath(str(path))))
+    g.logger.warning(f"  The marks of {Path(path).name} could not be read: its output gets no "
+                     f"jxlphoto-origin" + (", and the file is kept" if g.DELETE_SOURCE else ""))
+    return None, False
+
+
+def _origin_unread_of(g, path) -> bool:
+    """Was this input's origin read a failure this run (_origin_unread)?"""
+    return os.path.normcase(os.path.abspath(str(path))) in g._ORIGIN_UNREAD
+
+
 def _read_origin_inputs(g, path):
     """(dc:Relation tokens, has_record) of an INPUT file, for
-    _origin_for_output. tokens is None when exiftool could not read the file:
-    the caller then writes no origin (unknown is never guessed)."""
+    _origin_for_output. tokens is None when exiftool could not read the file
+    (no answer, or no entry for it): the caller then writes no origin
+    (unknown is never guessed) and a run that deletes keeps it
+    (_origin_unread)."""
     try:
         r = g._run_exiftool_argfile(_origin_read_args(path), timeout=g.EXIFTOOL_TIMEOUT)
         if r.returncode != 0 or not r.stdout:
-            return None, False
+            return _origin_unread(g, path)
         data = json.loads(r.stdout)
-        entry = data[0] if data else {}
+        if not data:
+            return _origin_unread(g, path)
+        entry = data[0]
     except Exception:
-        return None, False
+        return _origin_unread(g, path)
     rel = entry.get("Relation")
     values = [] if rel is None else (rel if isinstance(rel, list) else [rel])
     tokens = [str(v).strip() for v in values if str(v).strip()]
@@ -5401,6 +5486,37 @@ def _ctrl_c_handler_active(g) -> bool:
     except (ValueError, OSError, AttributeError):
         return False
     return getattr(handler, "_jxlphoto_script", None) is g._g
+
+
+def _run_with_ctrl_c_held(fn, on_deferred=None):
+    """Run fn() with Ctrl+C held: a press meanwhile waits until fn is done,
+    then each press goes, in order, to the handler that was in place — the
+    run's own (_ctrl_c_finishes_the_run: a first press latches the abort, a
+    second one raises) or Python's (it raises). For a step that must never be
+    cut in the middle: a multi-page group's deletes (rc8, #751, #762) and its
+    in-place swap (#752). `on_deferred` runs before the presses are handed
+    on (a line saying the press waited). Only in the main thread, where
+    handlers live; elsewhere fn() runs as it is. Returns fn()'s result."""
+    import signal
+    pressed = []
+    try:
+        previous = signal.signal(signal.SIGINT, lambda s, f: pressed.append(s))
+    except (ValueError, OSError):
+        return fn()
+    try:
+        return fn()
+    finally:
+        try:
+            signal.signal(signal.SIGINT, previous)
+        except (ValueError, OSError):
+            pass
+        if pressed and on_deferred is not None:
+            on_deferred()
+        for _ in pressed:
+            if callable(previous):
+                previous(signal.SIGINT, None)
+            elif previous != signal.SIG_IGN:
+                raise KeyboardInterrupt
 
 
 def _interrupted(g) -> bool:
@@ -6279,7 +6395,10 @@ def _serve_job(g, main, raw, options, log_file):
             g.logger.warning(f"  {ln}")
     g.logger.info(f"serve job {jid}: exit {code}")
     try:
-        outputs = sorted(set(os.listdir(out)) - before)
+        # Never a leftover temp (rc8, Fable's C5: a killed ExifTool's
+        # "<temp>_exiftool_tmp" was answered as an output of the job).
+        outputs = sorted(n for n in set(os.listdir(out)) - before
+                         if not g._ORPHAN_TEMP_RE.match(n))
     except OSError:
         outputs = []
     error = "" if code == 0 else _serve_one_line(

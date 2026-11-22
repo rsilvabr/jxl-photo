@@ -48,7 +48,7 @@ from typing import Optional
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.31.0-rc7"
+TOOLKIT_VERSION = "2.31.0-rc8"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 
@@ -103,30 +103,32 @@ GUARD_DOC_URL = (f"{TOOLKIT_URL}/blob/main/docs/behavior_and_limitations.md"
 _HISTORY_MIME = _common._HISTORY_MIME
 
 
-def _jpeg_main_eoi(file_path: Path) -> bool:
-    """Does this JPEG reach the EOI of its MAIN image?
+def _jpeg_main_eoi_end(file_path: Path):
+    """Where the EOI of this JPEG's MAIN image ends (the offset just after it),
+    or None when the file does not reach it (rc8: _jpeg_trailer_reason reads
+    what follows; _jpeg_main_eoi is the yes/no).
 
     Walks the marker chain from the SOI: segments with a length (APPn — where
     an EXIF thumbnail with its own SOI/EOI lives —, DQT, DHT, SOFn, COM, ...)
     are skipped by that length; after each SOS the entropy-coded data is
     scanned for the next real marker (FF00 stuffing, RSTn and fill bytes are
-    part of the data). True only on reaching EOI; a file that ends first, or
+    part of the data). An offset only on reaching EOI; a file that ends first, or
     whose structure breaks, is truncated or broken. Bytes after the EOI
     (Motion Photo payloads, appended data) are fine: they are never read.
     """
     import mmap
     try:
         if file_path.stat().st_size < 4:
-            return False
+            return None
         with open(file_path, "rb") as f, \
                 mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
             n = len(m)
             if m[0:2] != b"\xff\xd8":
-                return False
+                return None
             i = 2
             while True:
                 if i >= n:
-                    return False
+                    return None
                 if m[i] != 0xFF:
                     # Extraneous bytes between segments: decoders skip them
                     # to the next 0xFF ("Corrupt JPEG data: N extraneous
@@ -134,33 +136,33 @@ def _jpeg_main_eoi(file_path: Path) -> bool:
                     # carries them over — resync instead of refusing.
                     i = m.find(b"\xff", i)
                     if i < 0:
-                        return False
+                        return None
                 while i < n and m[i] == 0xFF:      # fill bytes before a marker
                     i += 1
                 if i >= n:
-                    return False
+                    return None
                 marker = m[i]
                 i += 1
                 if marker == 0x00:                 # not a marker: keep resyncing
                     continue
                 if marker == 0xD9:                 # EOI of the main image
-                    return True
+                    return i
                 if marker == 0x01 or 0xD0 <= marker <= 0xD7:
                     continue                       # TEM / RSTn: no length
                 if i + 2 > n:
-                    return False
+                    return None
                 seglen = (m[i] << 8) | m[i + 1]
                 if seglen < 2:
-                    return False
+                    return None
                 i += seglen
                 if i > n:
-                    return False
+                    return None
                 if marker != 0xDA:                 # not SOS: next segment
                     continue
                 while True:                        # entropy-coded data
                     j = m.find(b"\xff", i)
                     if j < 0 or j + 1 >= n:
-                        return False
+                        return None
                     nxt = m[j + 1]
                     if nxt == 0x00 or 0xD0 <= nxt <= 0xD7:
                         i = j + 2                  # stuffing / restart marker
@@ -171,7 +173,12 @@ def _jpeg_main_eoi(file_path: Path) -> bool:
                     i = j                          # a real marker ends the scan
                     break
     except (OSError, ValueError):
-        return False
+        return None
+
+
+def _jpeg_main_eoi(file_path: Path) -> bool:
+    """Does this JPEG reach the EOI of its MAIN image? (_jpeg_main_eoi_end)"""
+    return _jpeg_main_eoi_end(file_path) is not None
 
 
 def _verify_file_integrity(file_path: Path) -> bool:
@@ -402,6 +409,10 @@ _changed_since = _common._changed_since
 # BEFORE the judgment, checked right before every swap. A path this run never
 # recorded (a direct caller, a test) is not checked. Cleared per run.
 _planned_outputs = {}
+# The inputs whose marks _read_origin_inputs could not read this run
+# (normcased absolute paths, rc8): their outputs carry no jxlphoto-origin, so
+# the delete gate keeps them (_origin_unread_of). Cleared per run.
+_ORIGIN_UNREAD = set()
 
 
 def _record_planned_outputs(*a, **k): return _common._record_planned_outputs(_G, *a, **k)
@@ -793,7 +804,10 @@ def _warn_distance_clamp(*a, **k): return _common._warn_distance_clamp(_G, *a, *
 # about to write: those cannot belong to a live run (two writers on one output
 # is what the duplicate-output abort exists to stop). The temps of any other
 # output, and files without the 32-hex-digit prefix, are never touched.
-_ORPHAN_TEMP_RE = re.compile(r"^(?:[0-9a-f]{32}_)+(?:repair_)?(.+?)(?:\.tmp)+$")
+# rc8 (Fable's C5): ExifTool's own temp of one of ours, "<temp>_exiftool_tmp"
+# (left by an ExifTool killed while it rewrote the temp), is one too.
+_ORPHAN_TEMP_RE = re.compile(
+    r"^(?:[0-9a-f]{32}_)+(?:repair_)?(.+?)(?:\.tmp)+(?:_exiftool_tmp)?$")
 
 
 def _sweep_orphan_temps(*a, **k): return _common._sweep_orphan_temps(_G, *a, **k)
@@ -834,7 +848,8 @@ _EXIFTOOL_POOL = _common._ExiftoolPool()
 # process refuses (maintenance modes).
 _SERVE_LOG = None
 _SERVE_FILE_CACHES = ("_content_id_cache", "_JXLINFO_CACHE", "_SOURCE_TAGS_CACHE",
-                      "_planned_outputs", "_JXLINFO_NOTES")     # notes once per JOB (#711)
+                      "_planned_outputs", "_JXLINFO_NOTES",     # notes once per JOB (#711)
+                      "_ORIGIN_UNREAD")
 _SERVE_TOOL_FACTS = ("_EXIFTOOL_BATCH",)
 _SERVE_REFUSED = ("repair_jbrd",)
 
@@ -895,6 +910,12 @@ TIFFTAG_PREFIX = "jxlphoto-tifftag:"
 _GAIN_MAP_XMP_REMOVAL = ["-XMP-hdrgm:all=", "-XMP-GContainer:all="]
 # The XMP that announces an HDR gain map (Android's Ultra HDR): removed from
 # every output of the convert path, which never holds the gain map itself.
+_MOTION_PHOTO_XMP_REMOVAL = [f"-XMP-GCamera:{t}=" for t in (
+    "MotionPhoto", "MotionPhotoVersion", "MotionPhotoPresentationTimestampUs",
+    "MicroVideo", "MicroVideoVersion", "MicroVideoOffset",
+    "MicroVideoPresentationTimestampUs")]
+# The same for a Motion Photo's video (rc8, Fable's L3): no output of the
+# convert path holds it; the other GCamera tags stay.
 ORIGIN_PREFIX = _common.ORIGIN_PREFIX
 ORIENTATION_PREFIX = "jxlphoto-orientation:"
 # dc:Relation token: the EXIF Orientation (2-8) of the JPEG this photo came
@@ -1009,6 +1030,7 @@ def _provenance_marker_args(*a, **k): return _common._provenance_marker_args(_G,
 
 
 def _read_origin_inputs(*a, **k): return _common._read_origin_inputs(_G, *a, **k)
+def _origin_unread_of(*a, **k): return _common._origin_unread_of(_G, *a, **k)
 
 
 _origin_for_output = _common._origin_for_output
@@ -1053,8 +1075,9 @@ def _copy_metadata(src_path: Path, dst_path: Path) -> None:
                 # No output of this path holds an HDR gain map (#641): the
                 # XMP that announces one (Ultra HDR's hdrgm:Version and the
                 # container directory listing a "GainMap" item of N bytes)
-                # must not describe a file that has none.
-                + _GAIN_MAP_XMP_REMOVAL
+                # must not describe a file that has none. Nor a Motion
+                # Photo's video (rc8, L3).
+                + _GAIN_MAP_XMP_REMOVAL + _MOTION_PHOTO_XMP_REMOVAL
                 + _reset + [str(dst_path)],
                 timeout=EXIFTOOL_TIMEOUT
             )
@@ -2500,6 +2523,13 @@ def _jxl_binds_to_archived_jpeg(jxl_path: Path, archived_jpeg: Path,
     Either check failing — or being UNAVAILABLE (djxl<0.12 has no
     --reconstruct_jpeg, the tool errored, the reconstruction is empty) —
     returns False: this guards an irreversible delete, so it fails CLOSED.
+
+    A self-hash line that names OTHER bytes is not the end (rc8, Fable's S4):
+    a rewrite whose new line could not be filed (--repair-jbrd with
+    checksums.md5 held by another program, a kill between the swap and the
+    line) left the old one, and the archive read as "swapped" on every run.
+    The reconstruction decides then — the stronger proof; --repair-jbrd
+    re-files such a line.
     """
     self_hash = read_jxl_self_hash_db(jxl_path)
     if self_hash is not None:
@@ -2508,9 +2538,12 @@ def _jxl_binds_to_archived_jpeg(jxl_path: Path, archived_jpeg: Path,
         # instead of failing THIS proof closed (item 23 — md5_of_file was
         # outside the try that shields the rest of the checks).
         try:
-            return md5_of_file(jxl_path) == self_hash
+            if md5_of_file(jxl_path) == self_hash:
+                return True
         except OSError:
             return False
+        logger.info(f" the self-hash line of {jxl_path.name} names other bytes (a rewrite "
+                    f"whose line was not filed?) — proven by a reconstruction instead")
     if not _tool_at_least("djxl", 0, 12):
         logger.debug(f" content-binding unavailable (legacy db, djxl<0.12) | {jxl_path.name}")
         return False
@@ -2949,9 +2982,20 @@ def cmd_repair_jbrd(args) -> int:
         # names. djxl 0.11/0.12 rebuild ANOTHER JPEG, with exit 0, from an
         # archive cjxl 0.13 wrote with its defaults (#669).
         stored = read_md5_db(f)
+        self_hash, before = None, None
         if stored is None:
             rebuilds = _jxl_reconstruct_ok(f)
         else:
+            # rc8 (Fable's S4): a self-hash line naming other bytes (the
+            # file rewritten, its new line never filed) made the archive
+            # "swapped" for every gate. Hashed before the reconstruction and
+            # after it, re-filed below only for bytes that rebuilt the JPEG.
+            self_hash = read_jxl_self_hash_db(f)
+            if self_hash is not None:
+                try:
+                    before = md5_of_file(f)
+                except OSError:
+                    before = None
             rebuilt_md5 = _jxl_reconstruct_md5(f)
             rebuilds = rebuilt_md5 is not None
             if rebuilds and rebuilt_md5 != stored:
@@ -2964,6 +3008,26 @@ def cmd_repair_jbrd(args) -> int:
                 lines.append((logger.error, f"REBUILDS ANOTHER JPEG (not the one its "
                                             f"checksums.md5 line names — {hint})"))
                 return "mismatch", False, lines
+            if rebuilds and before is not None and before != self_hash:
+                try:
+                    _same = md5_of_file(f) == before
+                except OSError:
+                    _same = False
+                if not _same:
+                    pass        # changed meanwhile: left for the next audit
+                elif args.dry_run:
+                    lines.append((logger.warning,
+                                  "WOULD RE-FILE ITS SELF-HASH LINE (the line names other "
+                                  "bytes; this file rebuilds the JPEG its checksums.md5 "
+                                  "line names)"))
+                elif store_jxl_self_hash_db(f, before) is False:
+                    lines.append((logger.warning,
+                                  "SELF-HASH LINE NOT RE-FILED (checksums.md5 held by "
+                                  "another program?) — run --repair-jbrd again"))
+                else:
+                    lines.append((logger.warning,
+                                  "SELF-HASH LINE RE-FILED (it named other bytes; this file "
+                                  "rebuilds the JPEG its checksums.md5 line names)"))
         if not rebuilds:
             try:
                 state, detail = _repair_one_jbrd(f, args.dry_run)
@@ -3231,10 +3295,12 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                     # hash away, so a file recovered from staging by hand had
                     # lost its provenance for good.
                     logger.warning(
-                        f"  Keeping {staging_db}: {_stranded} output(s) are still in "
-                        f"staging and their checksums live only there. Move the file "
-                        f"and its line to the destination folder before the next run: "
-                        f"a new run starts with an empty staging checksums.md5.")
+                        f"  Keeping {staging_db}: {_stranded} output(s) did not leave "
+                        f"staging cleanly and their checksums live only there. Before "
+                        f"the next run, put each line in its destination's "
+                        f"checksums.md5 — and the file, where MOVE FAILED above says "
+                        f"the folder does not hold it: a new run starts with an empty "
+                        f"staging checksums.md5.")
                 else:
                     try:
                         staging_db.unlink()
@@ -3249,9 +3315,9 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
     if failed_moves:
         # #624: an output that did not reach its folder is an error, not "ok".
         results = [(r[0], "error",
-                    f"MOVE FAILED: {Path(r[2]).name} did not reach its folder (see "
-                    f"MOVE FAILED above) — the file under that name is the OLD one, "
-                    f"and the source is kept", None)
+                    f"MOVE FAILED: {Path(r[2]).name} did not reach its folder cleanly "
+                    f"(MOVE FAILED above says what the folder holds now) — the source "
+                    f"is kept", None)
                    if r[0] in failed_moves else r for r in results]
 
     # Any mode, not just 8: the mode decides where the output lands, deleting
@@ -4675,6 +4741,7 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
         # delete gates keep such a JPEG (_gain_map_keep_reason).
         if _pixel_reencode:
             _note_gain_map_left_out(src_path)
+            _note_trailer_left_out(src_path)
         # result[4] carries the JXL self-hash so process_group_convert can
         # file it next to the source hash at the destination (staging runs).
         return (str(src_path), "reconvert" if overwritten else "ok", str(final_path),
@@ -5550,6 +5617,84 @@ def _note_gain_map_left_out(src_path: Path) -> None:
                        f"deleted by a lossy conversion")
 
 
+# What says "this JPEG is a Motion Photo": Google's XMP (GCamera:MotionPhoto,
+# the older GCamera:MicroVideo) set to 1 — "0" says there is no video (the
+# review of rc8's fixes) — or Samsung's trailer (rc8, Fable's L3).
+_MOTION_PHOTO_XMP_RE = re.compile(rb"(?:MotionPhoto|MicroVideo)\s*(?:=\s*[\"']|>)\s*1")
+_MOTION_PHOTO_TAIL_MARKS = (b"MotionPhoto_Data",)
+
+
+def _jpeg_trailer_reason(path: Path):
+    """What this JPEG holds after its first picture that no pixel re-encode
+    carries, in words, or None: a Motion Photo's video (its XMP or Samsung's
+    trailer says so), or data after the main image's EOI that is not padding
+    and that no MPF index explains — a camera's MPO previews are, by the
+    owner's call, copies of the picture; an HDR gain map is
+    _jpeg_gain_map's. cjxl encodes the first image only, so a lossy JXL holds
+    none of it (rc8, Fable's L3: a Motion Photo's video was lost with its
+    JPEG, without a word). Raises OSError when the file cannot be read; a
+    JPEG whose main image has no EOI is left to the other checks (None)."""
+    end = _jpeg_main_eoi_end(path)
+    if end is None:
+        return None
+    data = path.read_bytes()
+    head, tail = data[:end], data[end:]
+    if (_MOTION_PHOTO_XMP_RE.search(head)
+            or any(m in tail for m in _MOTION_PHOTO_TAIL_MARKS)):
+        return "a Motion Photo's video"
+    if (not _tail_is_padding(tail) and b"MPF\x00" not in head
+            and not _tail_is_jpeg_previews(tail)):
+        return f"{len(tail)} bytes after the picture that no MPF index explains"
+    return None
+
+
+def _tail_is_padding(tail: bytes) -> bool:
+    """Nothing but fill after the picture: zeros, 0xFF, line breaks, spaces,
+    a doubled EOI (the review of rc8's fixes: a CRLF kept its JPEG)."""
+    return not tail.replace(b"\xff\xd9", b"").strip(b"\x00\xff\r\n\t ")
+
+
+def _tail_is_jpeg_previews(tail: bytes) -> bool:
+    """Is what follows the picture only complete JPEG images — a camera's
+    previews without an MPF index (an Olympus writes a 9 KB one)? Copies of
+    the picture, by the owner's call, like an MPO's: not a reason to keep."""
+    t = tail.strip(b"\x00")
+    return t.lstrip(b"\xff")[:1] == b"\xd8" and t.endswith(b"\xff\xd9")
+
+
+def _jpeg_trailer_keep_reason(src_path: Path, final_file: Path):
+    """_gain_map_keep_reason's sibling (rc8, L3): a JPEG converted to a JXL
+    without a jbrd box (a pixel re-encode) is not deleted when it holds more
+    than its first picture (_jpeg_trailer_reason). A JPEG that cannot be read
+    for the check is kept too."""
+    if (src_path.suffix.lower() not in JPEG_EXTS or final_file is None
+            or final_file.suffix.lower() != ".jxl"):
+        return None
+    try:
+        if has_jbrd_box(final_file):
+            return None
+        what = _jpeg_trailer_reason(src_path)
+    except OSError:
+        return "KEEP (could not check what the JPEG holds after its picture)"
+    if what:
+        return (f"KEEP (the JPEG holds {what}, which this JXL does not — only the "
+                f"lossless transcode, --force-transcode, keeps the whole file)")
+    return None
+
+
+def _note_trailer_left_out(src_path: Path) -> None:
+    """One warning per converted JPEG whose data after the picture did not
+    reach the JXL (rc8, L3), like _note_gain_map_left_out."""
+    try:
+        what = _jpeg_trailer_reason(src_path)
+    except OSError:
+        return
+    if what:
+        logger.warning(f"  >Not carried | {src_path.name} | {what}: the JXL holds the "
+                       f"picture only; the lossless transcode (--force-transcode) keeps "
+                       f"the whole JPEG. This JPEG is never deleted by a lossy conversion")
+
+
 def _lossy_decode_keep_reason(src_path: Path, final_file: Path):
     """Why a JXL decoded by the CONVERT path must not be deleted, or None
     (T-B of the 2026-11-03 audit, the owner's option 1). A derivative never
@@ -6174,7 +6319,6 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
         # bytes into a JPEG deliverable). With staging the extension is real
         # and the explicit spec is a harmless no-op.
         _fmt_flag = "--output_format=png" if is_png else "--output_format=jpeg"
-        _magick_out = ("png:" if is_png else "jpg:") + _magick_out_path(actual_out)
 
         derivative = _is_derivative()
         # The output's MARKS: a colour-converted copy is a derivative too
@@ -6289,6 +6433,14 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                     quality, is_png, float_src=float_src, unrotate=_unrot,
                     image=None if mem is None else mem[2])
                 logger.debug(f"Using ICC/derivative pipeline: {magick_output[:3]}")
+                # ImageMagick writes into this short temp folder, and Python
+                # moves the file beside the final name (rc8, Fable's S1): it
+                # cannot open an output path of 260 characters or more, and
+                # the temp beside the final is 37 longer than the final (an
+                # output path of 223 failed). Same bytes as before (measured):
+                # the explicit format prefix, not the name, picks the writer.
+                _magick_file = Path(tmp) / ("out.png" if is_png else "out.jpg")
+                _magick_out = ("png:" if is_png else "jpg:") + _magick_out_path(_magick_file)
                 if mem is None:
                     r = _run_captured(["magick", str(magick_in)] + magick_output
                                       + (_MAGICK_KEEP_ICCP if is_png else [])    # #635
@@ -6299,6 +6451,7 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                     mem = None          # the pixels are ImageMagick's now
                 if r.returncode != 0:
                     raise RuntimeError(f"magick: {_stderr_tail(r.stderr)}")
+                shutil.move(str(_magick_file), str(actual_out))
                 if not grey:
                     _verify_profile_in_output(actual_out, is_png=is_png)
             return size
@@ -6579,10 +6732,12 @@ def process_group_convert(group_pairs: list, workers: int, direction: str,
         if staging_db.exists():
             if _stranded:
                 logger.warning(
-                    f"  Keeping {staging_db}: {_stranded} output(s) are still in "
-                    f"staging and their checksums live only there. Move the file "
-                    f"and its line to the destination folder before the next run: "
-                    f"a new run starts with an empty staging checksums.md5.")
+                    f"  Keeping {staging_db}: {_stranded} output(s) did not leave "
+                    f"staging cleanly and their checksums live only there. Before "
+                    f"the next run, put each line in its destination's "
+                    f"checksums.md5 — and the file, where MOVE FAILED above says "
+                    f"the folder does not hold it: a new run starts with an empty "
+                    f"staging checksums.md5.")
             else:
                 try:
                     staging_db.unlink()
@@ -6597,9 +6752,9 @@ def process_group_convert(group_pairs: list, workers: int, direction: str,
     if failed_moves:
         # #624: an output that did not reach its folder is an error, not "ok".
         results = [(r[0], "error",
-                    f"MOVE FAILED: {Path(r[2]).name} did not reach its folder (see "
-                    f"MOVE FAILED above) — the file under that name is the OLD one, "
-                    f"and the source is kept", None)
+                    f"MOVE FAILED: {Path(r[2]).name} did not reach its folder cleanly "
+                    f"(MOVE FAILED above says what the folder holds now) — the source "
+                    f"is kept", None)
                    if r[0] in failed_moves else r for r in results]
     # moved_finals lets the mode-8 delete gate distinguish "this run's output
     # arrived at the final path" from a stale pre-existing file whose
@@ -6995,7 +7150,14 @@ def _delete_converted_sources(results, pairs, moved_finals):
             continue
         try:
             _why_keep = (_lossy_decode_keep_reason(src_path, final_file)
-                         or _gain_map_keep_reason(src_path, final_file))
+                         or _gain_map_keep_reason(src_path, final_file)
+                         or _jpeg_trailer_keep_reason(src_path, final_file))
+            if not _why_keep and _origin_unread_of(src_path):
+                # rc8 (Fable's W3): the JXL got no jxlphoto-origin (the hidden
+                # generation --on-regeneration counts), and only this file
+                # can give it one.
+                _why_keep = ("KEEP (its marks could not be read: its JXL carries no "
+                             "jxlphoto-origin, which only this file can give it)")
         except Exception as e:
             # A check that raises keeps its own source and the gate goes on
             # judging the others (review S3: it ended the run in a traceback,
@@ -7038,6 +7200,18 @@ def _delete_converted_sources(results, pairs, moved_finals):
         if not _flush_to_disk(final_file):
             _delete_stats["kept"] += 1
             logger.warning(f" KEEP (output could not be flushed to disk) | {src_path.name}")
+            continue
+        if was_skipped and src_path.suffix.lower() in JXL_EXTS:
+            # rc8 (Fable's L2): an export of a JXL that was already there is
+            # no proof — it may have been retouched since (an editor keeps the
+            # marks), and nothing records its pixels, as the decoder's
+            # jxlphoto-pixsum does for a TIFF: a retouched 16-bit PNG deleted
+            # its master. Only an export this run writes deletes one.
+            _delete_stats["kept"] += 1
+            logger.warning(f" KEEP (the existing {final_file.name} was not written by this "
+                           f"run: an export may have been edited since, and nothing records "
+                           f"its pixels — only an export this run writes deletes its "
+                           f"master) | {src_path.name}")
             continue
         if was_skipped and _lossy_skip_unproven(src_path, final_file, _skip_marks):
             _delete_stats["kept"] += 1
@@ -8310,8 +8484,9 @@ def _configure_run(parser, args):
 
     # Resize/sharpening write a DERIVATIVE: it never replaces or deletes its
     # source, and the lossless JPEG recovery cannot shape pixels (the original
-    # bytes are reproduced verbatim).
-    if _is_derivative() and (DELETE_SOURCE or args.delete_skipped):
+    # bytes are reproduced verbatim). A lone --delete-skipped deletes nothing
+    # (the warning above): never refused for it (rc8, Fable's S3).
+    if _is_derivative() and DELETE_SOURCE:
         parser.error("--resize-*/--sharpen write a DERIVATIVE: it never replaces "
                      "or deletes its source — drop --delete-source/--delete-skipped")
     # A colour conversion is a derivative too (W6/T4 of the 2026-10-08 audit):
@@ -8320,16 +8495,14 @@ def _configure_run(parser, args):
     # manifest already suppressed --delete-source for an OutputICC row — while
     # this direct route converted the gamut and deleted the master. Only the
     # transcode route ignores the profile (the original bytes come back).
-    if (args.icc_profile and cmd != "transcode"
-            and (DELETE_SOURCE or args.delete_skipped)):
+    if args.icc_profile and cmd != "transcode" and DELETE_SOURCE:
         parser.error("--icc-profile/--to-srgb writes a colour-converted DERIVATIVE: "
                      "it never deletes its source — drop --delete-source/"
                      "--delete-skipped (or the conversion)")
     # T-B (owner's option 1): an explicit lossy decode never deletes the JXL —
     # a JPEG is lossy, and an 8-bit PNG may be a degraded copy (per file, the
     # gates keep those too: _lossy_decode_keep_reason).
-    if (cmd == "convert" and args.decode
-            and (DELETE_SOURCE or args.delete_skipped)
+    if (cmd == "convert" and args.decode and DELETE_SOURCE
             and ((args.format or "jpeg") in ("jpeg", "jpg")
                  or (args.bit_depth or PNG_DEFAULT_BIT_DEPTH) != 16)):
         parser.error("a JXL -> JPEG (or 8-bit PNG) conversion is not a copy of the JXL: "
@@ -8386,6 +8559,7 @@ def main():
     for _gname, _gvalue in _RUN_DEFAULTS.items():
         globals()[_gname] = _gvalue
     _DERIVED_INPUT_LABELS.clear()       # per run (_drop_derivative_pairs)
+    _ORIGIN_UNREAD.clear()              # per run (the delete gate, W3)
     # A run that records nothing reports nothing: never the totals and the
     # failures of the run before it in the same process (a --serve job).
     record_summary()

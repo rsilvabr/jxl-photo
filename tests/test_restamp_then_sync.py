@@ -188,8 +188,7 @@ def test_s5_dry_run_changes_nothing_and_predicts_no_refusal(tmp_path):
 
 
 @real
-@pytest.mark.parametrize("flag", ["--delete-source", "--delete-skipped",
-                                  "--overwrite", "--restamp-moved"])
+@pytest.mark.parametrize("flag", ["--delete-source", "--overwrite", "--restamp-moved"])
 def test_s6_refused_with_destructive_or_restamp_only_flags(tmp_path, flag):
     tif, jxl = _layout(tmp_path)
     before = _md5(jxl)
@@ -199,6 +198,19 @@ def test_s6_refused_with_destructive_or_restamp_only_flags(tmp_path, flag):
     assert "--restamp-then-sync cannot be combined" in (r.stdout + r.stderr), \
         r.stdout + r.stderr
     assert _md5(jxl) == before
+
+
+@real
+def test_s6_a_lone_delete_skipped_is_inert(tmp_path):
+    """rc8 (Fable's S3): --delete-skipped alone deletes nothing — the help
+    and the warning say so — and is no longer refused next to
+    --restamp-then-sync."""
+    tif, jxl = _layout(tmp_path)
+    r = _run(ENCODER, "lib", "--mode", "8", *FAST, "--restamp-then-sync",
+             "--delete-skipped", cwd=tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "has no effect without --delete-source" in (r.stdout + r.stderr)
+    assert tif.exists()
 
 
 _WRAPPER = """\

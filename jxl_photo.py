@@ -28,7 +28,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.31.0-rc7"
+TOOLKIT_VERSION = "2.31.0-rc8"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 
@@ -742,19 +742,25 @@ _RECURSIVE_MANIFEST_MODES = frozenset({2, 3, 4, 5, 6, 7, 8})
 _COLLAPSING_MODES = _common._COLLAPSING_MODES
 
 
-def _recompress_entry_in_place(source, dest_path, mode) -> bool:
+def _recompress_entry_in_place(source, dest_path, mode, mode_config=None,
+                               flags=None) -> bool:
     """Does a JXL -> JXL (recompressor) run REPLACE its sources?
 
     Mode 8 always does (the output is the source path). Mode 0 does when it
     has no output folder — or when that folder IS the source folder, which is
     what every manifest row sends: the loader fills an empty Destination cell
     with the Source, so testing "no Destination" alone never matched a
-    manifest entry, and the in-place gate was silently skipped.
+    manifest entry, and the in-place gate was silently skipped. Modes 3-7
+    ask the recompressor's own plan (_recompressor_plan_maps_onto_itself,
+    rc8: the same answer as _jxl_run_replaces_in_place — the review of rc8's
+    fixes found the two disagreeing).
     """
     if mode == 8:
         return True
     if mode == 2:
         return _recompressor_replaces_file(source, dest_path, mode)
+    if mode in (3, 4, 5, 6, 7):
+        return _recompressor_plan_maps_onto_itself(source, mode, mode_config, flags)
     if mode != 0:
         return False
     if not dest_path:
@@ -809,20 +815,84 @@ def _recompressor_replaces_file(source, dest_path, mode) -> bool:
             == os.path.normcase(os.path.abspath(str(src))))
 
 
-def _jxl_run_replaces_in_place(origin, dest, mode, input_dir, output_dir) -> bool:
+def _jxl_run_replaces_in_place(origin, dest, mode, input_dir, output_dir,
+                               mode_config=None, flags=None) -> bool:
     """Does this JXL -> JXL run (a direct run, a repeat, a preset) replace its
     sources in place? One answer for the wizard's in-place confirmation, the
     unattended refusal and the child's --delete-confirm-off
-    (_policy_delete): modes 0/8, and mode 2 when its output folder sits inside
+    (_policy_delete): modes 0/8, mode 2 when its output folder sits inside
     the input folder and already holds JXLs (_recompress_entry_in_place; the
-    review of rc6, M1: the flag was sent without the confirmation)."""
+    review of rc6, M1: the flag was sent without the confirmation), and the
+    modes whose own folders the run is pointed at (rc8, Fable's S6:
+    _recompressor_plan_maps_onto_itself)."""
     if origin != 'jxl' or dest != 'jxl':
         return False
     if mode in (0, 8):
         return True
     if mode == 2 and input_dir and output_dir:
         return _recompress_entry_in_place(input_dir, output_dir, 2)
+    if mode in (3, 4, 5, 6, 7) and input_dir:
+        return _recompressor_plan_maps_onto_itself(input_dir, mode, mode_config, flags)
     return False
+
+
+def _mode_config_with_marker(mode_config, config_marker):
+    """The run's mode_config with the marker the wizard sends its child — the
+    run's own, else the wizard's setting (the export_marker Opt): what a plan
+    probe must anchor on."""
+    mc = dict(mode_config or {})
+    if not mc.get('export_marker') and config_marker:
+        mc['export_marker'] = config_marker
+    return mc
+
+
+def _menu_marker(menu):
+    """The wizard's own export marker setting, or None."""
+    return getattr(getattr(getattr(menu, 'config', None), 'config', None),
+                   'export_marker', None)
+
+
+def _recompressor_plan_maps_onto_itself(input_dir, mode, mode_config=None,
+                                        flags=None) -> bool:
+    """Does the recompressor's own plan (_planned_output) put a JXL of this
+    folder back on itself (rc8, Fable's S6)? Mode 5 run AT a folder named
+    JXL_FOLDER_NAME and mode 6 at <marker>/EXPORT_JXL_FOLDER do: the child
+    then asked its own in-place question, and an unattended preset ended
+    with exit 3. A probe name in the folder is enough — the plan is path
+    arithmetic, no file is read —, under the run's marker, subfolder and
+    output folder (mode_config; a missing one leaves the child's setting) and
+    its expert flags, which come last and win (#664): the child's own parse,
+    read by _child_plan_globals. A FILE input: _recompressor_replaces_file.
+    Cannot tell: True."""
+    try:
+        src = Path(input_dir)
+        if src.is_file():
+            return _recompressor_replaces_file(src, None, mode)
+        if not src.is_dir():
+            return False
+        mc = mode_config or {}
+        rec = importlib.import_module('jxl_recompressor')
+        probe = src / "__jxlphoto_probe__.jxl"
+        argv = [str(src), '--mode', str(mode)]
+        for key, flag in (('export_marker', '--export-marker'),
+                          ('export_subfolder', '--export-subfolder'),
+                          ('export_jxl_folder', '--export-jxl-folder')):
+            if mc.get(key):
+                argv += [flag, str(mc[key])]
+        argv += _split_expert_flags(flags or '')
+        with redirect_stderr(io.StringIO()):
+            ns = rec.build_parser().parse_args(argv)
+        with redirect_stderr(io.StringIO()), _with_child_marker(
+                rec, *_child_plan_globals(ns, "jxl2jxl")):
+            out = rec._planned_output(probe, ns)
+    except SystemExit:
+        return True
+    except Exception:
+        return True
+    if out is None:
+        return False
+    return (os.path.normcase(os.path.abspath(str(out)))
+            == os.path.normcase(os.path.abspath(str(probe))))
 
 
 def _folder_row_replaces_files(src: Path, dest_path, mode) -> bool:
@@ -2398,10 +2468,24 @@ def _lossy_decode_never_deletes(workflow: Dict) -> Optional[str]:
     if workflow.get('origin_format') != 'jxl':
         return None
     conv = workflow.get('conversion_type', '')
-    if conv == 'jxl_to_jpeg_force':
+    if conv not in ('jxl_to_jpeg_force', 'jxl_to_png'):
+        return None
+    # The format and the bit depth the child will use: the expert flags come
+    # last in its argv and win (rc8, Fable's S3: a --bit-depth 8 or a --format
+    # jpeg typed there reached a child that refused the delete with exit 2,
+    # after the HHMM token). Its own parse answers, as for a delete (#725).
+    fmt = 'jpeg' if conv == 'jxl_to_jpeg_force' else 'png'
+    depth = str(_bit_depth_or_default(workflow, 'png'))
+    ns = _child_flags('jxl', workflow.get('dest_format'), workflow.get('expert_flags'))
+    if ns is not None:
+        if getattr(ns, 'format', None):
+            fmt = 'png' if ns.format == 'png' else 'jpeg'
+        if getattr(ns, 'bit_depth', None):
+            depth = str(ns.bit_depth)
+    if fmt == 'jpeg':
         return ("a JPEG decoded from a JXL is lossy, not a copy of it — only the "
                 "bit-exact recovery of a JPEG archive deletes its JXL")
-    if conv == 'jxl_to_png' and str(_bit_depth_or_default(workflow, 'png')) != '16':
+    if depth != '16':
         return "an 8-bit PNG may be a degraded copy of the JXL — use 16 bits to delete"
     return None
 
@@ -4820,7 +4904,9 @@ def _gate_direct_derivatives(menu, wf, ctx) -> bool:
         # asked, then the recompressor refused the derivative, exit 2).
         _in_place_pre = _jxl_run_replaces_in_place(
             origin, dest, wf.get('mode'), wf.get('input_dir'),
-            (wf.get('mode_config') or {}).get('output_dir'))
+            (wf.get('mode_config') or {}).get('output_dir'),
+            _mode_config_with_marker(wf.get('mode_config'), _menu_marker(menu)),
+            wf.get('expert_flags'))
         if _shaping_pre:
             if _in_place_pre:
                 menu._print_error("Derivatives (colour conversion/resize/sharpening) "
@@ -4859,13 +4945,22 @@ def _gate_direct_derivatives(menu, wf, ctx) -> bool:
             _note("Bit depth 8 / decode mode 'basic' makes a degraded copy: the "
                   "decoder KEEPS the JXLs whose master is deeper than 8 bits or "
                   "whose real profile lives in XMP.")
-    if (origin == 'jxl' and dest in ('jpeg', 'png')
-            and _conv_pre in ('jxl_to_jpeg_auto', 'jxl_to_jpeg_force', 'jxl_to_png')
-            and wf.get('icc_profile') and _delete_pre):
-        # W6 (2026-10-08 audit): a colour conversion is a derivative too.
-        menu._print_error("Colour conversion (Convert to sRGB) writes a derivative "
-                          "that never deletes its source — drop the delete option "
-                          "(or the conversion).")
+    if (wf.get('icc_profile') and _delete_pre
+            and _direction(origin, dest) in _TRANSCODER_DIRECTIONS
+            and _conv_pre not in _BIT_EXACT_CONVERSIONS):
+        # W6 (2026-10-08 audit): a colour conversion is a derivative too. The
+        # transcoder refuses a profile next to a delete on every route but the
+        # bit-exact one — JPEG/PNG -> JXL too, where it ignores the profile
+        # (rc8, Fable's S3: only the decode routes were refused here, and the
+        # child exited 2 after the HHMM token).
+        if origin == 'jxl':
+            menu._print_error("Colour conversion (Convert to sRGB) writes a derivative "
+                              "that never deletes its source — drop the delete option "
+                              "(or the conversion).")
+        else:
+            menu._print_error("An output profile is ignored on JPEG/PNG → JXL, and the "
+                              "transcoder refuses one next to a delete — drop the "
+                              "delete option (or the profile).")
         return True
     # T-B: a lossy decode is not a copy of the master (the transcoder exits 2
     # on the same pair).
@@ -5058,7 +5153,9 @@ def _gate_preset_unattended(menu, wf, ctx) -> bool:
     # whose output folder, inside its input folder, holds JXLs replaces them.
     _in_place_recompress = _jxl_run_replaces_in_place(
         ctx['origin'], ctx['dest'], ctx['mode'], session.get('last_input_dir'),
-        (session.get('last_mode_config') or {}).get('output_dir'))
+        (session.get('last_mode_config') or {}).get('output_dir'),
+        _mode_config_with_marker(session.get('last_mode_config'), _menu_marker(menu)),
+        session.get('last_expert_flags'))
     if _flag_delete or _adv_delete or _in_place_recompress:
         why = ("replaces the source JXLs in place"
                if _in_place_recompress and not (_flag_delete or _adv_delete)
@@ -6391,7 +6488,10 @@ class InteractiveMenu:
                              "not in place (modes 0/8)", None))
             elif _jxl_run_replaces_in_place(
                     origin, dest, workflow['mode'], workflow.get('input_dir'),
-                    (workflow.get('mode_config') or {}).get('output_dir')):
+                    (workflow.get('mode_config') or {}).get('output_dir'),
+                    _mode_config_with_marker(workflow.get('mode_config'),
+                                             _menu_marker(self)),
+                    workflow.get('expert_flags')):
                 # rc6's second review, N1: the gate refuses it (in place).
                 rows.append(("derivative", "Colour/size derivative",
                              "not in place (the output folder, inside the input, "
@@ -7972,6 +8072,15 @@ class InteractiveMenu:
             f"will be converted to {dest.upper()} in {where},",
             "and then DELETED from where they are now.",
         ]
+        # rc8 (Fable's C1): what the child keeps whatever this panel says —
+        # a JPEG archive (#745, #692) and, for a PNG, a master carrying its
+        # TIFF's own tags (#734: most TIFF exports have an IPTC block).
+        if origin == 'jxl' and dest == 'tiff':
+            lines.append("Kept anyway: JPEG archives (JXLs made from a JPEG) — a TIFF "
+                         "of their pixels is not the archive.")
+        elif origin == 'jxl' and dest == 'png':
+            lines.append("Kept anyway: JPEG archives, and masters that carry their TIFF's "
+                         "own tags (IPTC, Photoshop data) — a PNG holds neither.")
         ui.panel("\n".join(lines), title="[bold red]About to delete originals[/bold red]",
                  style="red", plain="\n".join(lines))
         sure = ui.ask_yes("delete.sure", "[bold red]Is that what you want?[/bold red]",
@@ -8695,8 +8804,13 @@ class InteractiveMenu:
         # each row's command (`_in_place_planned`): the confirmation below and
         # the flag must never disagree (rc6's second review, S1).
         _row_in_place = [origin == 'jxl' and dest == 'jxl'
-                         and _recompress_entry_in_place(_s, dest_path, detected_mode)
-                         for _s, dest_path, detected_mode in resolved_entries]
+                         and _recompress_entry_in_place(
+                             _s, dest_path, detected_mode,
+                             dict(zip(('export_marker', 'export_subfolder',
+                                       'export_jxl_folder'), _row_export_cfg(_wr))),
+                             _wr.get('expert_flags'))
+                         for (_s, dest_path, detected_mode), (_wr, _ar)
+                         in zip(resolved_entries, _row_effs)]
         for (_wr, _ar), _ip in zip(_row_effs, _row_in_place):
             _wr['_in_place_planned'] = bool(_ip)
         _any_in_place_recompress = any(_row_in_place)
@@ -10271,7 +10385,10 @@ class InteractiveMenu:
         _planned = ctx.workflow.get('_in_place_planned') if ctx.manifest else None
         if ctx.direction == "jxl2jxl" and (
                 _planned if _planned is not None
-                else _recompress_entry_in_place(ctx.source, ctx.dest_path, ctx.mode)):
+                else _recompress_entry_in_place(
+                    ctx.source, ctx.dest_path, ctx.mode,
+                    _mode_config_with_marker(ctx.mode_config, ctx.config_marker),
+                    ctx.workflow.get('expert_flags'))):
             cmd.append('--delete-confirm-off')
         delete = bool(adv.get('delete_source'))
         if delete and ctx.manifest and ctx.direction in _TRANSCODER_DIRECTIONS:
@@ -10586,7 +10703,9 @@ class InteractiveMenu:
         # this confirmation (the review of rc6, M1 — D13's predicate).
         _in_place_recompress = _jxl_run_replaces_in_place(
             origin, dest, workflow.get('mode'), workflow.get('input_dir'),
-            (workflow.get('mode_config') or {}).get('output_dir'))
+            (workflow.get('mode_config') or {}).get('output_dir'),
+            _mode_config_with_marker(workflow.get('mode_config'), _menu_marker(self)),
+            workflow.get('expert_flags'))
         if not workflow.get('dry_run') and (_flag_delete or _adv_delete
                                             or _in_place_recompress):
             if _in_place_recompress and not (_flag_delete or _adv_delete):
