@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.31.0-rc8** (2026-11-23, pre-release; last stable: [v2.30.2](docs/version_history.md#v2302)) · [What's new](#whats-new-in-v2310-rc8) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.31.0** (2026-11-23) · [What's new](#whats-new-in-v2310) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 **Windows program, no Python needed:** [jxl-photo-exe](https://github.com/rsilvabr/jxl-photo-exe/releases/latest) — unzip and double-click; cjxl/djxl, ExifTool, ImageMagick and jxl-thumb included.
 
@@ -205,16 +205,17 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## What's new in v2.31.0-rc8
+## What's new in v2.31.0
 
-2026-11-23. The eighth test release (pre-release) of v2.31.0; the last stable release is [v2.30.2](docs/version_history.md#v2302).
+2026-11-23. The stable release after [v2.30.2](docs/version_history.md#v2302); everything of the eight test releases is in it.
 
-- **Hardening of the deletes:** a run that deletes keeps the original in more edge cases — a Motion Photo JPEG (its video is not in a lossy JXL), a JXL with extra channels a TIFF or a PNG cannot hold, a copy out of the staging folder that changed on the way, a colour profile or a mark that ExifTool could not read, and a 16-bit PNG export the run did not write itself.
-- **Multi-page documents stay whole:** a Ctrl+C during the deletes, or a page held open by a viewer during an in-place recompression, no longer leaves a document half replaced or half deleted.
-- **Runs that stopped:** resized or colour-converted JPEG/PNG copies on long paths, another program's JXL copied as it is, and three combinations the wizard accepted and the scripts then refused.
-- **Smaller fixes:** a warning when a custom folder name in the settings hides your own files, and clearer messages.
+- **Faster, with the same files:** archiving, decoding and deleting runs about a fifth faster (ExifTool stays open, the decoder writes each TIFF's metadata once); sRGB copies 8–38 % faster; plain recompression 15 % faster.
+- **Safer deletes:** many edge cases closed in what a run that deletes keeps — colour-converted or resized exports, JPEG archives, masters with their TIFF's tags, Motion Photos, multi-page documents — and Ctrl+C finishes the files in progress without deleting anything more.
+- **Film scans:** VueScan's RGB + infrared scans no longer have their infrared taken for transparency, and grey colour profiles are really tested. If you archived such scans before, [known issues](docs/known_issues.md) shows how to fix them by hand.
+- **Exact metadata:** EXIF values copied exactly (a lens's f/2.83 no longer becomes f/2.8), each page of a multi-page TIFF with its own EXIF.
+- **For programs:** `--serve` converts many files in one process, and `--verify-roundtrip` checks every page.
 
-[Technical notes](docs/version_history.md#v2310-rc8) · [what to check](docs/upgrading.md) · [earlier releases, in short](docs/whats_new.md) · [every release](docs/version_history.md#release-history)
+[Technical notes](docs/version_history.md#v2310) · [what to check](docs/upgrading.md) · [earlier releases, in short](docs/whats_new.md) · [every release](docs/version_history.md#release-history)
 
 ---
 

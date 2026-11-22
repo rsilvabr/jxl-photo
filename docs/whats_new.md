@@ -10,7 +10,8 @@ as [GitHub Releases](https://github.com/rsilvabr/jxl-photo/releases).
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.31.0-rc8](version_history.md#v2310-rc8)** | 2026-11-23 | Pre-release. A run that deletes keeps the original in more edge cases (a Motion Photo, a JXL with extra channels, a copy out of staging that changed, a mark ExifTool could not read, a PNG export the run did not write); multi-page documents stay whole after a Ctrl+C or a page held open; long paths, another program's bare JXL and three wizard combinations no longer stop a run |
+| **[v2.31.0](version_history.md#v2310)** | 2026-11-23 | Faster with the same files (archiving, decoding and deleting about a fifth faster, sRGB copies 8–38 %, recompression 15 %); safer deletes in many edge cases; film scans; exact EXIF values; `--serve` and `--verify-roundtrip` for programs |
+| [v2.31.0-rc8](version_history.md#v2310-rc8) | 2026-11-23 | Pre-release. A run that deletes keeps the original in more edge cases (a Motion Photo, a JXL with extra channels, a copy out of staging that changed, a mark ExifTool could not read, a PNG export the run did not write); multi-page documents stay whole after a Ctrl+C or a page held open; long paths, another program's bare JXL and three wizard combinations no longer stop a run |
 | [v2.31.0-rc7](version_history.md#v2310-rc7) | 2026-11-22 | Pre-release. Film scans: VueScan's infrared no longer taken for transparency, grey profiles really tested, no copy of a SilverFast infrared page; the JPEG recovery deletes an archive only on its checksum, a 16-bit PNG keeps a master with TIFF tags, adopt no longer takes a burst frame for the archived photo; auto mode's `--sync` resume and "convert to sRGB" on JPEG archives work |
 | [v2.31.0-rc6](version_history.md#v2310-rc6) | 2026-11-22 | Pre-release. A later page of a multi-page TIFF no longer comes out turned upside down (rc5); a manifest's "no" to deleting converted originals reaches every row, and a missing Source no longer stops the other rows; settings changed in the wizard reach the next job; plain JXL → JXL recompression 15 % faster |
 | [v2.31.0-rc5](version_history.md#v2310-rc5) | 2026-11-22 | Pre-release. Safer deletes in a few unusual setups; a failed check before a delete is an error; Ctrl+C finishes the files in progress; each wizard task remembers its own values; faster archiving and sRGB copies, the same files; everything in v2.31.0-rc4 |
@@ -49,6 +50,18 @@ as [GitHub Releases](https://github.com/rsilvabr/jxl-photo/releases).
 | [v2.17.0](version_history.md#v2170) | 2026-10-24 | Film scans archived lossless and never recompressed lossy unless asked; they keep what their scanner software needs (whole XMP, private tags); thumbnail pages kept by default, except Capture One's |
 
 Every release since v1.0: [version_history.md](version_history.md#release-history).
+
+## v2.31.0
+
+2026-11-23. The stable release after [v2.30.2](version_history.md#v2302); everything of the eight test releases is in it.
+
+- **Faster, with the same files:** archiving, decoding and deleting runs about a fifth faster (ExifTool stays open, the decoder writes each TIFF's metadata once); sRGB copies 8–38 % faster; plain recompression 15 % faster.
+- **Safer deletes:** many edge cases closed in what a run that deletes keeps — colour-converted or resized exports, JPEG archives, masters with their TIFF's tags, Motion Photos, multi-page documents — and Ctrl+C finishes the files in progress without deleting anything more.
+- **Film scans:** VueScan's RGB + infrared scans no longer have their infrared taken for transparency, and grey colour profiles are really tested. If you archived such scans before, [known issues](known_issues.md) shows how to fix them by hand.
+- **Exact metadata:** EXIF values copied exactly (a lens's f/2.83 no longer becomes f/2.8), each page of a multi-page TIFF with its own EXIF.
+- **For programs:** `--serve` converts many files in one process, and `--verify-roundtrip` checks every page.
+
+[Technical notes](version_history.md#v2310) · [what to check](upgrading.md)
 
 ## v2.31.0-rc8
 

@@ -11,6 +11,25 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
+## v2.31.0 (from v2.30.2): what to check
+
+Coming from v2.30.2 or earlier, every v2.31.0 section below applies; each is
+named after the test release that made the change. In short, what an existing
+command line does differently:
+
+- **`--verify-roundtrip` without `--delete-source` checks every page** of a TIFF
+  → JXL run (and needs djxl); it used to do nothing without a delete.
+- **A temp folder with `%` in its path, or a TMP of 261 characters or more, is
+  refused** at the start of every run, before any file is touched.
+- **Several runs that delete keep files they used to delete**, each with a
+  `KEEP` line that says why: a colour-converted or resized export's master, a
+  JPEG archive without its checksum line, a master with TIFF tags under a
+  16-bit PNG export, a Motion Photo under a lossy JXL, and more (the sections
+  below).
+- **Files earlier versions wrote wrong** — VueScan RGB + infrared scans, grey
+  scans at a lossy distance, a few others — are listed, with how to find and fix
+  them, in [known_issues.md](known_issues.md).
+
 ## v2.31.0 (since rc8): deletes keep the original in more edge cases
 
 Nothing to do: these runs now keep files the earlier versions deleted, each

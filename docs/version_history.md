@@ -16,7 +16,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.31.0-rc8](#v2310-rc8)** | 2026-11-23 | Pre-release. The fixes of a sweep of rc7 by sibling rules (#746–#764): a delete keeps the source in more cases — a profile that could not be read, an export the run did not write, a Motion Photo, a copy out of staging that changed, more channels than one alpha; multi-page groups stay whole after a Ctrl+C or a page held open; long output paths, another program's bare JXL and three wizard paths no longer stop a run; everything in v2.31.0-rc7 |
+| **[v2.31.0](#v2310)** | 2026-11-23 | Faster with the same files: archiving, decoding and deleting 18–22 %, sRGB copies 8–38 %, recompression 15 %; deletes hardened in many edge cases (colour-converted exports, JPEG archives, Motion Photos, multi-page documents, Ctrl+C); film scans (VueScan RGB + infrared, grey profiles); exact EXIF values; `--serve` and `--verify-roundtrip` for programs; a temp folder with `%` or a TMP of 261+ characters refused; everything in the eight test releases (#684–#764) |
+| [v2.31.0-rc8](#v2310-rc8) | 2026-11-23 | Pre-release. The fixes of a sweep of rc7 by sibling rules (#746–#764): a delete keeps the source in more cases — a profile that could not be read, an export the run did not write, a Motion Photo, a copy out of staging that changed, more channels than one alpha; multi-page groups stay whole after a Ctrl+C or a page held open; long output paths, another program's bare JXL and three wizard paths no longer stop a run; everything in v2.31.0-rc7 |
 | [v2.31.0-rc7](#v2310-rc7) | 2026-11-22 | Pre-release. The fixes of a targeted review of the parts the sweeps had not read in full (#729–#745): VueScan's RGB+IR scans no longer have their infrared taken for transparency, a grey profile is really tested, no copy of a scan's infrared page; `--provenance adopt` no longer stamps another photo's archive; the JPEG recovery deletes an archive only on its checksum, neither a 16-bit PNG nor a decode to TIFF replaces a master or a JPEG archive they cannot hold whole, JPEG exports are not archived; auto mode's `--sync` resume and "convert to sRGB" work on JPEG archives; everything in v2.31.0-rc6 |
 | [v2.31.0-rc6](#v2310-rc6) | 2026-11-22 | Pre-release. The fixes of a second sweep, of rc5 (#712–#728): a later page of a multi-page TIFF no longer comes out with the orientation "Rotate 180" (rc5's own bug); a manifest's "no" to deleting converted originals reaches every row, a missing Source no longer stops the other rows, file rows of one output are caught; settings changed in the wizard reach the next job, a preset keeps its marker, a delete typed in the expert flags gets [D]'s checks; plain JXL → JXL recompression 15 % faster; everything in v2.31.0-rc5 |
 | [v2.31.0-rc5](#v2310-rc5) | 2026-11-22 | Pre-release. The fixes of a full sweep of rc4 (#690–#711): a colour-converted JPEG/PNG never deletes its master, a JPEG archive is never deleted by a decode of its pixels, an unreadable encode record leaves the file alone, a failed check before a delete is an error; Ctrl+C finishes the files in progress; each wizard task remembers its own values; cjxl's threads shared among the encodes and the Explorer thumbnail made from the image in memory, faster with the same files; everything in v2.31.0-rc4 |
@@ -120,10 +121,91 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.31.0
+
+**Released 2026-11-23**, the stable release after [v2.30.2](#v2302). It holds
+everything of the eight test releases — [rc1](#v2310-rc1) to [rc8](#v2310-rc8),
+whose technical notes follow — and its code is rc8's, with the version number
+only. Against v2.30.2:
+
+**Faster, with the same files.**
+- ExifTool stays open for the whole run (`EXIFTOOL_STAY_OPEN`), and the decoder
+  writes a TIFF's metadata in one pass: archiving, decoding and deleting runs
+  18–22 % faster (rc3).
+- sRGB copies (`--output-icc`) are converted in Python and handed to cjxl in
+  memory: 8–38 % faster depending on the temp folder's disk (rc2).
+- Plain JXL → JXL recompression 15 % faster (rc6); cjxl's threads shared among
+  the encodes running at once, and the Explorer thumbnail made from the image
+  already in memory (rc5); the checks before a delete run in parallel (rc3).
+- Measured on the owner's own photos (below), the same 25 photos: encode 24 →
+  18 s, decode 18 → 12 s, sRGB copies 28 → 20 s.
+
+**New.**
+- `--serve` (TIFF encoder and decoder, JPEG transcoder): one process converts
+  many files, one JSON line each, for programs that convert file by file such
+  as photo-backup (rc3).
+- `--verify-roundtrip` without `--delete-source` checks every page before it
+  takes its final name (rc1).
+- The failed files are listed again at the end of a run, and a tool's error
+  message is one line with its whole cause (rc3, rc4).
+- [Known issues](known_issues.md): the bugs that changed files earlier versions
+  wrote, how to find those files and what to do (rc3).
+
+**Exact metadata.** EXIF values are copied exactly, never through their printed
+form (#684: a lens's MaxApertureValue of f/2.83 used to become f/2.8); each page
+of a multi-page TIFF keeps its own EXIF (#696); private TIFF tags from 65000 up
+come back (#698); a caption with `|` keeps it (#697).
+
+**Film scans.** VueScan's RGB + infrared scans no longer have their infrared
+taken for transparency (#729); a grey colour profile is really tested before a
+lossy encode (#731); no copy of a SilverFast scan's infrared page (#730); a
+scan's infrared never colours a copy or its thumbnail (#695, #700, #714).
+
+**Deletes, hardened** (rounds 92–95). A colour-converted or resized JPEG/PNG
+never deletes its master; a JPEG archive is deleted only when its JPEG matched
+the checksum, and never by a decode of its pixels; a 16-bit PNG export keeps a
+master that carries its TIFF's tags; `--provenance adopt` is stricter; a Motion
+Photo, a JXL with extra channels, a copy out of staging that changed, a profile
+or a mark ExifTool could not read keep their source; multi-page documents stay
+whole after a Ctrl+C or a page held open; and Ctrl+C finishes the files in
+progress and deletes nothing more (#702).
+
+**Refused at the start.** A temp folder with `%` in its path (#687), and a TMP of
+261 characters or more: on Windows such a process hangs when it starts any
+program (#689).
+
+**The wizard.** Each task remembers its own values (#704, #705); settings changed
+in the wizard reach the next job (#716); a manifest's answers reach every row
+(#712) and a missing Source stops only its row (#724); every in-place layout is
+recognised (#759), and a run the scripts would refuse is refused before the HHMM
+token (#756).
+
+81 bugs fixed, #684–#764 (rounds 90–95, [bug tracker](bug_tracking_since_v1.0.md)).
+What to check when upgrading: [upgrading](upgrading.md) — `--verify-roundtrip`
+without a delete now checks, a temp folder with `%` is refused, and some runs
+keep files they used to delete; the files earlier versions wrote wrong, how to
+find and fix them: [known issues](known_issues.md).
+
+**Verification.** With libjxl 0.13.0: 4598 tests pass (1 skipped); the
+real-photo battery passes all 183 checks, in folders named with Japanese
+characters, `[ ]`, a space and `%`. A round trip on the owner's own photos,
+v2.30.2 against v2.31.0 on the same copies (25 exports with their real masters,
+from cameras of 2008–2026; 10 film scans and odd TIFFs; 17 JPEGs; the photo
+archive only read): every encode wrote the same codestream (60 of 60); the real
+masters decode to identical pixels; the lossless round trip gives back the
+original pixels and colour profile (25 of 25); the JPEG archives are
+byte-identical and rebuild each JPEG bit for bit (17 of 17). The differences are
+the intended ones: the History, the exact EXIF values (the camera's
+MaxApertureValue survives a round trip, 4 of 4), the TIFF's layout, the
+Explorer thumbnail made from memory, and sRGB copies converted in Python (at
+most 1 in 65535 from v2.30.2's, measured lossless). photo-backup's contract test
+passes (33, JP-1 to JP-24).
+
 ## v2.31.0-rc8
 
-**Released 2026-11-23, the eighth test release (pre-release) of v2.31.0**;
-the last stable release is [v2.30.2](#v2302). Everything in
+**Released 2026-11-23, the eighth test release (pre-release) of v2.31.0**,
+superseded by [v2.31.0](#v2310) the same day; the last stable release was
+[v2.30.2](#v2302). Everything in
 [v2.31.0-rc7](#v2310-rc7) is in it. The fixes of a sweep of rc7 by sibling
 rules — a proof one script or one direction requires and its twin does not
 (Fable, with four helpers, every finding reproduced in hostile folders before
