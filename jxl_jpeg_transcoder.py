@@ -48,7 +48,7 @@ from typing import Optional
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.31.0-rc5"
+TOOLKIT_VERSION = "2.31.0-rc6"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 
@@ -5730,12 +5730,27 @@ def _derivative_metadata_args(jxl_path: Path, label: str, size) -> list:
     # TIFFTAG_PREFIX: only a JXL -> TIFF decode reads those.
     drop = (SRC_PREFIX, SRCSUM_PREFIX, DERIVED_XMP_PREFIX, ICC_PROFILE_PREFIX,
             ORIENTATION_PREFIX, TIFFTAG_PREFIX)
+    if _extrasamples_not_alpha(tokens):
+        # D3 (rc6): _output_magick_args left that channel (a scanner's IR) out.
+        drop = drop + (_common._EXTRASAMPLES_TOKEN,)
     keep = [t for t in tokens if t and not t.startswith(drop)]
     lines = ["-XMP-dc:Relation+=" + _argfile_safe(t) for t in keep]
     lines.append("-XMP-dc:Relation+=" + DERIVED_XMP_PREFIX + label)
     if size:
         lines += _resized_dimension_lines(jxl_path, size)
     return lines
+
+
+_extrasamples_not_alpha = _common._extrasamples_not_alpha
+
+
+def _master_has_ir_channel(jxl_path: Path) -> bool:
+    """Does the master's jxlphoto-extrasamples say its extra channel is NOT
+    alpha (TIFF ExtraSamples 0: a scanner's IR)? Read with the cached
+    _read_creator_and_relation, which raises when it cannot read: a derivative
+    whose markers cannot be read is not produced (its profile is read the same
+    way)."""
+    return _extrasamples_not_alpha(_read_creator_and_relation(jxl_path)[1])
 
 
 def _output_magick_args(jxl_path: Path, tmp_png: Path, tmp_dir: Path,
@@ -5762,7 +5777,15 @@ def _output_magick_args(jxl_path: Path, tmp_png: Path, tmp_dir: Path,
     """
     grey = image[2] if image is not None else _png_is_grayscale(tmp_png)
     derivative = _is_derivative()
-    args = []
+    # A scanner's IR channel (jxlphoto-extrasamples: not alpha; JPEG XL stores
+    # it as alpha) takes no part in a derivative — resized, sharpened or
+    # colour-converted (output_icc is set only for those, #691): Lanczos
+    # weighted the colour by it (red, not purple) and a PNG copy came out RGBA
+    # with the IR as its transparency (rc6, Fable's second sweep D3). The
+    # recompressor's derivatives leave it out since #695; a faithful decode
+    # keeps the JXL's channels. _derivative_metadata_args drops the marker.
+    args = (["-alpha", "off"]
+            if (derivative or output_icc) and _master_has_ir_channel(jxl_path) else [])
     converted = bool(output_icc) and not grey
     src_profile = None
     if grey:

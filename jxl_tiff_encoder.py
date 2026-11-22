@@ -29,7 +29,7 @@ from PIL import Image
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.31.0-rc5"
+TOOLKIT_VERSION = "2.31.0-rc6"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 
@@ -2830,8 +2830,9 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
     # (An earlier version stripped it to "prevent double-rotation", which
     # could not happen here and silently de-rotated scans/camera TIFFs.)
     args_lines.append("-tagsfromfile")
-    args_lines.append(_exiftool_source(tiff_path, tmp_dir)       # '%' names: #550
-                      if not page_idx else _exiftool_source(tiff_path, tmp_dir, ifd=page_idx))
+    _tag_source = (_exiftool_source(tiff_path, tmp_dir)          # '%' names: #550
+                   if not page_idx else _exiftool_source(tiff_path, tmp_dir, ifd=page_idx))
+    args_lines.append(_tag_source)
     # The VALUES, not their printed form (#684): `-exif:all` copied
     # MaxApertureValue f/2.83 as f/2.8 and a FocalLength of 6.62 mm as 6.6 mm.
     # (A TIFF never gives -b -Exif a block, so this copy is the master's EXIF.)
@@ -2842,8 +2843,15 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
     # CompressedBitsPerPixel) in the master and in the TIFF decoded from it.
     # A later page takes ITS IFD (review N1: `-ifd0:all#` gave page N page 0's
     # values; `-ifdN:all#` writes to IFDN of the master, so it is redirected).
-    args_lines.append("-ifd0:all#" if not page_idx
-                      else f"-IFD0:all<IFD{int(page_idx)}:all#")
+    # The '#' on BOTH sides: with it on the source only, exiftool wrote the
+    # page's number through the PRINTED form — Orientation 1 matched
+    # "Rotate 180" (3) and ResolutionUnit was not copied at all (rc5, Fable's
+    # second sweep D2). A '%' path copies from _exiftool_source's MIE
+    # container, which holds IFD0 and IFD1 only and has the page's values in
+    # its IFD0 already: the last copy is its IFD0 (rc6's second review, S2:
+    # with `<IFDn` page 2 and after took page 1's Make, Artist, PageNumber...).
+    args_lines.append("-ifd0:all#" if not page_idx or _tag_source != str(tiff_path)
+                      else f"-IFD0:all#<IFD{int(page_idx)}:all#")
     if not xmp_preloaded:
         args_lines.append("-xmp:all")
 

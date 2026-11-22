@@ -156,6 +156,9 @@ def test_icc_intermediate_decode_requests_bit_depth(monkeypatch, tmp_path, fmt, 
     # #691: a colour-converted output is a derivative, whose marks are read
     # from the master (exiftool) — this stub JXL has none to read.
     monkeypatch.setattr(tr, "_derivative_metadata_args", lambda *a, **k: [])
+    # rc6 (#714): a derivative also reads whether the master's 4th channel is
+    # a scanner's IR — from the same marks this stub does not have.
+    monkeypatch.setattr(tr, "_master_has_ir_channel", lambda p: False)
     # v2.26.0: the JPEG branch asks jxlinfo for the JXL's orientation first;
     # this test's fake_run would record that as the first call.
     monkeypatch.setattr(tr, "_jxlinfo_text", lambda p: None)

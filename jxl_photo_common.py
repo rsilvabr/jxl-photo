@@ -45,7 +45,7 @@ import zlib
 from datetime import datetime
 from pathlib import Path
 
-TOOLKIT_VERSION = "2.31.0-rc5"
+TOOLKIT_VERSION = "2.31.0-rc6"
 
 
 class Script:
@@ -3387,9 +3387,13 @@ def _apply_settings_overlay(g, namespace: dict, module: str, specs: dict,
     `specs`, each checked by _overlay_value. A `derived` setting
     ({"EXIFTOOL_TIMEOUT": "CJXL_TIMEOUT"}) follows its source when the
     overlay changes the source and the script had it equal. Returns
-    {"path", "applied", "warnings"} for _log_settings_overlay. Never raises:
-    an overlay that cannot be read changes nothing."""
-    result = {"path": None, "applied": [], "warnings": []}
+    {"path", "applied", "warnings"} for _log_settings_overlay, plus "script":
+    the values the namespace held before (the script's own), from which the
+    wizard applies the file again after its menu S changed it
+    (_refresh_child_overlays, rc6 D5). Never raises: an overlay that cannot
+    be read changes nothing."""
+    result = {"path": None, "applied": [], "warnings": [],
+              "script": {name: namespace[name] for name in specs if name in namespace}}
     try:
         result["path"] = g._settings_overlay_path()
         if ((os.environ.get(g._SETTINGS_OVERLAY_ENV) or "").strip()
@@ -4036,9 +4040,18 @@ def _make_explorer_thumbnail(g, jxl_path, tmp_dir, marker_source=None):
     samples raw from stdin (_pam_raw_input). magick starts only once djxl has
     exited: djxl writes the --icc_out profile AFTER the image, and the
     command names the profile only when it exists. A PAM the raw read cannot
-    carry still goes through thumb.pam, the route before #671."""
+    carry still goes through thumb.pam, the route before #671.
+
+    Pixels decoded in the file's own space (--icc_out == --orig_icc_out) are
+    in the profile the master carries in XMP (jxlphoto-iccprofile), when it
+    has one that fits their channels: a master whose encode left the profile
+    out of the codestream (the encoder's and the recompressor's 'skip') has
+    its pixels tagged sRGB there, and its thumbnail came out in the wrong
+    colours (rc6, Fable's second sweep D12; the transcoder's direct decode
+    relabels the same way, _relabel_with_carried_icc, #568)."""
     tmp_dir = Path(tmp_dir)
     pam, icc = tmp_dir / "thumb.pam", tmp_dir / "thumb_src.icc"
+    carried = tmp_dir / "thumb_carried.icc"
     # The encoder's page check of the same file (its _KEPT_DECODE, asked for
     # while --verify-roundtrip checks every page): this decode is kept for it,
     # with the original profile too, so the page is decoded once.
@@ -4049,8 +4062,7 @@ def _make_explorer_thumbnail(g, jxl_path, tmp_dir, marker_source=None):
         if shutil.which("djxl") is None or shutil.which("magick") is None:
             raise RuntimeError("needs djxl and ImageMagick (magick) on PATH")
         r = g._run_to_memory(["djxl", str(jxl_path), "-", "--output_format=pam",
-                              f"--icc_out={icc}"]
-                             + ([f"--orig_icc_out={orig}"] if keep is not None else []),
+                              f"--icc_out={icc}", f"--orig_icc_out={orig}"],
                              g.CJXL_TIMEOUT)
         if r.returncode != 0 or not r.stdout:
             raise RuntimeError(f"djxl: {g._stderr_tail(r.stderr)}")
@@ -4071,15 +4083,37 @@ def _make_explorer_thumbnail(g, jxl_path, tmp_dir, marker_source=None):
         _head = _pam_header(r.stdout)
         drop_alpha = (_head is not None and _head[2] in (2, 4)
                       and _extra_channel_is_not_alpha(g, marker_source or jxl_path))
-        return _thumbnail_jpeg(g, source, pixels, icc, drop_alpha, tmp_dir)
+        src_icc = icc
+        if _head is not None and _decoded_in_original_space(icc, orig) is True:
+            prof = _carried_profile_of(g, marker_source or jxl_path, grey=_head[2] in (1, 2))
+            if prof:
+                carried.write_bytes(prof)
+                src_icc = carried
+        return _thumbnail_jpeg(g, source, pixels, src_icc, drop_alpha, tmp_dir)
     except Exception as e:
         g.logger.warning(f"  >Explorer thumbnail skipped ({e}) | {Path(jxl_path).name}")
         return None
     finally:
-        try:
-            pam.unlink()
-        except OSError:
-            pass
+        for _f in (pam, carried):
+            try:
+                _f.unlink()
+            except OSError:
+                pass
+
+
+def _carried_profile_of(g, path, grey):
+    """The ICC profile the file carries in XMP (_carried_icc: the
+    jxlphoto-iccprofile token, else a v2.18.x CreatorTool blob) when it fits
+    pixels of that kind (a GRAY profile for grey ones, an RGB one otherwise),
+    else None — also when the metadata cannot be read: the thumbnail then
+    keeps djxl's own profile, as before."""
+    try:
+        prof = _carried_icc(*_read_creator_and_relation(g, path))
+    except Exception:
+        return None
+    if not prof or len(prof) < 20 or prof[16:20] != (b"GRAY" if grey else b"RGB "):
+        return None
+    return prof
 
 
 def _thumbnail_jpeg(g, source, pixels, icc, drop_alpha, tmp_dir) -> bytes:
@@ -4754,13 +4788,15 @@ def _exiftool_source(g, path, tmp_dir, ifd=0) -> str:
     # nothing else in the container changes. -ifd0:all# last (#696): a
     # multi-page TIFF's later pages must not overwrite the first page's tags
     # in the container either (the callers copy IFD0 last for the same reason).
-    # `ifd`: the TIFF page the caller copies (review N1). Page 0 is forced
-    # into the container's IFD0; for a later page the container keeps IFD0
-    # and IFD1 as they are (all a MIE container holds of a TIFF's IFDs), and
-    # the caller redirects its page's IFD — pages 0 and 1 come out right, a
-    # page after them takes page 1's values.
+    # `ifd`: the TIFF page the caller copies (review N1). Its values are
+    # forced into the container's IFD0 — page 0's with `-ifd0:all#`, a later
+    # page's with `-IFD0:all#<IFDn:all#` — since a MIE container holds a
+    # TIFF's IFD0 and IFD1 only, and the encoder's last copy from a container
+    # is its IFD0: without both, page 2 and after took other pages' values in
+    # a '%' folder (rc6's reviews, S5 and second S2; `#` on both sides, #713).
     r = g._run_exiftool_argfile(["-o", mie, "-all:all", "-exif:all#"]
-                                + (["-ifd0:all#"] if not ifd else [])
+                                + (["-ifd0:all#"] if not ifd
+                                   else [f"-IFD0:all#<IFD{int(ifd)}:all#"])
                                 + ["-unsafe", p], timeout=g.EXIFTOOL_TIMEOUT)
     if os.path.exists(mie):
         return mie

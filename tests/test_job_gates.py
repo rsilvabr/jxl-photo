@@ -101,10 +101,11 @@ def test_a_clean_run_passes_every_path():
 
 
 def test_rule_order_is_the_old_order():
+    # guard_with_delete: rc6 (Fable's second sweep D15), after the option rules.
     assert [r[0] for r in wp._GATE_RULES] == [
         "ambiguous_delete_flags", "expert_flags_parse", "registry_rules",
-        "mode_in_expert_flags", "direct_derivatives", "manifest_derivatives",
-        "manifest_lossless_recovery", "preset_unattended"]
+        "guard_with_delete", "mode_in_expert_flags", "direct_derivatives",
+        "manifest_derivatives", "manifest_lossless_recovery", "preset_unattended"]
 
 
 class _UI:

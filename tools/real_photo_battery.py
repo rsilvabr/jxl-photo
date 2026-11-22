@@ -1884,6 +1884,30 @@ def camera_thumb_checks(folder):
     check("camera thumbnail TIFFs: every page archived, none taken for a film scan",
           rc == 0 and bool(srcs) and len(jx) == want and not scans and "only a guess" not in out,
           f"rc={rc} {len(jx)} JXL for {want} pages of {len(srcs)} TIFFs, scans={scans}")
+    # #713 (rc5's own bug): each page's master carries ITS page's EXIF values —
+    # rc5 wrote page 1's Orientation 1 as 3 ("Rotate 180", through the printed
+    # form) and left its ResolutionUnit out. Only the tags the page has.
+    wrong = []
+    for s in srcs:
+        with tifffile.TiffFile(s) as t:
+            page_tags = [{name: int(pg.tags[name].value) for name in
+                          ("Orientation", "ResolutionUnit") if name in pg.tags}
+                         for pg in t.pages]
+        for n, want_tags in enumerate(page_tags):
+            j = e / "converted_jxl" / (s.stem + (f"_page{n}" if n else "") + ".jxl")
+            if not j.exists():
+                wrong.append(f"{j.name}: missing")
+                continue
+            try:
+                got = json.loads(exif(["-j", "-IFD0:Orientation#", "-IFD0:ResolutionUnit#",
+                                       j]) or "[{}]")[0]
+            except ValueError:
+                got = {}
+            bad = {k: (v, got.get(k)) for k, v in want_tags.items() if got.get(k) != v}
+            if bad:
+                wrong.append(f"{j.name}: {bad}")
+    check("camera thumbnail TIFFs: each page's master keeps its page's Orientation and "
+          "ResolutionUnit (#713)", bool(srcs) and not wrong, f"{wrong[:4]}")
     dd = B / "camthumb_dec"
     for j in jx:
         cp(j, dd / j.name)

@@ -39,7 +39,7 @@ import numpy as np
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.31.0-rc5"
+TOOLKIT_VERSION = "2.31.0-rc6"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 
@@ -2852,7 +2852,10 @@ def _recompress_encode(jxl_path: Path, write_path: Path) -> tuple:
                 # every entry twice and doubling the list on every run.
                 # EXIF is still carried (plain boxes via -api Compress=0).
                 # The coder report for xmp-history has the probe.
-                "-x", "strip=xmp"] + _keep_invisible_flag() + _cjxl_buffering_flag())
+                # --num_threads: the share of the cores of each cjxl running at
+                # once (V1), as the derivatives' encodes have had since rc5.
+                "-x", "strip=xmp"] + _keep_invisible_flag() + _cjxl_buffering_flag()
+               + _cjxl_threads_flag())
         r = _run_cjxl_full(cmd)
         if r.returncode != 0:
             raise RuntimeError(f"cjxl: {_stderr_tail(r.stderr)}")

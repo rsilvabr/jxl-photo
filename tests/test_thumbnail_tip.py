@@ -152,14 +152,15 @@ def _settings_menu(tmp_path, monkeypatch, tip):
 
 def test_settings_screen_turns_the_tip_off_and_on(tmp_path, monkeypatch):
     config, menu = _settings_menu(tmp_path, monkeypatch, "a tip")
-    # staging, workers, quality, effort, distance, confirm, marker, tip
-    answers = iter(["", "", "", "", "", "", "", "n", ""])
+    # staging, workers, quality, effort, distance, marker, tip, update check
+    # (no "confirm before delete?" since rc6, #728: nothing read it)
+    answers = iter(["", "", "", "", "", "", "n", ""])
     monkeypatch.setattr("builtins.input", lambda *a: next(answers))
     menu.edit_settings()
     assert jxl_photo.ConfigManager().config.show_thumbnail_tip is False
     # Hidden: still asked, even though the menu no longer shows it.
     config, menu = _settings_menu(tmp_path, monkeypatch, "a tip")
-    answers = iter(["", "", "", "", "", "", "", "y", ""])
+    answers = iter(["", "", "", "", "", "", "y", ""])
     menu.edit_settings()
     assert jxl_photo.ConfigManager().config.show_thumbnail_tip is True
 
@@ -168,7 +169,7 @@ def test_settings_screen_turns_the_update_check_off(tmp_path, monkeypatch):
     # v2.23.0: both reminders can be turned off there (the tip on Windows).
     monkeypatch.setattr(jxl_photo.os, "name", "nt")
     config, menu = _settings_menu(tmp_path, monkeypatch, None)
-    answers = iter(["", "", "", "", "", "", "", "", "n"])   # ... tip, update check
+    answers = iter(["", "", "", "", "", "", "", "n"])   # ... tip, update check (#728)
     monkeypatch.setattr("builtins.input", lambda *a: next(answers))
     menu.edit_settings()
     assert config.config.show_thumbnail_tip is True

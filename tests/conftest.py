@@ -119,6 +119,14 @@ _CHILD_MODULES = (
 )
 
 
+# What the wizard's menu S changes in a script it has loaded
+# (_refresh_child_overlays, rc6 #716): every overlay setting, plus these, and
+# the CONTENT of _RUN_DEFAULTS. A menu-S test left rec.ON_DOWNGRADE = "skip"
+# for the next test of its worker (the review of rc6, S2).
+_OVERLAY_STATE = ("_SETTINGS_OVERLAY", "_DECODER_OUTPUT_FOLDERS",
+                  "_other_tool_folders_cache")
+
+
 def _run_global_names(mod) -> tuple:
     names = []
     defaults = getattr(mod, "_RUN_DEFAULTS", None)
@@ -130,12 +138,22 @@ def _run_global_names(mod) -> tuple:
     source = getattr(mod, "__file__", None)
     if source:
         names.extend(_reset_at_entry(source))
+    names.extend(getattr(mod, "_OVERLAY_SETTINGS", None) or ())
+    names.extend(_OVERLAY_STATE)
     return tuple(dict.fromkeys(names))
 
 
 def _snapshot(mod) -> dict:
-    return {name: getattr(mod, name)
-            for name in _run_global_names(mod) if hasattr(mod, name)}
+    values = {name: getattr(mod, name)
+              for name in _run_global_names(mod) if hasattr(mod, name)}
+    defaults = getattr(mod, "_RUN_DEFAULTS", None)
+    if isinstance(defaults, dict):
+        values[_RUN_DEFAULTS_CONTENT] = dict(defaults)
+    return values
+
+
+# A key no global has: the _RUN_DEFAULTS dict's content in a snapshot.
+_RUN_DEFAULTS_CONTENT = "<_RUN_DEFAULTS content>"
 
 
 def _clear_tool_version_cache():
@@ -178,11 +196,36 @@ def _isolate_run_globals():
             if mod is None:
                 continue
             if name in saved:
-                values = saved[name]
+                values = dict(saved[name])
             else:
                 # First imported DURING this test: restore its import-time
-                # settings (its own _RUN_DEFAULTS where it has one).
+                # settings (its own _RUN_DEFAULTS where it has one) — and, over
+                # them, the script's own values from before any overlay: a
+                # menu-S test imports the script it edits and
+                # _refresh_child_overlays then sets the file's values in it,
+                # its _RUN_DEFAULTS too (the review of rc6, S2).
                 values = dict(getattr(mod, "_RUN_DEFAULTS", None) or {})
+                script = (getattr(mod, "_SETTINGS_OVERLAY", None) or {}).get("script")
+                if isinstance(script, dict):
+                    values.update(script)
+                    rd = getattr(mod, "_RUN_DEFAULTS", None)
+                    if isinstance(rd, dict):
+                        values[_RUN_DEFAULTS_CONTENT] = {
+                            k: script.get(k, v) for k, v in rd.items()}
+                # What the script built from those settings at its import
+                # (rc6's second review, N4): made again from the suite's own
+                # environment (the test's overlay variable is gone by now).
+                if hasattr(mod, "_other_tool_folders_cache"):
+                    values["_other_tool_folders_cache"] = None
+                if callable(getattr(mod, "_decoder_output_folders", None)):
+                    try:
+                        values["_DECODER_OUTPUT_FOLDERS"] = mod._decoder_output_folders()
+                    except Exception:
+                        pass
+            content = values.pop(_RUN_DEFAULTS_CONTENT, None)
+            if content is not None and isinstance(getattr(mod, "_RUN_DEFAULTS", None), dict):
+                mod._RUN_DEFAULTS.clear()
+                mod._RUN_DEFAULTS.update(content)
             for gname, value in values.items():
                 setattr(mod, gname, value)
             # The abort latch and the Ctrl+C state (#702): a test that ended in

@@ -28,7 +28,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.31.0-rc5"
+TOOLKIT_VERSION = "2.31.0-rc6"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 
@@ -339,6 +339,20 @@ def _strip_surrounding_quotes(value: str) -> str:
     if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
         return value[1:-1]
     return value
+
+
+def _same_folder(a, b) -> bool:
+    """Do two typed folder paths name the same folder? A trailing separator,
+    the case of the letters and '.'/'..' parts do not count (rc6, D11: a
+    folder typed with a '\\' at the end was another folder to a text
+    comparison). Nothing is read from the disk."""
+    if not a or not b:
+        return False
+    try:
+        return (os.path.normcase(os.path.abspath(str(a)))
+                == os.path.normcase(os.path.abspath(str(b))))
+    except (TypeError, ValueError):
+        return False
 
 
 # cjxl's own ceiling ("Allowed range: 0.0 ... 25.0" in 0.11.x, "range: 0.0 ..
@@ -767,10 +781,12 @@ def _recompressor_replaces_file(source, dest_path, mode) -> bool:
     plan (_planned_output) put a FILE Source's output on that file (#708: a
     row with its folder as Destination replaced it in place — the child's
     in-place path — without the wrapper's confirmation)? A folder Source:
-    False (the recompressor refuses an output equal to its input in mode 2,
-    exit 2). Cannot tell: True, the confirmation is asked (fail closed)."""
+    _folder_row_replaces_files. Cannot tell: True, the confirmation is asked
+    (fail closed)."""
     try:
         src = Path(source)
+        if src.is_dir():
+            return _folder_row_replaces_files(src, dest_path, mode)
         if not src.is_file():
             return False
         rec = importlib.import_module('jxl_recompressor')
@@ -791,6 +807,68 @@ def _recompressor_replaces_file(source, dest_path, mode) -> bool:
         pass
     return (os.path.normcase(os.path.abspath(str(out)))
             == os.path.normcase(os.path.abspath(str(src))))
+
+
+def _jxl_run_replaces_in_place(origin, dest, mode, input_dir, output_dir) -> bool:
+    """Does this JXL -> JXL run (a direct run, a repeat, a preset) replace its
+    sources in place? One answer for the wizard's in-place confirmation, the
+    unattended refusal and the child's --delete-confirm-off
+    (_policy_delete): modes 0/8, and mode 2 when its output folder sits inside
+    the input folder and already holds JXLs (_recompress_entry_in_place; the
+    review of rc6, M1: the flag was sent without the confirmation)."""
+    if origin != 'jxl' or dest != 'jxl':
+        return False
+    if mode in (0, 8):
+        return True
+    if mode == 2 and input_dir and output_dir:
+        return _recompress_entry_in_place(input_dir, output_dir, 2)
+    return False
+
+
+def _folder_row_replaces_files(src: Path, dest_path, mode) -> bool:
+    """A FOLDER Source in mode 2 whose Destination is a folder INSIDE it: the
+    recompressor's flat, recursive run finds the JXLs already in that folder
+    and puts each one back on itself — the in-place path — and its own HHMM
+    question came up in the middle of the manifest (with no stdin: exit 3,
+    "Cancelled", and the scheduled run said it went well: rc6, Fable's second
+    sweep D13; #708 had closed the FILE Source). Asked of the recompressor's
+    own plan (_planned_output) for the files directly in the Destination —
+    a deeper one is flattened into it, never onto itself — and none when the
+    Destination's path below the Source names one of its own output folders
+    (its finder leaves those out). The Destination equal to the Source:
+    False (the recompressor refuses it, exit 2). Cannot tell: True."""
+    if not dest_path:
+        return False
+    try:
+        dst = Path(dest_path)
+        # Real paths: a Destination reached through a junction or an 8.3
+        # short name is inside the Source too, as the recompressor's own
+        # same-folder test (samefile) sees it (rc6's second review, N5).
+        s_real = os.path.realpath(str(src))
+        d_real = os.path.realpath(str(dst))
+        s_key, d_key = os.path.normcase(s_real), os.path.normcase(d_real)
+        if d_key == s_key or not d_key.startswith(s_key.rstrip(os.sep) + os.sep):
+            return False
+        if not dst.is_dir():
+            return False
+        rec = importlib.import_module('jxl_recompressor')
+        below = [p.lower() for p in Path(os.path.relpath(d_real, s_real)).parts]
+        if rec._is_own_output_path(below):
+            return False
+        with redirect_stderr(io.StringIO()):
+            ns = rec.build_parser().parse_args([str(src), str(dst), '--mode', str(mode)])
+        for f in dst.iterdir():
+            if not (f.suffix.lower() == '.jxl' and f.is_file()):
+                continue
+            out = rec._planned_output(f, ns)
+            if out is not None and (os.path.normcase(os.path.abspath(str(out)))
+                                    == os.path.normcase(os.path.abspath(str(f)))):
+                return True
+        return False
+    except SystemExit:
+        return True
+    except Exception:
+        return True
 
 
 _run_collapses_structure = _common._run_collapses_structure
@@ -2250,6 +2328,66 @@ def _has_derivative_options(advanced: Dict) -> bool:
                 or (advanced.get('sharpen') or 'none') != 'none')
 
 
+# --- A delete or a derivative typed in the expert flags (rc6, D15) -----------
+# The checks before the HHMM token read the run's own options; the expert
+# flags reach the child verbatim, so a --delete-source, a --resize-long or an
+# --output-icc typed there was seen by no check, and the child refused the run
+# with exit 2 AFTER the token. The owner's call: such a delete counts like [D].
+
+def _flags_shape_derivative(flags: Optional[str], origin: Optional[str],
+                            dest: Optional[str], colour: bool = True) -> bool:
+    """Do the expert flags make the child write a DERIVATIVE (a resize or a
+    sharpening; with `colour`, a colour conversion too)? The child's own parse
+    answers. `colour=False` for the transcoder's bit-exact route
+    (--force-transcode), which ignores a profile and keeps its delete."""
+    ns = _child_flags(origin, dest, flags)
+    if ns is None:
+        return False
+    shaped = bool(getattr(ns, 'resize_long', None) or getattr(ns, 'resize_short', None)
+                  or getattr(ns, 'resize_percent', None)
+                  or (getattr(ns, 'sharpen', None) or 'none') != 'none')
+    coloured = bool(getattr(ns, 'output_icc', None) or getattr(ns, 'icc_profile', None)
+                    or getattr(ns, 'to_srgb', False))
+    return shaped or (colour and coloured)
+
+
+# The conversions of the transcoder's bit-exact route (--force-transcode).
+_BIT_EXACT_CONVERSIONS = ('transcode_lossless', 'jxl_to_jpeg_lossless')
+
+
+def _flags_derivative_refused(workflow: Dict) -> bool:
+    """Would the child refuse this run's delete for a derivative typed in its
+    expert flags (rc6, D15; the review's S1)? The scripts' own rules: resize
+    or sharpening never with a delete (recompressor and transcoder, every
+    route), a colour conversion never with one except on the transcoder's
+    bit-exact route (the profile is ignored there, N3). The TIFF scripts
+    have no such flag."""
+    origin, dest = workflow.get('origin_format'), workflow.get('dest_format')
+    if (origin, dest) in (('tiff', 'jxl'), ('jxl', 'tiff')) or not origin or not dest:
+        return False
+    return _flags_shape_derivative(
+        workflow.get('expert_flags'), origin, dest,
+        colour=workflow.get('conversion_type') not in _BIT_EXACT_CONVERSIONS)
+
+
+def _flags_turn_guard_off(flags: Optional[str], origin: Optional[str],
+                          dest: Optional[str]) -> bool:
+    """Is --no-overwrite-guard among the expert flags?"""
+    ns = _child_flags(origin, dest, flags)
+    if ns is not None:
+        return bool(getattr(ns, 'no_overwrite_guard', False))
+    return '--no-overwrite-guard' in _split_expert_flags(flags or '')
+
+
+def _job_deletes(workflow: Dict) -> bool:
+    """Does this run delete its sources — [D] or --delete-source in the
+    expert flags (rc6, D15: both count the same before the HHMM)?"""
+    return bool((workflow.get('advanced_options') or {}).get('delete_source')
+                or _flags_request_delete(workflow.get('expert_flags'),
+                                         workflow.get('origin_format'),
+                                         workflow.get('dest_format')))
+
+
 def _lossy_decode_never_deletes(workflow: Dict) -> Optional[str]:
     """Why this JXL -> JPEG/PNG run cannot delete its JXLs, or None (T-B of
     the 2026-11-03 audit, the owner's option 1; the transcoder refuses the
@@ -2385,12 +2523,17 @@ def _ask_output_shaping(workflow: Dict, ui: "Optional[UI]" = None) -> None:
 def _derivative_in_place_rows(entries: List) -> List:
     """Manifest rows (source, destination, mode) that would run the
     recompressor IN PLACE: mode 8, or mode 0 whose Destination is empty or the
-    Source itself (the builder then sends no output, or the same folder).
-    --output-icc and --rename-from refuse those (exit 2 per row)."""
+    Source itself (the builder then sends no output, or the same folder), or
+    mode 2 whose Destination inside the Source already holds JXLs (rc6's
+    second review, N1). --output-icc and --rename-from refuse those (exit 2
+    per row)."""
     rows = []
     for src, dst, mode in entries:
         if mode == 8:
             rows.append((src, dst, mode))
+        elif mode == 2:
+            if _recompress_entry_in_place(src, dst, 2):
+                rows.append((src, dst, mode))
         elif mode == 0:
             same = not dst
             if not same:
@@ -3480,21 +3623,68 @@ def _registry_rule_problem(workflow: Dict) -> Optional[str]:
     origin, dest = workflow.get('origin_format'), workflow.get('dest_format')
     if not origin or not dest:
         return None
+    # A delete typed in the expert flags is a delete here too (rc6, D15): its
+    # conflicts (--restamp-then-sync, --exiftool-ignore-minor) were met by
+    # the child, with exit 2 after the HHMM.
+    adv = dict(workflow.get('advanced_options') or {})
+    _flags_ns = _child_flags(origin, dest, workflow.get('expert_flags'))
+    if _flags_request_delete(workflow.get('expert_flags'), origin, dest):
+        adv['delete_source'] = True
+        if _flags_ns is not None and getattr(_flags_ns, 'delete_skipped', False):
+            adv['delete_skipped'] = True
     ctx = _CmdCtx(origin, dest, workflow.get('input_dir'), None, workflow.get('mode'),
-                  workflow.get('workers'), workflow,
-                  workflow.get('advanced_options') or {}, False, None)
+                  workflow.get('workers'), workflow, adv, False, None)
     on = {o.id for o in REGISTRY if _opt_is_on(o, ctx)}
+    # Any option typed in the expert flags is "on" for the conflicts too (the
+    # review of rc6, S1: --restamp-then-sync or --exiftool-ignore-minor typed
+    # there next to a delete reached the child, refused after the HHMM). A
+    # requirement stays the wizard's own options' rule.
+    typed = _flags_set_options(workflow.get('expert_flags'), origin, dest)
+    flag_on = {o.id for o in REGISTRY
+               if ctx.direction in o.directions and o.flag in typed}
+    if "delete_source" not in on | flag_on:
+        # A --delete-skipped alone is inert (every script ignores it without
+        # --delete-source): no conflict for it (rc6's second review, N2).
+        flag_on.discard("delete_skipped")
     label = {o.id: o.label for o in REGISTRY}
     for o in REGISTRY:
-        if o.id not in on:
+        if o.id not in on | flag_on:
             continue
-        bad = [label.get(c, c) for c in o.conflicts if c in on]
+        bad = [label.get(c, c) for c in o.conflicts if c in on | flag_on]
         if bad:
             return f"'{o.label}' ({o.flag}) cannot run with: {', '.join(bad)}"
-        missing = [label.get(r, r) for r in o.requires if r not in on]
+        if o.id not in on:
+            continue
+        missing = [label.get(r, r) for r in o.requires if r not in on | flag_on]
         if missing:
             return f"'{o.label}' ({o.flag}) needs: {', '.join(missing)}"
     return None
+
+
+def _flags_set_options(flags: Optional[str], origin: Optional[str],
+                       dest: Optional[str]) -> Set[str]:
+    """The option strings of the child's parser ('--restamp-then-sync') that
+    the expert flags SET: their argparse dest differs from the parser's own
+    default — the child's parse, never the wizard's reading of the spelling
+    (a flag's dest is not always its name: the decoder's --none is
+    force_none). Empty when nothing can be parsed."""
+    tokens = _split_expert_flags(flags or '')
+    if not tokens or not origin or not dest:
+        return set()
+    try:
+        parser = importlib.import_module(_child_module(origin, dest)).build_parser()
+        parser.set_defaults(mode=_MODE_NOT_GIVEN)
+    except Exception:
+        return set()
+    try:
+        with redirect_stderr(io.StringIO()):
+            ns, _x = parser.parse_known_args(["__jxlphoto_probe__"] + tokens)
+            ns0, _y = parser.parse_known_args(["__jxlphoto_probe__"])
+    except SystemExit:
+        return set()
+    return {opt for opt, action in parser._option_string_actions.items()
+            if action.dest not in ("help", "version")
+            and getattr(ns, action.dest, None) != getattr(ns0, action.dest, None)}
 
 
 def _dest_is_source_file(source, dest_path, mode) -> bool:
@@ -4183,6 +4373,54 @@ def _write_overlay_file(path: Path, data: Dict) -> None:
             pass
         raise
 
+
+def _refresh_child_overlays() -> None:
+    """The scripts this wizard has already imported take the overlay file
+    again, after menu S changed it. Each one applied the file when it was
+    imported, and the wizard reads its settings from it (_child_setting, the
+    plan's functions) and sends some of them on the command line, where they
+    win over the file: a change made in menu S reached a job only after the
+    wizard was restarted (rc6, Fable's second sweep D5; #709 had fixed the
+    task memory's side). From the values the script had before the overlay
+    (_SETTINGS_OVERLAY["script"]), exactly as at its import: a setting taken
+    out of the file goes back to the script's value. The per-run snapshot
+    (_RUN_DEFAULTS) follows, and so does the encoder's list of the decoder's
+    folder names, built from that script's settings at import; the decoder's
+    and the recompressor's list of the other tools' folder names is made again
+    at its next use."""
+    for module, _label in _OVERLAY_SCRIPTS:
+        mod = sys.modules.get(module)
+        if mod is None:
+            continue            # not imported yet: its import reads the new file
+        try:
+            before = mod._SETTINGS_OVERLAY.get("script")
+            specs, derived = mod._OVERLAY_SETTINGS, mod._OVERLAY_DERIVED
+        except Exception:
+            continue
+        if not isinstance(before, dict):
+            continue
+        namespace = dict(before)
+        result = mod._apply_settings_overlay(namespace, module, specs, derived)
+        run_defaults = getattr(mod, "_RUN_DEFAULTS", None)
+        for name, value in namespace.items():
+            if name not in specs:
+                continue
+            setattr(mod, name, value)
+            if isinstance(run_defaults, dict) and name in run_defaults:
+                run_defaults[name] = value
+        mod._SETTINGS_OVERLAY = result
+        # The decoder's and the recompressor's lazy list of the OTHER tools'
+        # folder names (#565), read from those scripts' settings and the
+        # overlay once: made again at its next use (the review of rc6, S3).
+        if hasattr(mod, "_other_tool_folders_cache"):
+            mod._other_tool_folders_cache = None
+    enc = sys.modules.get("jxl_tiff_encoder")
+    if enc is not None and callable(getattr(enc, "_decoder_output_folders", None)):
+        try:
+            enc._DECODER_OUTPUT_FOLDERS = enc._decoder_output_folders()
+        except Exception:
+            pass
+
 # === END OF SCRIPT SETTINGS OVERLAY ==========================================
 
 
@@ -4215,6 +4453,11 @@ TASKS: Tuple[Tuple[str, str, str, str, Tuple[str, ...]], ...] = (
     ("reencode_jpeg", "Re-encode JPEGs lossy", "jpeg", "jxl", ("convert_lossy",)),
 )
 _TASK_BY_ID = {t[0]: t for t in TASKS}
+# The conversion types more than one task offers (jxl_to_jpeg_auto: "Export
+# JPEGs" and "Get the original JPEGs back"): a job of one names no task.
+_CONVERSIONS_OF_TWO_TASKS = frozenset(
+    conv for conv in {c for t in TASKS for c in t[4]}
+    if sum(conv in t[4] for t in TASKS) > 1)
 
 
 def _task_of(origin: Optional[str], dest: Optional[str], conv: Optional[str]) -> str:
@@ -4489,6 +4732,39 @@ def _gate_registry_rules(menu, wf, ctx) -> bool:
     return False
 
 
+def _gate_guard_with_delete(menu, wf, ctx) -> bool:
+    """A run that deletes never runs with the overwrite guard off: every
+    script refuses the pair (exit 2). A --delete-source typed in the expert
+    flags counts like [D] (rc6, Fable's second sweep D15): the 'off' the job
+    took from its task's memory before the flags were typed does not apply
+    (_append_overwrite_guard_flag leaves it out, as the [D] review and the
+    #707 replay do), said here; a --no-overwrite-guard typed next to a delete
+    is refused before the HHMM — the child refused it after."""
+    if not _job_deletes(wf):
+        return False
+    origin, dest = wf.get('origin_format'), wf.get('dest_format')
+    if _flags_turn_guard_off(wf.get('expert_flags'), origin, dest):
+        menu._print_error("--no-overwrite-guard cannot run with a delete: every script "
+                          "refuses the pair. Remove one of them; nothing was started.")
+        return True
+    # A maintenance mode typed in the expert flags (menus 5-8: --restamp-moved,
+    # --refresh-explorer-thumbnails, ...) never runs with a delete either; the
+    # script refused the pair after the HHMM (rc6's second review, N3).
+    _module = _child_module(origin, dest) if origin and dest else ""
+    _maintenance = sorted(f for f in _flags_set_options(wf.get('expert_flags'), origin, dest)
+                          if f"{_module}:{f}" in MAINTENANCE_FLAGS)
+    if _maintenance:
+        menu._print_error(f"{', '.join(_maintenance)} is a maintenance mode (menus 5-8) and "
+                          f"never runs with a delete. Remove one of them; nothing was started.")
+        return True
+    if ((wf.get('advanced_options') or {}).get('overwrite_guard') is False
+            and not wf.get('_guard_note_shown')):
+        wf['_guard_note_shown'] = True
+        menu.ui.warn("The overwrite guard stays on wherever this run deletes sources: "
+                     "an earlier choice of 'off' does not apply there.")
+    return False
+
+
 def _gate_mode_in_expert_flags(menu, wf, ctx) -> bool:
     _mode_flag = _flags_set_mode(wf.get('expert_flags'), wf.get('origin_format'),
                                  wf.get('dest_format'))
@@ -4517,24 +4793,50 @@ def _gate_direct_derivatives(menu, wf, ctx) -> bool:
     child would reject with exit 2."""
     origin, dest = wf['origin_format'], wf['dest_format']
     _adv_pre = wf.get('advanced_options') or {}
-    _shaping_pre = _has_derivative_options(_adv_pre)
+    # A JXL -> JXL derivative typed in the expert flags has no in-place form
+    # either (rc6, D15: mode 0 + [x] --output-icc reached the recompressor).
+    _shaping_pre = (_has_derivative_options(_adv_pre)
+                    or (origin == 'jxl' and dest == 'jxl'
+                        and _flags_shape_derivative(wf.get('expert_flags'), origin, dest)))
     _delete_pre = bool(_adv_pre.get('delete_source')
                        or _flags_request_delete(wf.get('expert_flags'), origin, dest))
     _conv_pre = wf.get('conversion_type', '')
+    # A derivative typed in the expert flags (rc6, D15: an --output-icc or a
+    # --resize-long next to [D] reached the child, which refused it after the
+    # HHMM; the review's S1 and N3: the JPEG -> JXL convert too, never the
+    # bit-exact route's ignored profile).
+    if _delete_pre and _flags_derivative_refused(wf):
+        menu._print_error("The expert flags make this run write a DERIVATIVE (a colour "
+                          "conversion, a resize or a sharpening), which never deletes its "
+                          "source — drop the delete option or those flags.")
+        return True
+    # The decoder's --none typed there is the decode mode 'none' (W4 below).
+    _flags_ns = _child_flags(origin, dest, wf.get('expert_flags'))
+    _none_pre = bool(_adv_pre.get('none')
+                     or (_flags_ns is not None and getattr(_flags_ns, 'force_none', False)))
     if origin == 'jxl' and dest == 'jxl':
+        # In place: modes 0/8, and a mode-2 output folder inside the input that
+        # already holds JXLs (rc6's second review, N1: the in-place HHMM was
+        # asked, then the recompressor refused the derivative, exit 2).
+        _in_place_pre = _jxl_run_replaces_in_place(
+            origin, dest, wf.get('mode'), wf.get('input_dir'),
+            (wf.get('mode_config') or {}).get('output_dir'))
         if _shaping_pre:
-            if wf.get('mode') in (0, 8):
+            if _in_place_pre:
                 menu._print_error("Derivatives (colour conversion/resize/sharpening) "
-                                  "cannot run in place (modes 0/8) — pick mode 1-7.")
+                                  "cannot run in place (modes 0/8, or an output folder "
+                                  "inside the input that already holds JXLs) — pick "
+                                  "another mode or output folder.")
                 return True
             if _delete_pre:
                 menu._print_error("A derivative never deletes its source — drop the "
                                   "delete option.")
                 return True
-        if _adv_pre.get('rename_from') and wf.get('mode') in (0, 8):
-            menu._print_error("--rename-from cannot be used in place (modes 0/8): the "
-                              "renamed file would sit beside its source and be "
-                              "re-processed as a new input.")
+        if _adv_pre.get('rename_from') and _in_place_pre:
+            menu._print_error("--rename-from cannot be used in place (modes 0/8, or an "
+                              "output folder inside the input that already holds "
+                              "JXLs): the renamed file would sit beside its source "
+                              "and be re-processed as a new input.")
             return True
     if (origin == 'jxl' and dest in ('jpeg', 'png')
             and _conv_pre in ('jxl_to_jpeg_auto', 'jxl_to_jpeg_force', 'jxl_to_png')
@@ -4547,7 +4849,7 @@ def _gate_direct_derivatives(menu, wf, ctx) -> bool:
         return True
     if origin == 'jxl' and dest == 'tiff' and _delete_pre:
         # W4 (2026-10-08 audit): a degraded decode is not a copy of the master.
-        if _adv_pre.get('none'):
+        if _none_pre:
             menu._print_error("Decode mode 'none' writes no colour profile and no "
                               "XMP/IPTC — the TIFF is not a copy of the master, so "
                               "it cannot delete the JXLs. Drop the delete option "
@@ -4612,11 +4914,45 @@ def _gate_manifest_derivatives(menu, wf, ctx) -> bool:
     advanced = ctx['advanced']
     row_effs = ctx['row_effs']
     resolved_entries = ctx['resolved_entries']
+    _flags_derived = (origin == 'jxl' and dest == 'jxl'
+                      and _flags_shape_derivative(wf.get('expert_flags'), origin, dest))
     _derived_rows = [i + 1 for i, (_w, _a) in enumerate(row_effs)
-                     if _has_derivative_options(_a)]
+                     if _has_derivative_options(_a) or _flags_derived]
     _rename_rows = [i + 1 for i, (_w, _a) in enumerate(row_effs) if _a.get('rename_from')]
-    _manifest_delete = bool(advanced.get('delete_source')
-                            or _flags_request_delete(wf.get('expert_flags'), origin, dest))
+    _flags_delete = _flags_request_delete(wf.get('expert_flags'), origin, dest)
+    _manifest_delete = bool(advanced.get('delete_source') or _flags_delete)
+    if _manifest_delete and _flags_derivative_refused(wf):
+        # rc6, D15: a derivative typed in the expert flags makes every row one.
+        menu._print_error("The expert flags make every row write a DERIVATIVE (a colour "
+                          "conversion, a resize or a sharpening), which never deletes its "
+                          "source — drop the delete option or those flags.")
+        return True
+    _flags_ns = _child_flags(origin, dest, wf.get('expert_flags'))
+    if (_manifest_delete and origin == 'jxl' and dest == 'tiff'
+            and (advanced.get('none')
+                 or (_flags_ns is not None and getattr(_flags_ns, 'force_none', False)))):
+        # W4 for a manifest (the review of rc6, S1): the decoder refuses a delete
+        # with decode mode 'none' (no colour profile, no XMP/IPTC: not a copy of
+        # the master) — after the HHMM, every row.
+        menu._print_error("Decode mode 'none' writes no colour profile and no XMP/IPTC — "
+                          "the TIFFs are not copies of the masters, so they cannot delete "
+                          "the JXLs. Drop the delete option (or pick another decode mode).")
+        return True
+    if _flags_delete and origin == 'jxl' and dest in ('jpeg', 'png'):
+        # A --delete-source typed in the expert flags reaches EVERY row, and
+        # the wizard cannot take it out of the rows that never delete, as it
+        # does for [D] (_policy_delete): the child refused each of them after
+        # the HHMM, a "WRAPPER bug" in the message (rc6, D15, Fable's p10).
+        _never_rows = [i + 1 for i, (_w, _a) in enumerate(row_effs)
+                       if _has_derivative_options(_a) or _w.get('icc_profile')
+                       or _lossy_decode_never_deletes(_w)]
+        if _never_rows:
+            menu._print_error(
+                "--delete-source in the expert flags reaches every row, and row(s) "
+                f"{', '.join(map(str, _never_rows[:10]))} never delete their source (a "
+                "lossy decode or a derivative). Use 'Delete originals' ([D]) instead — "
+                "the wizard leaves it out of those rows — or remove the flag.")
+            return True
     if origin == 'jxl' and dest == 'jxl' and (_derived_rows or _rename_rows):
         if _derived_rows and _manifest_delete:
             menu._print_error("A derivative (colour conversion/resize/sharpening) "
@@ -4708,16 +5044,21 @@ def _gate_preset_unattended(menu, wf, ctx) -> bool:
     HHMM token nobody can type, and skipping them would let a scheduled task
     delete originals on its own. Three ways a stored run reaches a deletion
     are checked: delete_source in ANY mode, --delete-source in the expert
-    flags, and a JXL -> JXL run in modes 0/8 (it replaces the sources in
-    place: the recompressor's confirmation would read an EOF stdin)."""
+    flags, and a JXL -> JXL run that replaces its sources in place
+    (_jxl_run_replaces_in_place: modes 0/8, or a mode-2 output folder inside
+    the input that already holds JXLs; the recompressor's confirmation would
+    read an EOF stdin)."""
     if ctx.get('dry_run'):
         return False
     session = ctx['session']
     _adv_delete = bool((session.get('last_advanced_options') or {}).get('delete_source'))
     _flag_delete = _flags_request_delete(session.get('last_expert_flags'),
                                          ctx['origin'], ctx['dest'])
-    _in_place_recompress = (ctx['origin'] == 'jxl' and ctx['dest'] == 'jxl'
-                            and ctx['mode'] in (0, 8))
+    # The run's own in-place test (the review of rc6, M1): a mode-2 preset
+    # whose output folder, inside its input folder, holds JXLs replaces them.
+    _in_place_recompress = _jxl_run_replaces_in_place(
+        ctx['origin'], ctx['dest'], ctx['mode'], session.get('last_input_dir'),
+        (session.get('last_mode_config') or {}).get('output_dir'))
     if _flag_delete or _adv_delete or _in_place_recompress:
         why = ("replaces the source JXLs in place"
                if _in_place_recompress and not (_flag_delete or _adv_delete)
@@ -4737,6 +5078,7 @@ _GATE_RULES: Tuple[Tuple[str, frozenset, Callable], ...] = (
     ("ambiguous_delete_flags", frozenset({"common"}), _gate_ambiguous_delete_flags),
     ("expert_flags_parse", frozenset({"common"}), _gate_expert_flags_parse),
     ("registry_rules", frozenset({"common"}), _gate_registry_rules),
+    ("guard_with_delete", frozenset({"common"}), _gate_guard_with_delete),
     ("mode_in_expert_flags", frozenset({"common"}), _gate_mode_in_expert_flags),
     ("direct_derivatives", frozenset({"direct"}), _gate_direct_derivatives),
     ("manifest_derivatives", frozenset({"manifest"}), _gate_manifest_derivatives),
@@ -5236,6 +5578,7 @@ class InteractiveMenu:
             except OSError as e:
                 self._print_error(f"Could not write {path}: {e}")
                 return
+            _refresh_child_overlays()
             ui.line(f"{name}: " + ("back to the script's value" if remove
                                    else f"{json.dumps(new, ensure_ascii=False)} (overlay)"))
 
@@ -5372,6 +5715,7 @@ class InteractiveMenu:
         was_workers, was_quality = current.default_workers, current.default_quality
         was_effort = current.default_effort
         was_distance = _sane_distance(current.default_distance)
+        was_staging = current.staging_dir
         # Asked only where the tip means something: no thumbnail handler on
         # this PC, or the tip already hidden (so it can be turned back on).
         # Always asked on Windows (since v2.23.0): a reminder must be easy to
@@ -5407,7 +5751,6 @@ class InteractiveMenu:
                 ("JPEG quality", _effective(current.default_quality, current.last_quality)),
                 ("Effort", _effective(current.default_effort, current.last_effort)),
                 ("Distance for TIFF → JXL", _shown_distance),
-                ("Confirm deletes", _yn(current.confirm_delete)),
                 ("Export marker", current.export_marker),
                 ("Recommend jxl-thumb", _yn(current.show_thumbnail_tip)),
                 ("Check for new releases", _yn(current.check_for_updates)),
@@ -5444,8 +5787,10 @@ class InteractiveMenu:
             "New distance (0=lossless, 0.05=finest lossy, 0.1=near-lossless): ",
             default=(f"{_sane_distance(current.default_distance):g}" if ui.is_rich else None))
 
-        new_confirm = ui.ask_yes("settings.confirm_delete", "Confirm before delete?",
-                                 "Confirm before delete? (y/n): ", current.confirm_delete)
+        # No "Confirm before delete?" since rc6 (Fable's second sweep): it was
+        # asked and saved (ToolConfig.confirm_delete, kept for old configs) and
+        # read by nothing — every delete asks for its HHMM token, and a "no"
+        # here promised otherwise.
 
         ui.markup(None, f"Current marker: {current.export_marker}")
         new_marker = ui.ask_line("settings.marker", "Export marker", "New export marker: ",
@@ -5482,7 +5827,6 @@ class InteractiveMenu:
             except ValueError:
                 self._print_error(f"Invalid distance {typed_distance!r} — keeping {current_distance:g}")
                 self.config.config.default_distance = current_distance
-        self.config.config.confirm_delete = new_confirm
         self.config.config.show_thumbnail_tip = bool(new_tip)
         self.config.config.check_for_updates = bool(new_update_check)
 
@@ -5504,16 +5848,28 @@ class InteractiveMenu:
         if cfg.default_effort != was_effort:
             cfg.last_effort = cfg.default_effort
             _changed.append('last_effort')
-        if _sane_distance(cfg.default_distance) != was_distance:
+        # The distance is the one of "Archive TIFFs" (TIFF -> JXL): it is the
+        # last job's only when that job archived TIFFs, and only that task's
+        # memory forgets its own. A JXL -> JXL job at d=1 was repeated at the
+        # new TIFF default (rc6, Fable's second sweep D8).
+        _distance_changed = _sane_distance(cfg.default_distance) != was_distance
+        if _distance_changed and _task_of(cfg.last_origin_format, cfg.last_dest_format,
+                                          cfg.last_conversion_type) == 'archive_tiff':
             cfg.last_distance = _sane_distance(cfg.default_distance)
-            _changed.append('last_distance')
+        # The staging folder is the PC's (_new_workflow takes the last job's,
+        # whatever its task): a new one here is the next job's too. The last
+        # job's kept winning, and 'none' could not clear it (rc6, D9).
+        if cfg.staging_dir != was_staging:
+            cfg.last_staging = cfg.staging_dir
         # The tasks' own memories (#704) hold that value too: a changed
         # default is the next job's value for every task (review S6).
-        if _changed and isinstance(cfg.task_memory, dict):
-            for _entry in cfg.task_memory.values():
+        if isinstance(cfg.task_memory, dict):
+            for _tid, _entry in cfg.task_memory.items():
                 if isinstance(_entry, dict):
                     for _field in _changed:
                         _entry.pop(_field, None)
+                    if _distance_changed and _tid == 'archive_tiff':
+                        _entry.pop('last_distance', None)
 
         self.config.save_config()
         self._print_success("Settings saved!")
@@ -5548,10 +5904,17 @@ class InteractiveMenu:
             return c
         memory = c.task_memory if isinstance(c.task_memory, dict) else {}
         entry = memory.get(task)
-        if (not isinstance(entry, dict) and _task_of(
-                c.last_origin_format, c.last_dest_format, c.last_conversion_type) == task):
+        if (not memory and c.last_conversion_type not in _CONVERSIONS_OF_TWO_TASKS
+                and _task_of(c.last_origin_format, c.last_dest_format,
+                             c.last_conversion_type) == task):
             # A config saved before task_memory existed, whose last job WAS
             # this task: its values, as before (only another task's are not).
+            # Only such a config (no memory at all: since rc5 every job saves
+            # its task's), and only when the conversion names one task:
+            # jxl_to_jpeg_auto is offered by "Export JPEGs" AND "Get the
+            # original JPEGs back", and an auto export handed its JPG_web
+            # folder, quality and forced decode to the first recovery of the
+            # bit-exact originals (rc6, Fable's second sweep D7).
             return c
         return _TaskMemory(c, entry)
 
@@ -5652,6 +6015,11 @@ class InteractiveMenu:
                                 else str(default))
         try:
             value = kind(text)
+            # float() takes 'nan' and 'inf': clamped, NaN became `lo` — a
+            # typed 'nan' distance was 0, LOSSLESS, without a word (rc6,
+            # Fable's second sweep).
+            if value != value or value in (float('inf'), float('-inf')):
+                raise ValueError(text)
         except (TypeError, ValueError):
             self.ui.warn(f"Not a number: {text!r} — keeping {default}.")
             return default
@@ -6015,6 +6383,13 @@ class InteractiveMenu:
             if workflow['mode'] in (0, 8):
                 rows.append(("derivative", "Colour/size derivative",
                              "not in place (modes 0/8)", None))
+            elif _jxl_run_replaces_in_place(
+                    origin, dest, workflow['mode'], workflow.get('input_dir'),
+                    (workflow.get('mode_config') or {}).get('output_dir')):
+                # rc6's second review, N1: the gate refuses it (in place).
+                rows.append(("derivative", "Colour/size derivative",
+                             "not in place (the output folder, inside the input, "
+                             "holds JXLs)", None))
             elif delete_on:
                 rows.append(("derivative", "Colour/size derivative", "not with [D]", None))
             else:
@@ -6135,7 +6510,10 @@ class InteractiveMenu:
                      _existing))
 
         if delete_on:
-            rows.append(("delete", "Delete the sources", "YES — chosen with [D] in the mode step", None))
+            rows.append(("delete", "Delete the sources",
+                         "YES — chosen with [D] in the mode step"
+                         if (workflow.get('delete_source') or adv.get('delete_source'))
+                         else "YES — --delete-source in the expert flags", None))
         else:
             def _guard():
                 ui.line("Overwrite guard: an output records the full path of the file that made "
@@ -6381,6 +6759,15 @@ class InteractiveMenu:
         for _field, _value in (workflow.get('_pending_session_fields') or {}).items():
             setattr(config.config, _field, _value)
         adv = workflow.get('advanced_options', {}) or {}
+        # The export marker a mode-6/7 (or manifest) job ran with, saved even
+        # when it is the wrapper's: the mode step kept it only when it differed,
+        # so a preset or "Repeat last job" ran with the marker menu 9 said ON
+        # THE DAY OF THE REPLAY (rc6, Fable's second sweep D10; the owner's call:
+        # a preset repeats what the job ran). The replay keeps it (_keep).
+        _saved_mc = workflow.get('mode_config')
+        if (str(workflow.get('mode')) in ('6', '7', '99')
+                and not (_saved_mc or {}).get('export_marker')):
+            _saved_mc = dict(_saved_mc or {}, export_marker=config.config.export_marker)
         config.save_last_session(
             input_dir=workflow['input_dir'], output_mode=str(workflow['mode']),
             workers=workflow['workers'], staging=workflow['staging'],
@@ -6397,7 +6784,7 @@ class InteractiveMenu:
             compression=workflow.get('compression') if dest == 'tiff' else None,
             bit_depth=workflow.get('bit_depth') if dest in ('tiff', 'png') else None,
             add_preview=workflow.get('add_preview') if dest == 'tiff' else None,
-            mode_config=workflow.get('mode_config'),
+            mode_config=_saved_mc,
             manifest_path=workflow.get('manifest_path'),
             extra_options=workflow.get('extra_options') or {},
             exclude_folders=(workflow['exclude_folders']
@@ -6803,13 +7190,20 @@ class InteractiveMenu:
             return
         with stream as f:
             reader = csv.reader(f)
-            first_row = next(reader, None)
+            try:
+                all_rows = list(reader)
+            except csv.Error as e:          # a cell over 128 KB (rc6, D16)
+                self._print_error(
+                    f"The manifest cannot be read as CSV (line {reader.line_num}: {e}): "
+                    f"{manifest_path}")
+                return
+            first_row = all_rows[0] if all_rows else None
             rows = []
             if first_row is not None:
                 if _is_manifest_header_row(first_row):
-                    rows = list(reader)
+                    rows = all_rows[1:]
                 else:
-                    rows = [first_row] + list(reader)
+                    rows = all_rows
             for row in rows:
                 if row and not (len(row) == 1 and row[0].strip().startswith('#')):
                     source = row[0].strip()
@@ -6900,14 +7294,34 @@ class InteractiveMenu:
         with stream as f:
             import csv
             reader = csv.reader(f)
-            first_row = next(reader, None)
+            # Read whole here: a cell larger than the csv module's limit
+            # (128 KB) raised csv.Error out of the wizard as a traceback (rc6,
+            # Fable's second sweep D16).
+            try:
+                all_rows = list(reader)
+            except csv.Error as e:
+                self._print_error(
+                    f"The manifest cannot be read as CSV (line {reader.line_num}: {e}): "
+                    f"{manifest_path}")
+                return None
+            first_row = all_rows[0] if all_rows else None
+            # Excel saves CSV with ';' between the columns in some languages:
+            # the whole header (and every row) is then ONE cell, and each row's
+            # Source a path that does not exist (D16's neighbour, Fable's p5).
+            if (first_row is not None and len(first_row) == 1 and ";" in first_row[0]
+                    and _is_manifest_header_row(first_row[0].split(";"))):
+                self._print_error(
+                    f"The manifest separates its columns with ';', not ','. Excel does "
+                    f"that in some languages: re-open it and use 'Save As' -> 'CSV "
+                    f"UTF-8 (comma delimited)', or replace the separators: {manifest_path}")
+                return None
             # Only skip the first row if it really is the header; a manifest
             # whose header line was deleted must not silently lose entry #1.
             rows = []
             opt_index: Dict[str, int] = {}
             if first_row is not None:
                 if _is_manifest_header_row(first_row):
-                    rows = list(reader)
+                    rows = all_rows[1:]
                     # Optional columns live AFTER Direction (index 4+). A name
                     # outside the known set refuses the manifest: a typo like
                     # "Resise" must not be silently ignored, or the user would
@@ -6925,7 +7339,7 @@ class InteractiveMenu:
                             return None
                         opt_index[cname] = ci
                 else:
-                    rows = [first_row] + list(reader)
+                    rows = all_rows
             current_direction_pre = f"{origin_format}2{dest_format}"
             for _row_n, row in enumerate(rows, 1):
                 if row and len(row) >= 1:
@@ -8260,28 +8674,46 @@ class InteractiveMenu:
         # exactly the runs that touch the most files. The gate is idempotent
         # (_lossy_skip_confirmed), so asking here cannot double up.
         # (It turns delete_skipped off in place, in the very dict `advanced`
-        # already points at, so the cmd builder below sees the decision.)
+        # already points at.) Each row's options are a COPY of `advanced`
+        # made above (_row_effective_options), and the cmd builder reads the
+        # copies: they are made again after the answer, or a "No" was ignored
+        # and every row was sent --delete-skipped (rc6, Fable's second sweep D1).
         self._confirm_lossy_delete_skipped(workflow)
+        _row_effs = [_row_effective_options(workflow, advanced, _o, origin, dest)
+                     for _o in _row_opts_all]
 
         # JXL -> JXL in-place entries (mode 0/8, no Destination) REPLACE the
         # source files — the cmd builder passes --delete-confirm-off for
         # those, so the wrapper MUST charge the HHMM token itself, exactly
-        # like the delete case.
-        _any_in_place_recompress = (
-            origin == 'jxl' and dest == 'jxl'
-            and any(_recompress_entry_in_place(_s, dest_path, detected_mode)
-                    for _s, dest_path, detected_mode in resolved_entries))
+        # like the delete case. Decided ONCE per row, here, and handed to
+        # each row's command (`_in_place_planned`): the confirmation below and
+        # the flag must never disagree (rc6's second review, S1).
+        _row_in_place = [origin == 'jxl' and dest == 'jxl'
+                         and _recompress_entry_in_place(_s, dest_path, detected_mode)
+                         for _s, dest_path, detected_mode in resolved_entries]
+        for (_wr, _ar), _ip in zip(_row_effs, _row_in_place):
+            _wr['_in_place_planned'] = bool(_ip)
+        _any_in_place_recompress = any(_row_in_place)
 
         if not self._manifest_step_in_place_unattended(workflow, _any_in_place_recompress,
                                                        dry_run):
             return False
 
+        # [D] on a manifest whose every row loses its delete (each one a lossy
+        # decode or a derivative: _policy_delete takes it out) deletes nothing,
+        # and the token's "will be DELETED" was asked all the same (rc6,
+        # Fable's second sweep). The rows' own command lines say.
+        _rows_delete = bool(advanced.get('delete_source')) and any(
+            '--delete-source' in (self.build_child_cmd(
+                script, origin, dest, _s, _d, _m, workers, _wr, _ar,
+                manifest=True, quiet=True) or [])
+            for (_s, _d, _m), (_wr, _ar) in zip(resolved_entries, _row_effs))
         if not dry_run and (_flags_request_delete(workflow.get('expert_flags'), origin, dest)
-                            or advanced.get('delete_source')
+                            or _rows_delete
                             or _any_in_place_recompress):
             if _any_in_place_recompress and not (
                     _flags_request_delete(workflow.get('expert_flags'), origin, dest)
-                    or advanced.get('delete_source')):
+                    or _rows_delete):
                 _confirmed = self._confirm_in_place_replace()
             else:
                 _confirmed = self._confirm_archive_mode()
@@ -8314,6 +8746,22 @@ class InteractiveMenu:
         # disagree about what mode an entry is.
         for i, (source, dest_path, detected_mode) in enumerate(resolved_entries, 1):
             self.ui.markup(f"[{i}/{total_entries}] [bold]{detected_mode}[/bold] | {_rich_safe(self._truncate_path(source, 40))} → {_rich_safe(self._truncate_path(dest_path, 40))}", f"[{i}/{total_entries}] Mode {detected_mode} | {source} → {dest_path}")
+
+            # A Source that is not there (a drive not connected, a folder
+            # renamed) is this entry's error, not the run's: the child
+            # refused it as a usage error (exit 2), and the manifest stopped
+            # every other entry with a message calling it a wrapper bug (rc6,
+            # Fable's second sweep D14; the owner's call: skip it, run the
+            # others, end with an error).
+            if not Path(source).exists():
+                error_count += 1
+                self._print_error(f"Source not found: {source} — this entry is "
+                                  f"skipped, the others run.")
+                entry_reports.append({
+                    "index": i, "mode": detected_mode, "source": source,
+                    "state": "source not found", "summary": None,
+                })
+                continue
 
             # Build command for this entry (the builder appends --dry-run when
             # workflow['dry_run'] is set, so the child prints the REAL output
@@ -8498,6 +8946,12 @@ class InteractiveMenu:
         # broke in the middle.
         self._render_manifest_summary(entry_reports, ok_count, skip_count, error_count)
 
+        # A cancelled entry (exit 3: a child's own question answered "no" — or
+        # not answered at all, stdin closed) did not do its work. Nobody saw it
+        # in an unattended run (a preset, a scheduled task), whose exit code
+        # said it went well (rc6, Fable's second sweep D13).
+        if skip_count and workflow.get('unattended'):
+            return False
         return error_count == 0
 
     def _manifest_step_mode7_subfolder(self, workflow, resolved_entries, _row_opts_all,
@@ -8618,7 +9072,8 @@ class InteractiveMenu:
         if any_in_place_recompress and workflow.get('unattended') and not dry_run:
             self._print_error(
                 "Refusing to run unattended: this manifest recompresses JXLs in "
-                "place (mode 0/8), and the HHMM confirmation cannot be given "
+                "place (mode 0/8, or a mode-2 Destination inside its Source that "
+                "already holds JXLs), and the HHMM confirmation cannot be given "
                 "here. Run it from the menu, or add --dry-run to simulate it.")
             return False
         return True
@@ -9069,6 +9524,19 @@ class InteractiveMenu:
         # Sources whose outputs stay inside their own tree. Disjoint ones can
         # never share an output folder; overlapping ones can.
         within_source: List[str] = []
+
+        def _tree(source):
+            """The folder a row's outputs stay in. A Source that is a FILE
+            writes next to it (or in a subfolder of its folder): its tree is
+            its folder, which two file rows of one folder share — `a.tif` and
+            `a.tiff` both wrote `a.jxl`, and the scan was skipped (rc6, Fable's
+            second sweep D4)."""
+            try:
+                p = Path(source)
+                return str(p.parent) if p.is_file() else source
+            except OSError:
+                return source
+
         for i, (source, dest_path, mode) in enumerate(manifest_entries):
             # Legacy manifest (no Mode cell): the mode is detected per folder
             # downstream, so nothing can be ruled out here.
@@ -9082,7 +9550,7 @@ class InteractiveMenu:
                     == os.path.normcase(str(Path(source))))
                 if not same:
                     return True
-                within_source.append(source)
+                within_source.append(_tree(source))
             elif mode in (6, 7):
                 row_marker = (row_markers[i] if row_markers is not None
                               and i < len(row_markers) and row_markers[i]
@@ -9091,7 +9559,7 @@ class InteractiveMenu:
                 if marker is None:
                     # The marker is below the Source: outputs land under marker
                     # folders inside this tree.
-                    within_source.append(source)
+                    within_source.append(_tree(source))
                     continue
                 # The marker is an ANCESTOR of the Source, so the output folder
                 # is a sibling of it — shared by every entry under that marker.
@@ -9101,7 +9569,7 @@ class InteractiveMenu:
                 marker_dirs[key] = source
             else:
                 # 1, 3, 8: a subfolder of the Source, or in place.
-                within_source.append(source)
+                within_source.append(_tree(source))
 
         norm = [os.path.normcase(os.path.abspath(s)) for s in within_source]
         for i, a in enumerate(norm):
@@ -9670,11 +10138,15 @@ class InteractiveMenu:
         if pv == 'adopt' and advanced.get('adopt_scan') is False:
             cmd.append('--no-adopt-scan')
 
-    def _append_overwrite_guard_flag(self, cmd: List, advanced: Dict) -> None:
+    def _append_overwrite_guard_flag(self, cmd: List, advanced: Dict,
+                                     deletes: bool = False) -> None:
         """--no-overwrite-guard when the run turned the guard off. Never with
-        a delete: the child refuses that combination (exit 2) and the
-        wizard does not offer it, so a hand-edited preset fails loudly."""
-        if advanced.get('overwrite_guard') is False:
+        a delete (`deletes`: [D], or --delete-source in the expert flags): the
+        child refuses that combination (exit 2). The wizard does not offer
+        it with [D]; an 'off' a job took from its task's memory before a
+        --delete-source was typed in its expert flags stays out (rc6, D15 —
+        _gate_guard_with_delete says so before the HHMM)."""
+        if advanced.get('overwrite_guard') is False and not deletes:
             cmd.append('--no-overwrite-guard')
 
     def _warn_exclude_folders_unsupported(self, origin: str, dest: str,
@@ -9733,7 +10205,10 @@ class InteractiveMenu:
         self._policy_rename(cmd, ctx)
         self._policy_delete(cmd, ctx)
         self._append_provenance_flags(cmd, ctx.advanced, origin, dest, quiet=quiet)
-        self._append_overwrite_guard_flag(cmd, ctx.advanced)
+        self._append_overwrite_guard_flag(
+            cmd, ctx.advanced,
+            deletes=('--delete-source' in cmd
+                     or _flags_request_delete(workflow.get('expert_flags'), origin, dest)))
         self._policy_format(cmd, ctx)
         _append_expert_flags(cmd, workflow.get('expert_flags'), origin, dest)
         return cmd
@@ -9781,8 +10256,16 @@ class InteractiveMenu:
         suppressed for THAT row (W6 of the 2026-10-08 audit: an sRGB JPEG
         must not delete the 16-bit master), said out loud for --icc-profile."""
         adv = ctx.advanced
-        if ctx.direction == "jxl2jxl" and _recompress_entry_in_place(
-                ctx.source, ctx.dest_path, ctx.mode):
+        # A manifest row carries the in-place answer its confirmation was
+        # asked for (`_in_place_planned`, made before the first row): the
+        # disk read again here could see the JXLs an EARLIER row of the same
+        # run had just written into this row's Destination, and the flag went
+        # out with no confirmation for it (rc6's second review, S1). Without
+        # one (a direct run, the plan's own argv) the disk answers.
+        _planned = ctx.workflow.get('_in_place_planned') if ctx.manifest else None
+        if ctx.direction == "jxl2jxl" and (
+                _planned if _planned is not None
+                else _recompress_entry_in_place(ctx.source, ctx.dest_path, ctx.mode)):
             cmd.append('--delete-confirm-off')
         delete = bool(adv.get('delete_source'))
         if delete and ctx.manifest and ctx.direction in _TRANSCODER_DIRECTIONS:
@@ -10091,8 +10574,13 @@ class InteractiveMenu:
         # proof-of-presence gate applies. (The wrapper only ever passes an
         # output positional to the recompressor in mode 2, so mode 0 is
         # always in place here.)
-        _in_place_recompress = (origin == 'jxl' and dest == 'jxl'
-                                and workflow.get('mode') in (0, 8))
+        # The same test as the command's --delete-confirm-off (_policy_delete):
+        # a mode-2 run whose output folder, inside the input folder, already
+        # holds JXLs replaces them in place too, and was sent the flag without
+        # this confirmation (the review of rc6, M1 — D13's predicate).
+        _in_place_recompress = _jxl_run_replaces_in_place(
+            origin, dest, workflow.get('mode'), workflow.get('input_dir'),
+            (workflow.get('mode_config') or {}).get('output_dir'))
         if not workflow.get('dry_run') and (_flag_delete or _adv_delete
                                             or _in_place_recompress):
             if _in_place_recompress and not (_flag_delete or _adv_delete):
@@ -10395,6 +10883,13 @@ class InteractiveMenu:
         _shown_distance = (last_distance if last_distance is not None
                            else (_child_default(_mod, 'distance')
                                  if 'distance' in _CHILD_OPTION_DEFAULTS.get(_mod, {}) else None))
+        # Mode 2 writes into the folder the job chose: shown (rc6, D11).
+        _saved_out = ((session.get('last_mode_config') or {}).get('output_dir')
+                      if last_mode == 2 and not is_manifest_repeat else None)
+        # A delete typed in the expert flags is a delete on this panel too
+        # (rc6, D15): it showed the guard's 'off', which such a run never gets.
+        _flag_delete_shown = _flags_request_delete(session.get('last_expert_flags'),
+                                                   last_origin, last_dest)
 
         if RICH_AVAILABLE and console:
             settings = [
@@ -10405,6 +10900,8 @@ class InteractiveMenu:
                 ["Mode", str(last_mode)],
                 ["Workers", str(last_workers)],
             ]
+            if _saved_out:
+                settings.insert(4, ["Output folder", _saved_out])
             if _shown_effort is not None:
                 settings.append(["Effort", str(_shown_effort)])
             # Show the knob that actually steers this run (see above).
@@ -10418,6 +10915,8 @@ class InteractiveMenu:
             _last_adv = session.get('last_advanced_options') or {}
             if _last_adv.get('delete_source'):
                 settings.append(["Delete source", "ON"])
+            elif _flag_delete_shown:                               # rc6, D15
+                settings.append(["Delete source", "ON (expert flags)"])
             elif session.get('last_overwrite_guard') is False:     # #707
                 settings.append(["Overwrite guard", "off"])
             if session.get('last_expert_flags'):
@@ -10438,6 +10937,8 @@ class InteractiveMenu:
             print(f"  Source:       {last_origin.upper()}")
             print(f"  Destination:  {last_dest.upper()}")
             print(f"  Mode:         {last_mode}")
+            if _saved_out:
+                print(f"  Output folder: {_saved_out}")
             print(f"  Workers:      {last_workers}")
             if _shown_effort is not None:
                 print(f"  Effort:       {_shown_effort}")
@@ -10452,6 +10953,8 @@ class InteractiveMenu:
             _last_adv = session.get('last_advanced_options') or {}
             if _last_adv.get('delete_source'):
                 print("  Delete source: ON")
+            elif _flag_delete_shown:                               # rc6, D15
+                print("  Delete source: ON (expert flags)")
             elif session.get('last_overwrite_guard') is False:     # #707
                 print("  Overwrite guard: off")
             if session.get('last_expert_flags'):
@@ -10561,11 +11064,17 @@ class InteractiveMenu:
             saved_out = (session.get('last_mode_config') or {}).get('output_dir')
             # Only reuse the saved output folder when the input folder is
             # the same as the saved session's; with a NEW input folder the
-            # old destination would silently swallow the new outputs.
-            if saved_out and new_folder == last_dir:
+            # old destination would silently swallow the new outputs. The
+            # SAME folder typed another way (a '\' at the end, other case) is
+            # the same folder: compared as text, the job's chosen destination
+            # was swapped for <parent>\output, unseen (rc6, Fable's second
+            # sweep D11). The folder it takes is said either way.
+            if saved_out and _same_folder(new_folder, last_dir):
                 workflow['mode_config'] = {'output_dir': saved_out}
             else:
                 workflow['mode_config'] = {'output_dir': str(input_path.parent / "output")}
+            _out_note = f"Output folder: {workflow['mode_config']['output_dir']}"
+            self.ui.markup(f"[cyan]{_rich_safe(_out_note)}[/cyan]", _out_note)
         else:
             # mode_config is mode-SPECIFIC: a stale export_subfolder from a
             # previous mode-7 run must not leak into mode 0/3/6 repeats
@@ -10659,7 +11168,9 @@ class InteractiveMenu:
         if session.get('last_provenance'):
             workflow['advanced_options']['provenance'] = session['last_provenance']
         if session.get('last_overwrite_guard') is False:
-            if workflow['advanced_options'].get('delete_source'):
+            if (workflow['advanced_options'].get('delete_source')
+                    or _flags_request_delete(session.get('last_expert_flags'),
+                                             origin, last_dest)):     # rc6, D15
                 # No job that deletes ran with the guard off: every script
                 # refuses the pair (exit 2, after the HHMM). A session saved
                 # before #707 can carry an older job's "off": not this job's.

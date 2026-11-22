@@ -40,7 +40,8 @@ def _sessions(lib: Path):
         "07_jbrd": "7\n\ny\n0\n",
         "08_icc_cache": "8\nn\n0\n",
         "09_settings_submenu": "9\n0\n0\n",
-        "10_settings_defaults": "9\n1\n" + "\n" * 9 + "0\n0\n",
+        # 8 questions since rc6: "Confirm before delete?" is gone (#728).
+        "10_settings_defaults": "9\n1\n" + "\n" * 8 + "0\n0\n",
         "11_script_settings": "9\n2\n1\n0\n0\n0\n",
         "12_dependencies": "D\n0\n",
         "13_job_archive_review": f"1\n1\n{lib}\n\n6\n\n\n\nc\nx\n\nq\n0\n",
