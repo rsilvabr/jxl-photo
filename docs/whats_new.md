@@ -10,7 +10,8 @@ as [GitHub Releases](https://github.com/rsilvabr/jxl-photo/releases).
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.31.0-rc7](version_history.md#v2310-rc7)** | 2026-11-22 | Pre-release. Film scans: VueScan's infrared no longer taken for transparency, grey profiles really tested, no copy of a SilverFast infrared page; the JPEG recovery deletes an archive only on its checksum, a 16-bit PNG keeps a master with TIFF tags, adopt no longer takes a burst frame for the archived photo; auto mode's `--sync` resume and "convert to sRGB" on JPEG archives work |
+| **[v2.31.0-rc8](version_history.md#v2310-rc8)** | 2026-11-23 | Pre-release. A run that deletes keeps the original in more edge cases (a Motion Photo, a JXL with extra channels, a copy out of staging that changed, a mark ExifTool could not read, a PNG export the run did not write); multi-page documents stay whole after a Ctrl+C or a page held open; long paths, another program's bare JXL and three wizard combinations no longer stop a run |
+| [v2.31.0-rc7](version_history.md#v2310-rc7) | 2026-11-22 | Pre-release. Film scans: VueScan's infrared no longer taken for transparency, grey profiles really tested, no copy of a SilverFast infrared page; the JPEG recovery deletes an archive only on its checksum, a 16-bit PNG keeps a master with TIFF tags, adopt no longer takes a burst frame for the archived photo; auto mode's `--sync` resume and "convert to sRGB" on JPEG archives work |
 | [v2.31.0-rc6](version_history.md#v2310-rc6) | 2026-11-22 | Pre-release. A later page of a multi-page TIFF no longer comes out turned upside down (rc5); a manifest's "no" to deleting converted originals reaches every row, and a missing Source no longer stops the other rows; settings changed in the wizard reach the next job; plain JXL → JXL recompression 15 % faster |
 | [v2.31.0-rc5](version_history.md#v2310-rc5) | 2026-11-22 | Pre-release. Safer deletes in a few unusual setups; a failed check before a delete is an error; Ctrl+C finishes the files in progress; each wizard task remembers its own values; faster archiving and sRGB copies, the same files; everything in v2.31.0-rc4 |
 | [v2.31.0-rc4](version_history.md#v2310-rc4) | 2026-11-22 | Pre-release. Error messages on one line with their whole cause; a TMP of 261 characters or more refused; `jxl_photo.py encode` and the other script commands start a little sooner; everything in v2.31.0-rc3 |
@@ -48,6 +49,17 @@ as [GitHub Releases](https://github.com/rsilvabr/jxl-photo/releases).
 | [v2.17.0](version_history.md#v2170) | 2026-10-24 | Film scans archived lossless and never recompressed lossy unless asked; they keep what their scanner software needs (whole XMP, private tags); thumbnail pages kept by default, except Capture One's |
 
 Every release since v1.0: [version_history.md](version_history.md#release-history).
+
+## v2.31.0-rc8
+
+2026-11-23. The eighth test release (pre-release) of v2.31.0; the last stable release is [v2.30.2](version_history.md#v2302).
+
+- **Hardening of the deletes:** a run that deletes keeps the original in more edge cases — a Motion Photo JPEG (its video is not in a lossy JXL), a JXL with extra channels a TIFF or a PNG cannot hold, a copy out of the staging folder that changed on the way, a colour profile or a mark that ExifTool could not read, and a 16-bit PNG export the run did not write itself.
+- **Multi-page documents stay whole:** a Ctrl+C during the deletes, or a page held open by a viewer during an in-place recompression, no longer leaves a document half replaced or half deleted.
+- **Runs that stopped:** resized or colour-converted JPEG/PNG copies on long paths, another program's JXL copied as it is, and three combinations the wizard accepted and the scripts then refused.
+- **Smaller fixes:** a warning when a custom folder name in the settings hides your own files, and clearer messages.
+
+[Technical notes](version_history.md#v2310-rc8) · [what to check](upgrading.md)
 
 ## v2.31.0-rc7
 

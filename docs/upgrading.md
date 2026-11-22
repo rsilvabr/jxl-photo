@@ -11,6 +11,36 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
+## v2.31.0 (since rc8): deletes keep the original in more edge cases
+
+Nothing to do: these runs now keep files the earlier versions deleted, each
+with a `KEEP` line that says why.
+
+- **A 16-bit PNG export with `--delete-skipped` keeps a master whose PNG is
+  already there** (#747): the PNG may have been retouched since. To replace
+  such masters, export them again in a run that writes the PNG
+  (`--overwrite --delete-source`).
+- **A lossy JPEG → JXL with `--delete-source` keeps a Motion Photo** (the
+  video after the picture is not in the JXL) **and a JPEG with other data
+  after its picture** (#748). A lossless archive (`--force-transcode`) holds
+  the whole file and deletes as before.
+- **A JXL with more extra channels than one alpha** (another program's file
+  with a depth channel, for example) is kept by a decode to TIFF or to a
+  16-bit PNG (#750).
+- **A file whose marks ExifTool could not read** during a deleting run is kept
+  (#753), and so are a decoder's JXLs whose profile it could not read (#746):
+  run again once ExifTool reads them.
+- **A lone `--delete-skipped`** (without `--delete-source`) is no longer
+  refused next to a resize, a colour conversion or `--restamp-then-sync`: it
+  deletes nothing, as the warning says (#756).
+- **A custom folder name in the settings that hides files** is a WARNING now
+  (#758). If it names your own exports (a decoder restoring into the folder
+  the exports came from, for example), give the setting another name.
+- **An in-place recompression of a multi-page group** keeps each original
+  under a second name, `<name>.<id>.jxlphoto-swap`, until the group is
+  replaced (#752). After a run killed at that moment, the next run removes
+  such a name, or says what to do with it.
+
 ## v2.31.0 (since rc7): scans; JPEG archives kept without their checksum; auto mode
 
 - **VueScan's RGB + infrared scans** archived by any earlier version have no

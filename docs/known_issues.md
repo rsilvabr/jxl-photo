@@ -5,12 +5,14 @@ stopped a run, refused a file or printed something wrong. For each one: which
 versions wrote such files, how to tell, and what to do. Everything else that
 was fixed is in [bug_tracking_since_v1.0.md](bug_tracking_since_v1.0.md).
 
-Only one of these could cost the pixels of a master made from a TIFF, and it
-took an unusual setup (`--provenance adopt` over archives older than v2.0.0,
-#732). The rest are metadata, a few derived copies, scans shown wrong by
-other programs, and some lossless JPEG archives (those of v2.0.0–v2.0.3,
-those made with libjxl 0.13 before v2.30.1-rc2, and lineless ones recovered
-with an older djxl before v2.31.0-rc7).
+Only two of these could cost the pixels of a master made from a TIFF, and
+each took an unusual setup (`--provenance adopt` over archives older than
+v2.0.0, #732; a 16-bit PNG export retouched in place, then a deleting export
+run with `--delete-skipped`, #747). The rest are metadata, a few derived
+copies, scans shown wrong by other programs, a Motion Photo's video, and some
+lossless JPEG archives (those of v2.0.0–v2.0.3, those made with libjxl 0.13
+before v2.30.1-rc2, and lineless ones recovered with an older djxl before
+v2.31.0-rc7).
 
 ## Find the files a version wrote
 
@@ -35,6 +37,90 @@ the original JPEG byte for byte, so the toolkit never writes into it) and a
 verbatim copy of one. The entries below say how to find those.
 
 ## The list, newest first
+
+### A Motion Photo's video deleted with its JPEG — before v2.31.0-rc8 (#748)
+
+**What:** a lossy JPEG → JXL (`--force-convert`, the wizard's "Re-encode
+JPEGs lossy") encodes the JPEG's first image only. With `--delete-source`, a
+Motion Photo (a phone's photo with a short video after it) was deleted, and
+its video with it; the JXL holds the photo. The lossless archive
+(`--force-transcode`) holds the whole file and was never concerned.
+**Which files:** JXLs made that way from Motion Photos by any version before
+v2.31.0-rc8, with `--delete-source`.
+**How to tell:** their XMP still announces the video (in `cmd`):
+
+```
+exiftool -r -ext jxl -if "$XMP-GCamera:MotionPhoto or $XMP-GCamera:MicroVideo" -p "$Directory/$FileName" "D:\Photos"
+```
+
+**What to do:** the video is not in the JXL; if you keep the phone's
+originals elsewhere (a backup, the cloud), those still have it. The JXL is a
+good photo as it is.
+
+### A decoded TIFF without its colour profile, its JXL deleted — before v2.31.0-rc8 (#746)
+
+**What:** a master whose encode kept its real profile in XMP only (the
+`skip`/cautious ICC strategies) was decoded to a TIFF with NO profile when
+the decoder's read of that XMP failed (ExifTool killed or timed out), the run
+said OK, and `--delete-source` deleted the JXL. It took a failing ExifTool.
+**Which files:** TIFFs restored with `--delete-source` by any version before
+v2.31.0-rc8.
+**How to tell:** this lists the restored TIFFs without a profile (in `cmd`);
+those whose original had one (every Capture One export does) are the ones
+concerned:
+
+```
+exiftool -r -ext tif -ext tiff -if "$XMP-dc:Relation =~ /jxlphoto-src/ and not $ICC_Profile:ProfileDescription" -p "$Directory/$FileName" "D:\Photos"
+```
+
+**What to do:** decode the JXL again from a backup if you have one. If you
+know which profile the export had, you can assign it:
+`exiftool -overwrite_original "-ICC_Profile<=ProPhoto.icm" "file.tif"`.
+
+### A multi-page document left half replaced or half deleted — before v2.31.0-rc8 (#751, #752, #762)
+
+**What:** three ways to split a multi-page document (a scan with its
+infrared page, a split TIFF):
+- an in-place recompression (mode 8, or mode 0 without an output folder)
+  whose page was held open by another program replaced the other pages and
+  kept that one: one document in two generations, and every later run held
+  it so ("GROUP HELD IN PLACE") (#752);
+- a Ctrl+C during the recompressor's deletes deleted some pages of a group
+  and kept the others: later runs keep those "for good" ("only 2 of the 3
+  pages ... are in this run") (#751);
+- two quick Ctrl+C during the decoder's deletes deleted page 0's JXL and left
+  the others, the TIFF complete: later deleting runs refuse the group ("the
+  marker of a DIFFERENT JXL") (#762).
+**How to tell:** those lines in a later run's log; for #752, the run's own
+log has `REPLACE FAILED` for one page and `REPLACED` for its siblings.
+**What to do:** every page is a valid JXL and nothing is lost. For #751 and
+#762, the recompressed copy or the TIFF is complete: check it, then delete
+the leftover pages by hand. For #752, the document decodes as it is; to have
+it in one generation, encode it again from its TIFF (or decode it and encode
+the TIFF again).
+
+### An output without `jxlphoto-origin` — before v2.31.0-rc8 (#753)
+
+**What:** when ExifTool could not read an input's marks, its output got no
+`jxlphoto-origin` (where the first master came from), and a deleting run
+deleted the input anyway — the only file that mark can come from.
+**Which files:** masters, lossy JPEG → JXL files and recompressed JXLs written
+by v2.10.0 to v2.31.0-rc7 while ExifTool failed.
+**What to do:** nothing is needed: a missing origin reads as "unknown", the
+safe side (photo-backup and the recompressor's regeneration guard treat it
+so). A master made again from its TIFF with `--overwrite` gets it.
+
+### Originals deleted that the new file did not hold whole — before v2.31.0-rc8 (#747, #749, #750)
+
+**What:** three rare cases, each needing an unusual setup: a 16-bit PNG
+export retouched in place and then a deleting export run with
+`--delete-skipped` deleted its master (#747); a copy out of a staging folder
+on another drive that changed bytes without an error (failing hardware) was
+not compared before its source was deleted (#749); another program's JXL
+with more channels than one alpha (a depth map) was decoded to a TIFF or a
+16-bit PNG and deleted (#750).
+**How to tell / what to do:** the deleted file cannot be found from what is
+left; restore it from a backup if you think you are concerned.
 
 ### An RGB+IR scan without an `ExtraSamples` tag, its infrared taken for transparency — before v2.31.0-rc7 (#729)
 

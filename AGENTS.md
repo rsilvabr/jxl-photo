@@ -64,7 +64,9 @@
   staging) only if it is still the file judged (`_output_changed_since_judged`,
   #560 — an edit saved meanwhile), else `"refused"`. A TIFF with fewer full
   pages than its group's JXLs is decoded again, not "up to date"
-  (`_fewer_pages_than_group`, #703; thumbnail entries are not counted). The
+  (`_fewer_pages_than_group`, #703; thumbnail entries are not counted).
+  `extract_icc_from_xmp` raises on a failed read (#746): "cannot tell" is
+  never "no profile" (the group is an error, its JXLs kept). The
   EXIF copy leaves out, by NAME, the tags the `jxlphoto-tifftag` tokens
   restore (`_restored_tag_exclusions`, #698: ExifTool knows 65000+ by name
   and moved them), and a command of its own puts back the camera's ExifIFD
@@ -146,7 +148,14 @@
   against every pixel decode (#692), a master whose 16-bit PNG has another
   profile than the one it carries in XMP (#691's PNGs from older versions: a
   faithful decode embeds exactly that profile, measured) and a master that
-  carries `jxlphoto-tifftag` tokens, which no PNG holds (#734). A colour-only run
+  carries `jxlphoto-tifftag` tokens, which no PNG holds (#734). A 16-bit PNG
+  export the run did NOT write (skipped) never deletes its master (#747): it
+  may have been retouched since — only an export this run writes does. A
+  self-hash line naming other bytes falls back to the reconstruction in
+  `_jxl_binds_to_archived_jpeg` (#757), and `--repair-jbrd` re-files it. Its
+  ImageMagick route writes into the short `TEMP_DIR` folder and Python moves
+  the file beside the final name (#754: that temp, 37 characters longer than
+  the final path, broke from 223 on). A colour-only run
   leaves to the skip logic (`should_process`), instead of refusing, an
   existing output with no derived label whose marks name THIS source
   (`_check_derivative_targets`, `_provenance_ok`) — never forced: such a file
@@ -183,7 +192,19 @@
   all-or-nothing — the gate must see EVERY planned page, including the ones
   that failed, were policy-skipped or refused, or it cannot veto;
   in-place promotion goes through a temp file in the destination folder plus
-  an atomic `os.replace`, never a cross-volume move onto the only copy.
+  an atomic `os.replace`, never a cross-volume move onto the only copy; a
+  group is swapped all or nothing (`_swap_group_in_place`, #752: each
+  original set aside as `<name>.<id>.jxlphoto-swap`, the re-encode put in
+  place, every original back on any failure) — the second name is a HARD
+  LINK (the page's name never goes missing; a rename where a volume has
+  none), the swap runs under `_run_with_ctrl_c_held` (common: a press waits
+  until the group is done, then goes to the run's handler), every page is
+  checked right before it (#559) and must have had its marks read (#753), and
+  `_sweep_swap_leftovers` removes a leftover second name of the same file
+  and names any other one. A verbatim copy (policy, lossy
+  ICC blob, keep-smaller) is proven by size + MD5 against its source
+  (`_verbatim_copy_verified`, #755): the container walk refuses another
+  program's bare codestream, and the gate takes the MD5 for such a copy.
   `_merge_lineage_blocks` (parity-pinned with the encoder) never dedupes
   inside one field — a repeated `cjxl d= e=` entry is a real generation.
   A DERIVATIVE is `--output-icc` (16-bit colour conversion), `--resize-*` or
@@ -553,7 +574,12 @@ changes first.
   and must NOT join the decoder's `_is_internal_marker` list or any derivative
   `drop` tuple. The only reader is the recompressor's `--on-regeneration`
   guard: `jpeg`/`jxl`/`jxl-lossy` count as one hidden generation
-  (`_hidden_generations`); no delete gate reads it. The transcoder writes ONE
+  (`_hidden_generations`); no delete gate reads the mark itself. An input
+  whose marks could not be read (`_read_origin_inputs`: no answer, an error,
+  no entry) is named in `_ORIGIN_UNREAD` — run state of the encoder, the
+  transcoder and the recompressor, cleared per run, in `_SERVE_FILE_CACHES` —
+  and a deleting run keeps it (#753): its output has no origin, and only
+  that input could give it one. The transcoder writes ONE
   src/srcsum pair: `_inherited_marker_removal_lines` drops the copied one in
   the same call.
 - **`xmpMM:History` (v2.13.0) records which toolkit version wrote each
@@ -663,7 +689,11 @@ changes first.
   ONE answer for the direct run, a repeat and a preset:
   `_jxl_run_replaces_in_place` — the wizard's in-place confirmation, the
   unattended refusal and the child's `--delete-confirm-off` (`_policy_delete`,
-  through `_recompress_entry_in_place`) must never disagree (rc6's review M1:
+  through `_recompress_entry_in_place`) must never disagree; modes 3–7 ask the
+  recompressor's plan with a probe name in BOTH helpers
+  (`_recompressor_plan_maps_onto_itself`, #759: mode 5 run AT
+  `JXL_recompressed`, mode 6 at `<marker>\16B_JXL_small`), under the run's
+  marker (`_mode_config_with_marker`) and its expert flags (rc6's review M1:
   the flag went out for a mode-2 run whose confirmation was keyed on modes
   0/8, and nobody was asked). A manifest decides each row's answer ONCE,
   before its confirmation, and hands it to the row's command
@@ -671,7 +701,9 @@ changes first.
   earlier row had just written (second review S1).
 - **`--delete-source` works in every mode** (since v2.0.0). Every delete path is gated
   by an integrity check plus (for JPEG recovery) `djxl --reconstruct_jpeg` or a
-  same-run MD5 match. Keep those gates fail-CLOSED: an unverifiable output must
+  same-run MD5 match. In a deleting run, a copy out of staging to another
+  volume is compared with the staged file (size + MD5) before either goes
+  (`_promote_from_staging`, `_same_volume`, #749); one volume is a rename. Keep those gates fail-CLOSED: an unverifiable output must
   block deletion, never be waved through. The encoder's pixel checks
   (`VERIFY_ROUNDTRIP`, 74 % of a deleting run) are started up front in a pool of
   the run's memory-capped worker count (`_delete_sources`, v2.31.0) — only for
@@ -874,7 +906,12 @@ changes first.
   and their own `_reset_abort` arms it (`_ctrl_c_handler_active`; it also
   keeps a press already latched). A new pool and a new delete gate go inside
   that block, and a gate asks `_interrupted` at each source and again right
-  before its delete. The suite's conftest clears the latch and the flag after
+  before its delete. The recompressor's gate runs inside it too, its first
+  pass asks `_interrupted` before each costly check, and a group's deletes in
+  the recompressor and the decoder run under `_run_with_ctrl_c_held` (common;
+  #751, #762: a press waits until the group is done, then the run's handler
+  acts). The encoder's planning pools cancel their queued work on the way out
+  (#761). The suite's conftest clears the latch and the flag after
   every test.
 - **A version probe that does not answer is not "an old cjxl" (#694).**
   `_tool_version` tries twice (`_VERSION_PROBE_TIMEOUTS`, 10 then 60 s) and a
@@ -950,6 +987,10 @@ changes first.
   every core) — the encoder's pool, the recompressor's cjxl slots. The files
   are byte for byte the same with any thread count (measured: lossy,
   lossless, `--buffering 0`, 16-bit RGB, 8-bit gray).
+- **Leftover temps.** `_ORPHAN_TEMP_RE` (identical in the four) matches the
+  run's temps and ExifTool's own temp of one (`<temp>_exiftool_tmp`, #763);
+  a serve answer's `outputs` never lists one. A lone `--delete-skipped` is
+  inert in every child's refusals too, as their help says (#756).
 - **Re-run defaults differ per script**: the TIFF encoder/decoder default to
   smart sync (source newer than output), the JPEG transcoder skips existing
   outputs. Not a bug — documented in each README.
@@ -993,7 +1034,11 @@ changes first.
   the configured `EXPORT_JXL_FOLDER` (a custom `--export-jxl-folder` must not
   be re-processed as a source on the next run) — but
   only BELOW the input root: pointing a run AT such a folder to compress it
-  again is legitimate.
+  again is legitimate. A custom (non-shipped) name that hides files is said at
+  WARNING, naming the setting (`_custom_output_folder`; the encoder's
+  `_custom_decoder_folder` for the decoder's names, #758) — only for files
+  with no source beside the folder or in a sibling one (`_has_source_near`:
+  a folder of the tool's own outputs must not warn); the skip stays.
 - **The wrapper asks the children which files a run takes AND where each
   output goes (refactor C1, v2.30.0), with the run's own command line
   (v2.30.1).** Its file count (`_count_origin_files`) asks each child's
@@ -1062,6 +1107,10 @@ changes first.
   decoder's marker read, `_drop_derivative_inputs`,
   `_drop_derivative_pairs`); an unreadable marker keeps the file. The
   wrapper's `_without_derivative_collisions` re-checks colliding files.
+- **A pixel decode is a full copy only when `_reduced_by_integer_decode`
+  (common) says so:** no float, no more than 16 bits, the frames kept, and
+  (#750) at most one extra channel, Alpha — jxlinfo's `RGB+Alpha+Depth` is
+  not one (the toolkit's RGB + IR masters read `RGB+Alpha`).
 - **A JXL → JPEG or 8-bit PNG never deletes its source (#600, owner's
   decision T-B).** The transcoder refuses `--force-convert --decode` to
   JPEG/8-bit PNG with `--delete-source` (exit 2) and both lossy gates keep
@@ -1073,7 +1122,12 @@ changes first.
   HDR gain map (Android's Ultra HDR, ISO 21496-1, Apple's: a second image
   after the picture) is not in it, so both lossy delete gates keep such a
   JPEG (`_gain_map_keep_reason`, next to `_lossy_decode_keep_reason`) and the
-  encode warns per file. `_jpeg_gain_map` reads the JPEG's APP1/APP2 segments
+  encode warns per file. So do a Motion Photo (`MotionPhoto`/`MicroVideo` in
+  its XMP) and any data after the picture that no MPF index explains
+  (`_jpeg_trailer_keep_reason`, #748; `_jpeg_main_eoi_end` finds where the
+  main image ends) — complete JPEG images there are a camera's previews,
+  copies like an MPO's (`_tail_is_jpeg_previews`, the owner's call) —, and
+  `_copy_metadata` drops the GCamera Motion Photo XMP. `_jpeg_gain_map` reads the JPEG's APP1/APP2 segments
   itself (no exiftool run; the whole file only behind an MPF index) and
   raises OSError = "cannot tell" = keep. A camera's MPO (previews) is not a
   gain map; a `jbrd` output holds the whole file and is not judged. Any new
@@ -1231,7 +1285,9 @@ changes first.
   `_append_overwrite_guard_flag(deletes=)`), a derivative typed there is
   refused next to a delete by the scripts' own rule (`_flags_derivative_refused`:
   resize/sharpen on every route, a colour conversion everywhere but the
-  transcoder's bit-exact route, `_BIT_EXACT_CONVERSIONS`) or in place, the
+  transcoder's bit-exact route, `_BIT_EXACT_CONVERSIONS` — the wizard's own
+  output profile too, #756) or in place, `_lossy_decode_never_deletes` reads
+  the format and the depth from the child's parse of the flags (#756), the
   decoder's `--none` like its decode mode, and a
   manifest whose rows cannot all delete is refused (the wizard cannot take a
   flag out of a row, as `_policy_delete` does for [D]). A new check of "does
@@ -1530,6 +1586,13 @@ must-fix / should-fix items and a commit verdict.
   one included, plus the full release table (the README keeps the last few
   rows)
 - `docs/RELEASE_v*.md` — gitignored; local drafts to paste into GitHub Releases
+- `docs/prerelease_archive.md` — the notes of the GitHub pre-releases whose
+  release pages were removed (the owner's call, 2026-11-23: too many
+  pre-releases), as published, with the tag, the commit and the date. A later
+  clean-up adds its releases there FIRST (from the API's JSON, kept in
+  `AI_tools/`), then deletes the pages with `gh release delete <tag> --yes`
+  (never `--cleanup-tag`: the git tags stay), sparing any release with a
+  reaction and the current test release
 
 ## Releases
 - Stable tags: `vX.Y.Z` (e.g. `v1.7.1`); test releases (GitHub
