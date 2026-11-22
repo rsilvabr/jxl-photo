@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.31.0-rc6](#v2310-rc6)** | 2026-11-22 | Pre-release. The fixes of a second sweep, of rc5 (#712–#728): a later page of a multi-page TIFF no longer comes out with the orientation "Rotate 180" (rc5's own bug); a manifest's "no" to deleting converted originals reaches every row, a missing Source no longer stops the other rows, file rows of one output are caught; settings changed in the wizard reach the next job, a preset keeps its marker, a delete typed in the expert flags gets [D]'s checks; plain JXL → JXL recompression 15 % faster; everything in v2.31.0-rc5 |
+| **[v2.31.0-rc7](#v2310-rc7)** | 2026-11-22 | Pre-release. The fixes of a targeted review of the parts the sweeps had not read in full (#729–#745): VueScan's RGB+IR scans no longer have their infrared taken for transparency, a grey profile is really tested, no copy of a scan's infrared page; `--provenance adopt` no longer stamps another photo's archive; the JPEG recovery deletes an archive only on its checksum, neither a 16-bit PNG nor a decode to TIFF replaces a master or a JPEG archive they cannot hold whole, JPEG exports are not archived; auto mode's `--sync` resume and "convert to sRGB" work on JPEG archives; everything in v2.31.0-rc6 |
+| [v2.31.0-rc6](#v2310-rc6) | 2026-11-22 | Pre-release. The fixes of a second sweep, of rc5 (#712–#728): a later page of a multi-page TIFF no longer comes out with the orientation "Rotate 180" (rc5's own bug); a manifest's "no" to deleting converted originals reaches every row, a missing Source no longer stops the other rows, file rows of one output are caught; settings changed in the wizard reach the next job, a preset keeps its marker, a delete typed in the expert flags gets [D]'s checks; plain JXL → JXL recompression 15 % faster; everything in v2.31.0-rc5 |
 | [v2.31.0-rc5](#v2310-rc5) | 2026-11-22 | Pre-release. The fixes of a full sweep of rc4 (#690–#711): a colour-converted JPEG/PNG never deletes its master, a JPEG archive is never deleted by a decode of its pixels, an unreadable encode record leaves the file alone, a failed check before a delete is an error; Ctrl+C finishes the files in progress; each wizard task remembers its own values; cjxl's threads shared among the encodes and the Explorer thumbnail made from the image in memory, faster with the same files; everything in v2.31.0-rc4 |
 | [v2.31.0-rc4](#v2310-rc4) | 2026-11-22 | Pre-release. A tool's error message on one line with its whole cause; a TMP of 261 characters or more refused (on Windows such a process hangs when it starts any program); `jxl_photo.py encode` and the other script commands start 35–40 ms sooner; everything in v2.31.0-rc3 |
 | [v2.31.0-rc3](#v2310-rc3) | 2026-11-22 | Pre-release. ExifTool kept open and the decoder's TIFF metadata written once: archiving, decoding and deleting runs 18–22 % faster; EXIF values copied exactly; `--serve` for programs that convert file by file; the failed files repeated at the end; a temp folder with `%` refused; a known-issues page; everything in v2.31.0-rc2 |
@@ -116,10 +117,198 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.31.0-rc7
+
+**Released 2026-11-22, the seventh test release (pre-release) of v2.31.0**;
+the last stable release is [v2.30.2](#v2302). Everything in
+[v2.31.0-rc6](#v2310-rc6) is in it. The fixes of a targeted review of the
+parts the two sweeps had not read in full — the transcoder's auto mode and
+`--repair-jbrd`, the wizard's maintenance menus, and the derivatives,
+`--provenance adopt` and restamp of the other three scripts — by two Opus
+reviewers, every finding reproduced on real photos in hostile folders, and
+one more found by the review of the fixes: 17 bugs, #729–#745, each fixed
+with a test that fails on rc6. What to check is
+in [upgrading](upgrading.md); the files written wrong before, how to find
+them and what to do, in [known issues](known_issues.md) — by hand, without
+new code (the owner's call: the masters can be made again).
+
+**Scans.**
+- **An RGB+IR scan without an `ExtraSamples` tag (#729).** VueScan's RGBI
+  scans (4 samples, RGB, no tag at all) got no `jxlphoto-extrasamples`
+  marker, and everything after took the infrared for transparency: the
+  master's Explorer thumbnail nearly white (mean 158 instead of 27 of 255), a
+  sRGB copy see-through (40 % opaque on average: a B&W silver film blocks the
+  IR, so the "alpha" is the picture), a restored TIFF declaring the IR as
+  alpha — and an encode of that TIFF recording it as real alpha. Such a page
+  is recorded as `0` now, unspecified, as TIFF 6.0 reads a missing tag. The
+  master's samples were intact (restored bit for bit). For the masters
+  already written: a fix by hand with ExifTool in known issues, tried on a
+  real rc6 master (thumbnail mean 158 → 26.6, the copy RGB).
+- **A grey profile was never really tested (#731).** The cautious ICC test
+  always used a colour image; cjxl refuses a grey profile on one ("Gray color
+  space not permitted on RGB PNG"), and the verdict was "skip": the lossy
+  master of a grey TIFF with a grey profile (EPSON Gray - Gamma 1.8, Dot Gain)
+  kept the profile in XMP only, and a viewer that reads the codestream showed
+  it with the sRGB curve (gamma 1.8: mid-grey 0.214 linear instead of 0.287).
+  A grey profile is tested on a grey image now, as the recompressor's own
+  probe does, and the cache's test generation is `t=3`: every cached verdict
+  is tested again once. Its 16-bit half reads the decode at 16 bits (it went
+  through an 8-bit conversion that clipped it, so it could never fail on
+  brightness: the review's S5), and an RGB page carrying a grey profile —
+  which cjxl refuses in a colour PNG, and which the probe may now call safe —
+  keeps it in XMP only, as a grey page with an RGB profile does (S4). The
+  toolkit's decodes, copies and thumbnails used the real profile; lossless
+  masters (the default for scans) were not concerned.
+- **No copy of a scan's infrared page (#730).** SilverFast writes the IR as a
+  page of its own (`jxlphoto-subfiletype:4`): the recompressor's derivatives
+  and the transcoder's resized or colour-converted JPEG/PNG made a grey copy
+  of it in every delivery folder. They skip it now, like a thumbnail page
+  (`_is_mask_page`, common; a page other than the first of a split, the
+  review's N4); a plain recompression keeps every page.
+
+**Deleting.**
+- **`--provenance adopt` stamped another photo (#732).** The adopt scan used
+  the delete gate's 20 dB floor, which only catches a broken encode: a burst
+  frame of the same name (25.8 dB from the archive) was stamped as the
+  archive's source, and the run deleted that TIFF — or, when it was newer,
+  overwrote the other photo's only archive. Now a lossless archive must
+  decode pixel-identical and a lossy one reach `ADOPT_MIN_PSNR` — 35 dB, a new
+  setting of the encoder, never taken from the settings file: this toolkit's
+  masters measure 41–65 dB, unrelated photos 10–12 dB, and the owner asked
+  for headroom below the 41 dB found — and a capture time or ImageUniqueID
+  both files carry that differs refuses it whatever the pixels say (a tripod
+  sequence can be closer than any floor). The archive's own kind (jxlinfo)
+  decides the comparison, no longer the run's distance; the capture time is
+  compared with `--no-adopt-scan` too (two ExifTool reads, no decode: the
+  review's S7). It took a markerless archive (before v2.0.0), a
+  folder-merging mode, one name for two photos and the opt-in.
+- **The JPEG recovery deletes an archive only on its checksum (#733).** In the
+  JXL → JPEG direction the archive was deleted when `djxl --reconstruct_jpeg`
+  exited 0. djxl 0.12 and 0.11 rebuild another JPEG, with exit 0, from an
+  archive cjxl 0.13 wrote with its defaults (4 of 7 probed; at most 1–2
+  levels apart): with such an archive and no `checksums.md5` line (another
+  program's, a `.jxl` copied alone), the original JPEG went with its archive.
+  An archive goes now only when the recovered JPEG matched its line in the
+  same run; without the line, or with `--no-verify`, it is kept, said per
+  file. The toolkit writes the line for its own archives.
+- **A 16-bit PNG never replaces a master that carries TIFF tags (#734).** An
+  IPTC block, Photoshop resources or a scanner's private tags
+  (`jxlphoto-tifftag`), which a PNG cannot hold and only the decoder writes
+  back, went with the master once a 16-bit PNG export replaced it (14 of 14
+  of the TIFF16 fixtures carry an IPTC block). Such a master is kept now,
+  said per file. `metadata_written.md` said the opposite of the code there.
+- **A decode to TIFF never deletes a JPEG archive (#745).** The TIFF
+  decoder's `--delete-source` deleted a lossless JPEG archive after writing a
+  TIFF of its pixels: the original JPEG's bytes — and an MPO preview or an
+  HDR gain map after its image — went with it. The decoder's side of #692 and
+  #733, older than rc7 (rc6 does it too), found by the review of the fixes.
+  Its gate keeps a jbrd JXL now, and one whose box cannot be read; only the
+  transcoder's bit-exact recovery deletes an archive.
+- **JPEG exports are not archived (#736).** A mode-6 JPEG run archived the
+  resized or colour-converted exports of masters (`jxlphoto-derived`, e.g. in
+  `_EXPORT\JPG_web`) next to the real archives and, with `--delete-source`,
+  emptied the export folder. They are left out in mode 6 and in mode 7
+  without a subfolder, as derivatives are on the decode side (#602); the mark
+  is read from the file's XMP segment in Python, only where it matters — the
+  run would write or delete, `--overwrite`, or another source lands on the
+  same output (a camera JPEG and an export of one name: every run after the
+  first aborted on the duplicate, the review's S2; in auto mode, across its
+  JPEG and PNG groups too, the second review's R1) — so a `--sync` over an
+  archived library reads nothing (`_image_xmp_mentions`). The recursive search
+  also skips the transcoder's own output folders where the run writes them
+  (`_decode_output_folder_names`): the renamed `RECOVERED_JPEG_FOLDER` or a
+  non-default `--output-name` in modes 1/3, the run's `--export-jpeg-folder`
+  in modes 6/7, and mode 4's token wherever it sits (`shoot JPEG_recovered`,
+  `JPEG_recovered_shoot`, the review's S3) — with a renamed folder, every
+  auto run archived the last run's recovered JPEGs again, one folder deeper.
+  Never a settings name for every mode, nor mode 4's token when the decode
+  writes the token the encode reads: a symmetric setup (`JPEG_SIBLING_FOLDER`
+  = "JPEG") hid the user's own JPEG folders in every run (the second review's
+  R2, never released).
+
+**Auto mode and the repair.**
+- **The documented `--sync` resume of an auto folder runs (#737).** A JPEG
+  and its own archive side by side are each the other's output, so under
+  `--sync` one of them was always "newer" and the run stopped ("Output would
+  overwrite another input", exit 2) — on every later run. Such a pair is up
+  to date now when the archive (with its jbrd box) has a `checksums.md5` line
+  that is the JPEG's MD5: neither file is written — nor its copy, with a
+  colour conversion or a resize, which would land on the original JPEG
+  (refused on every run before the review's S1). Only a pair the run would
+  write, or such a copy, is proven, so a plain run hashes no JPEG (S6); the
+  archive must be bound to its line by its content too (its self-hash line,
+  else a reconstruction), and an archive alone whose copy would land on its
+  JPEG (`--from-jxl --to-srgb` in place) is left as it is (the second review).
+  Without the line, or with `--overwrite`, the run judges it as before.
+- **"Convert to sRGB" reaches the JPEG archives (#735).** Auto mode with
+  `--to-srgb`/`--icc-profile` recovered a jbrd archive bit for bit, in its
+  own profile (a ProPhoto archive came out ProPhoto), without a word, while
+  the lossy masters next to it were converted. A colour conversion sends the
+  archives to the convert group, like a resize (the owner's call), and the
+  wizard's plan follows. A folder run with `--decode --to-srgb`, which
+  recovers the archives bit for bit, says the conversion has no effect (the
+  review's N1).
+- **The repair audit's answers are checked (#738).** `--repair-jbrd` called
+  OK any archive djxl rebuilt something from — with djxl 0.12, an archive of
+  #669's kind rebuilt another JPEG and was OK. With its `checksums.md5` line,
+  the rebuilt JPEG must be the one the line names (`REBUILDS ANOTHER JPEG`,
+  an error, otherwise); a file that cannot be read is `COULD NOT BE READ`, an
+  error, never "without jbrd" (`_jbrd_box_state`, common).
+
+**Smaller.**
+- A recompressor derivative whose djxl reported neither profile went on as if
+  decoded in the file's own space; it is refused now, as the plain
+  recompression and the decoder do (#739).
+- A failed adopt stamp was a DEBUG line; a warning with its reason now: the
+  output stays without provenance marks, and no delete gate gets a proof from
+  it (#740).
+- When the rename of a failed JXL to `_jxlphoto-error` failed (the previous
+  error file open in a viewer), the failed JXL kept its final name and the
+  next `--sync` took it as up to date. Another error name is tried
+  (`<stem> (2)_jxlphoto-error.jxl`, never over a file), then the failed JXL
+  is deleted — this run wrote it, and its source is kept (#741).
+- An in-place multi-page group held because a page re-encoded no smaller
+  (keep-smaller) was reported as if a page had failed; the line says the page
+  stayed as it is — keep-smaller, or a policy that keeps it — and that
+  `--no-keep-smaller` replaces a group keep-smaller held (#742).
+- The repair's and the relayout's "checksums.md5 updated" were said without
+  looking at the write (a db held by another program) (#743).
+- Menu 7 asked "Audit only?" before saying the folder was not there, and
+  refused a single `.jxl`, which `--repair-jbrd` accepts (#744).
+
+**Speed.** `--restamp-moved` checked each planned output against a sorted
+list: quadratic, 18.5 s of silent CPU at 20 000 outputs. A set now.
+
+**Left as it is.** A re-derive in the transcoder does not check which master
+the existing derivative came from (re-creatable from the master), and an auto
+`--from-jxl --format jpeg --delete-source` still asks the strict HHMM token,
+though only JPEG archives can be deleted there (the owner's calls). The
+wizard's manifest walk still reports a mode-6/7 JPEG → JXL row whose JPEG
+export and camera JPEG share a name as a collision; the transcoder itself now
+leaves the export out (the review's N2: the wizard errs on the safe side).
+
+**Tests no longer write the PC's ICC cache.** The suite's and the battery's
+lossy encodes wrote their test profiles' verdicts into the real cautious-ICC
+cache (`%APPDATA%\jxl-photo\icc-cache`); both run with a throwaway `APPDATA`
+now (found by the review).
+
+**Verification.** With libjxl 0.13.0: 4563 tests pass (1 skipped); the
+real-photo battery passes all 183 checks, in folders named with Japanese
+characters, `[ ]`, a space and `%`. A side-by-side run against rc6 on real
+photos (27 scenarios) differs only in the version written into the logs and
+into each file's history, and so do the wizard's transcripts (22 sessions,
+both screens). photo-backup's contract test passes (33, JP-1 to JP-24).
+Every fix has a test that fails without it — on rc6, or for the reviews'
+holes on the code before them. Two independent reviews (Opus) checked the
+fixes: the first found #745 and seven holes in them (S1–S7); the second, of
+those fixes, found no must-fix and two should-fix items (R1; R2, a hole of
+the first review's fixes, never released). All are fixed.
+
 ## v2.31.0-rc6
 
-**Released 2026-11-22, the sixth test release (pre-release) of v2.31.0**;
-the last stable release is [v2.30.2](#v2302). Everything in
+**Released 2026-11-22, the sixth test release (pre-release) of v2.31.0**,
+superseded by [v2.31.0-rc7](#v2310-rc7) the same day; the last stable
+release is [v2.30.2](#v2302). Everything in
 [v2.31.0-rc5](#v2310-rc5) is in it. The fixes of a second independent sweep,
 of rc5 (Fable's, every reproduction run again before it was cited, the wizard
 read by two more agents): 17 bugs, #712–#728 — one of them rc5's own, most of

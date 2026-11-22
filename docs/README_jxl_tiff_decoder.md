@@ -574,7 +574,11 @@ Options:
                      its JXL ("the TIFF is a degraded copy"), like --matrix.
                      --dry-run previews those keeps (the --basic ones as
                      "may be KEPT": djxl decides them).
-                     A JXL changed on disk since this run read it is kept too
+                     A JXL changed on disk since this run read it is kept too,
+                     and so is a lossless JPEG archive (a JXL made from a JPEG,
+                     v2.31.0-rc7): a TIFF of its pixels leaves out the original
+                     JPEG's bytes; only the transcoder's bit-exact recovery
+                     deletes it
   --provenance path|content
                      How an EXISTING output is matched to
                      the source it would replace OR certify, in EVERY mode: the

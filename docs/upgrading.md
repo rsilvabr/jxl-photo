@@ -11,6 +11,58 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
+## v2.31.0 (since rc7): scans; JPEG archives kept without their checksum; auto mode
+
+- **VueScan's RGB + infrared scans** archived by any earlier version have no
+  `jxlphoto-extrasamples` marker, so their copies are see-through and their
+  Explorer thumbnails nearly white (#729). **What to check:** if you archived
+  such scans, add the marker by hand and remake the thumbnails and copies —
+  the commands, tested, are in [known_issues.md](known_issues.md). New
+  archives get the marker.
+- **A lossy master of a grey TIFF with a grey profile** kept that profile in
+  XMP only (#731): the toolkit decodes it right, other programs show it with
+  the sRGB curve. Encode such TIFFs again with `--overwrite` if you want them
+  right everywhere; grey scans archived lossless (the default) are not
+  concerned. The first run after the upgrade tests each colour profile once
+  more (a few seconds per profile).
+- **The JPEG recovery (JXL → JPEG, bit-exact) with `--delete-source` deletes
+  an archive only when the JPEG matched its `checksums.md5` line** in that
+  run (#733). An archive without its line (another program's, a `.jxl`
+  copied alone) or a run with `--no-verify` keeps its JXLs, each with a
+  `KEEP` line: delete them by hand once you have checked the JPEGs. The
+  toolkit writes the line for its own archives.
+- **`--repair-jbrd` exits 1 for two more answers:** `REBUILDS ANOTHER JPEG`
+  (the rebuilt JPEG is not the one the archive's line names — with djxl 0.11
+  or 0.12, likely an archive of #669's kind: check it with djxl 0.13) and
+  `COULD NOT BE READ` (it used to count such a file as "without jbrd").
+- **A 16-bit PNG export with `--delete-source` keeps a master that carries
+  its TIFF's own tags** (IPTC, Photoshop resources, a scanner's private tags),
+  each with a `KEEP` line — that is most masters made from Capture One TIFFs.
+- **A decode to TIFF with `--delete-source` keeps a lossless JPEG archive**
+  (a JXL made from a JPEG), with a `KEPT` line: only the transcoder's
+  bit-exact recovery deletes it.
+- **Auto mode with `--to-srgb`/`--icc-profile` converts the lossless JPEG
+  archives too** (they came back bit for bit, in their own profile). A JPEG an
+  earlier run recovered at that place is not one of the run's copies, so it
+  is refused (an error, exit 1), not overwritten: delete those JPEGs (the
+  archive gives them back any time) and run the export again.
+- **A JPEG/PNG → JXL run in mode 6, or mode 7 without a subfolder, leaves
+  out the toolkit's own JPEG/PNG exports** (`jxlphoto-derived`), and a
+  recursive run skips the transcoder's output folders where it writes them:
+  a renamed recovered folder (modes 1/3), the run's `--export-jpeg-folder`
+  (modes 6/7), mode 4's `JPEG_recovered` wherever it sits in a folder name.
+- **The auto `--sync` resume** of a folder holding JPEGs and their archives
+  (`--mode 8 --sync`) runs now: a JPEG and the archive its `checksums.md5`
+  line names are up to date (it used to stop with exit 2).
+- **`--provenance adopt` is stricter, and judges an archive by its own kind**:
+  a lossless one must decode pixel-identical, a lossy one reach 35 dB
+  (`ADOPT_MIN_PSNR`), and a capture time that differs refuses it. An archive
+  written at a high distance may now be refused (its TIFF stays;
+  `--no-adopt-scan` adopts it); a lossy archive under a `--distance 0` run is
+  no longer refused for that alone.
+- **Copies of a SilverFast scan's infrared page** are no longer made; delete
+  those already made (the command is in [known_issues.md](known_issues.md)).
+
 ## v2.31.0 (since rc6): masters of later TIFF pages; manifests; expert-flag deletes
 
 - **Masters of page 1 and after of a multi-page TIFF made by rc5** can carry

@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.31.0-rc6** (2026-11-22, pre-release; last stable: [v2.30.2](docs/version_history.md#v2302)) · [What's new](#whats-new-in-v2310-rc6) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.31.0-rc7** (2026-11-22, pre-release; last stable: [v2.30.2](docs/version_history.md#v2302)) · [What's new](#whats-new-in-v2310-rc7) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 **Windows program, no Python needed:** [jxl-photo-exe](https://github.com/rsilvabr/jxl-photo-exe/releases/latest) — unzip and double-click; cjxl/djxl, ExifTool, ImageMagick and jxl-thumb included.
 
@@ -205,17 +205,16 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## What's new in v2.31.0-rc6
+## What's new in v2.31.0-rc7
 
-2026-11-22. The sixth test release (pre-release) of v2.31.0; the last stable release is [v2.30.2](docs/version_history.md#v2302).
+2026-11-22. The seventh test release (pre-release) of v2.31.0; the last stable release is [v2.30.2](docs/version_history.md#v2302).
 
-- **A fix for rc5:** the JXL of page 1 and after of a multi-page TIFF (a camera TIFF's thumbnail page, for example) could come out with a wrong EXIF orientation ("Rotate 180", or the first page's). If you archived multi-page TIFFs with rc5, [known issues](docs/known_issues.md) shows how to find those masters and redo them.
-- **Manifests:** a "no" to deleting already-converted originals reaches every row; a row whose Source is missing (a drive not plugged in) is an error of its own and the other rows still run; two file rows that would write one output are caught before the run.
-- **The wizard:** a setting changed in Settings reaches the next job of the same session; a preset keeps the export marker it ran with; a `--delete-source` typed in the expert flags gets the same checks as [D], before the confirmation.
-- **Smaller fixes:** the transcoder's resized copies of scans with an infrared channel, the colours of some Explorer thumbnails of lossy scans, and a few wizard edge cases.
-- **Faster:** a plain JXL → JXL recompression now shares the cores among its encodes too (40 masters with 8 workers: 23.3 → 19.7 s, the same files).
+- **Film scans:** VueScan's RGB + infrared scans no longer have their infrared taken for transparency (see-through copies, a white Explorer thumbnail), a grey colour profile is really tested before a lossy encode, and no copy is made of a SilverFast scan's infrared page. If you archived such scans before, [known issues](docs/known_issues.md) shows how to fix them by hand.
+- **Hardening of the deletes:** the JPEG recovery deletes an archive only when the JPEG matched its checksum; a 16-bit PNG export keeps a master that carries its TIFF's own tags, and a decode to TIFF keeps a JPEG archive; `--provenance adopt` no longer takes a burst frame of the same name for the archived photo; the toolkit's own JPEG exports are not archived as photos.
+- **Auto mode:** the documented `--sync` resume of a folder of JPEGs and their archives runs, and "convert to sRGB" converts the JPEG archives too.
+- **Smaller fixes:** `--repair-jbrd` checks its "OK" against the checksums, and a few edge cases.
 
-[Technical notes](docs/version_history.md#v2310-rc6) · [earlier releases, in short](docs/whats_new.md) · [every release](docs/version_history.md#release-history)
+[Technical notes](docs/version_history.md#v2310-rc7) · [what to check](docs/upgrading.md) · [earlier releases, in short](docs/whats_new.md) · [every release](docs/version_history.md#release-history)
 
 ---
 

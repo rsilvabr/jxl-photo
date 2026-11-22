@@ -500,6 +500,14 @@ Options:
                   no record at all. Each unmarked output is DECODED and compared
                   against the source that would overwrite it, then STAMPED -- a
                   one-time healing pass, after which the strict check applies again.
+                  The comparison (v2.31.0-rc7): a lossless archive must decode
+                  pixel-identical, a lossy one reach ADOPT_MIN_PSNR (35 dB; this
+                  toolkit's masters measure 41-65 dB, unrelated photos 10-12 dB),
+                  and a capture time or ImageUniqueID that both files carry and
+                  that differs refuses it whatever the pixels say (a burst frame
+                  of the same name measured 25.8 dB and used to be adopted). An
+                  archive written at a high distance may fall below 35 dB: it is
+                  refused (the TIFF stays) -- --no-adopt-scan adopts it.
                   A MISMATCHING marker is still refused: adopt relaxes "I cannot
                   tell", never "I can tell it is wrong". This script is the only one
                   with adopt -- the decoder and the transcoder have no way to prove
@@ -955,7 +963,7 @@ The workaround is to **not embed the ICC profile in the intermediate PNG's `iCCP
 
 | Strategy | Behavior | When to use |
 |---|---|---|
-| `cautious` (default) | Test each unseen ICC with a small 8/16-bit round-trip and cache the result. Avoids false positives from the size heuristic. | Mixed camera + scanner workflows; recommended default. |
+| `cautious` (default) | Test each unseen ICC with a small 8/16-bit round-trip and cache the result. Avoids false positives from the size heuristic. A grey profile is tested on a grey image (since v2.31.0-rc7: it was tested on a colour one, which cjxl refuses, so every grey profile went to XMP only). | Mixed camera + scanner workflows; recommended default. |
 | `heuristic` | Skip `iCCP` for profiles ≥ 50 KB **or** with ICC class `scnr` (scanner). Otherwise embed normally. | Mixed camera + scanner workflows when you need a faster rule-based fallback. |
 | `always` | Always embed the ICC in the PNG. | Normal camera images where you want the JXL to display correctly in viewers. |
 | `skip` | Never embed the ICC in the PNG. | Maximum safety for any source; JXL colors may look wrong until decoded. |
@@ -1420,7 +1428,7 @@ When splitting, each page is encoded with its own effective ICC profile (read fr
 
 Single-channel pages are encoded as grayscale and flagged with `jxlphoto-grayscale` in `dc:Relation`. The original `SubfileType` value (e.g. `2` for PAGE, `4` for MASK) is also recorded so the decoder can restore the page's role. Inherited RGB ICC is not applied to grayscale pages, which prevents libpng iCCP errors on scanner IR/mask pages.
 
-A page with a 2nd or 4th **channel** (grey + extra, RGB + extra — e.g. VueScan's RGBI layout) reaches cjxl as alpha. Its TIFF `ExtraSamples` value is recorded as `jxlphoto-extrasamples:<v>` (`0` unspecified, e.g. IR; `1` associated alpha; `2` unassociated alpha) so the decoder gives the channel back its role (v2.8.1); lossy encodes keep the colour under it with cjxl's `keep_invisible` option (v2.8.0).
+A page with a 2nd or 4th **channel** (grey + extra, RGB + extra — e.g. VueScan's RGBI layout) reaches cjxl as alpha. Its TIFF `ExtraSamples` value is recorded as `jxlphoto-extrasamples:<v>` (`0` unspecified, e.g. IR; `1` associated alpha; `2` unassociated alpha) so the decoder gives the channel back its role (v2.8.1); lossy encodes keep the colour under it with cjxl's `keep_invisible` option (v2.8.0). A page with such a channel and no `ExtraSamples` tag at all — VueScan's RGBI scans have none — is recorded as `0`, unspecified, as TIFF 6.0 reads it (since v2.31.0-rc7; before, no marker was written and every later step took the IR for transparency: see [known_issues.md](known_issues.md)).
 
 ### Film scans and their scanner software
 

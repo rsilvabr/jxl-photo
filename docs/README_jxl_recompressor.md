@@ -467,7 +467,10 @@ run vetoes the replacement of
 the whole group (`GROUP HELD IN PLACE`, the re-encodes discarded). The
 all-or-nothing rule the delete gate applies to deletion therefore extends
 to the replacement itself, and no document is ever left spread across two
-generations.
+generations. A page whose re-encode is no smaller than the original
+(keep-smaller) holds its group the same way, and the line says so: such a
+group is re-encoded, and held, on every run — `--no-keep-smaller` replaces
+it whole.
 
 Three interactive confirmations guard the deletion unless
 `--delete-confirm-off` is passed — the wrapper (`jxl_photo.py`) charges its
@@ -488,7 +491,11 @@ derivative of each). A plain recompression still includes them, so a split
 stays complete. The same goes for the 160 px thumbnail a camera or its
 software writes into its own TIFF without flagging it (NX Studio, Fuji Hyper
 Utility; archived as `<name>_page1.jxl`): a page other than the first that is
-at most 160 px on its long side gets no derivative (v2.28.0).
+at most 160 px on its long side gets no derivative (v2.28.0). Nor does a
+scanner's **infrared (mask) page** — SilverFast writes the IR of a scan as a
+page of its own, archived with `jxlphoto-subfiletype:4` (since v2.31.0-rc7:
+each delivery folder used to get a grey "photo" of the infrared, and the
+transcoder's JPEG/PNG copies the same).
 
 `--output-icc sRGB|AdobeRGB|<path to .icc>` converts the master: it is decoded
 at 16 bits, converted from its own profile (fixed **relative

@@ -166,8 +166,10 @@ marker (the log says so); its fields still reach the XMP. The text is read with
 the block's own CodedCharacterSet, as exiftool does.
 
 Like the other private-tag markers, the IPTC marker travels with the XMP: a
-recompressed copy and a JPEG or PNG the transcoder decodes carry it, and only
-the decoder turns it back into the tag. It holds what the TIFF's IPTC block
+recompressed JXL copy carries it, and only the decoder turns it back into the
+tag. A JPEG or PNG the transcoder decodes does not carry it (since v2.28.0),
+so since v2.31.0-rc7 a 16-bit PNG never replaces (deletes) a master that
+carries such a marker: once the TIFF is gone, the master is its only copy. It holds what the TIFF's IPTC block
 held, nothing more; an export from Capture One has a block of about 100 bytes
 (a marker of some 200 characters).
 

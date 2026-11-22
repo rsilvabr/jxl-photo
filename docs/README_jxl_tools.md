@@ -85,7 +85,7 @@ The tool shows a status bar with all detected dependencies (`cjxl/djxl` turns in
 | `4` | Folder list (manifest) | Pick a task, then a manifest CSV (one folder per row), then the review. A manifest is generated from a folder with `[A]` then `[P]` in the mode step of a New job — see [Running a list of folders](#running-a-list-of-folders-manifest) |
 | `5` | Renamed or moved folders | After a folder of TIFFs was renamed or moved, the masters' path record names the old place and the overwrite guard refuses to re-encode them. This rewrites the record of every master whose TIFF is unchanged — nothing is re-encoded, file dates are kept, masters whose TIFF changed are listed and left alone. Dry run first, then asks. Runs `jxl_tiff_encoder.py <folder> --mode N --restamp-moved` ([details](behavior_and_limitations.md#renamed-folders-and-the-overwrite-guard)) |
 | `6` | Explorer thumbnails for existing JXLs | Stores or renews the small thumbnail [jxl-thumb](https://github.com/rsilvabr/jxl-thumb) shows in Explorer, in JXLs that already exist (a folder, with or without subfolders): automatic (recommended: every file when jxl-thumb is installed, lossless files only otherwise), every file, or remove them. Re-encodes nothing; each file keeps its modified date, so syncs are not fooled. Runs `jxl_recompressor.py --refresh-explorer-thumbnails` ([details](README_jxl_recompressor.md#explorer-thumbnails-for-existing-files---refresh-explorer-thumbnails)) |
-| `7` | JPEG archives (jbrd) | Audit/repair lossless JPEG → JXL files: those whose bit-exact JPEG recovery broke (v2.0.0–v2.0.3 wrote XMP markers into jbrd containers), and those whose EXIF IrfanView cannot read (compressed, as the transcoder wrote it before v2.19.2). Audit (dry run) is the default; every repair works on a copy and only replaces a file when the copy provably rebuilds the same JPEG |
+| `7` | JPEG archives (jbrd) | Audit/repair lossless JPEG → JXL files: those whose bit-exact JPEG recovery broke (v2.0.0–v2.0.3 wrote XMP markers into jbrd containers), and those whose EXIF IrfanView cannot read (compressed, as the transcoder wrote it before v2.19.2). Audit (dry run) is the default; every repair works on a copy and only replaces a file when the copy provably rebuilds the same JPEG. It takes a folder or a single `.jxl`; an archive with its `checksums.md5` line is "OK" only when it rebuilds the JPEG that line names |
 | `8` | Reset the ICC test cache | The encoder's cautious ICC strategy remembers, per profile and cjxl version, whether a profile survives a lossy encode; clearing it makes the next lossy run test each profile again (after a libjxl update, or to re-check a profile). Runs `jxl_tiff_encoder.py --clear-icc-cache` |
 | `9` | Settings | `1` the wrapper's defaults ([below](#settings-menu-9)), `2` the scripts' own settings ([Script settings](#script-settings-menu-9-option-2)), `3` reset all settings (delete the config and start fresh), `4` move the settings file (script folder ↔ user profile) |
 | `D` | Dependencies | Re-scan all tools and libraries |
@@ -974,8 +974,8 @@ log. Every run logs the file and the settings it changed, e.g.
 **Never** taken from it, in any script: deletion (`DELETE_SOURCE`,
 `DELETE_SKIPPED`, `DELETE_CONFIRM`, `DELETE_SOURCE_REQUIRE_MD5`,
 `STORE_MD5`), the guards and checks (`OVERWRITE_GUARD`, `PROVENANCE_CHECK`,
-`ADOPT_SCAN`, `ALLOW_INCOMPLETE_GROUPS`, `VERIFY_ROUNDTRIP` and its
-thresholds), `OVERWRITE`, `STRIP_METADATA`, `AUTO_REPAIR_JBRD` and the
+`ADOPT_SCAN` and `ADOPT_MIN_PSNR`, `ALLOW_INCOMPLETE_GROUPS`,
+`VERIFY_ROUNDTRIP` and its thresholds), `OVERWRITE`, `STRIP_METADATA`, `AUTO_REPAIR_JBRD` and the
 encoder's copy of the original profile (`EMBED_ICC_IN_JXL`). Those stay
 per-run choices (the wizard, the flags) or a deliberate edit of the script.
 

@@ -10,7 +10,8 @@ as [GitHub Releases](https://github.com/rsilvabr/jxl-photo/releases).
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.31.0-rc6](version_history.md#v2310-rc6)** | 2026-11-22 | Pre-release. A later page of a multi-page TIFF no longer comes out turned upside down (rc5); a manifest's "no" to deleting converted originals reaches every row, and a missing Source no longer stops the other rows; settings changed in the wizard reach the next job; plain JXL → JXL recompression 15 % faster |
+| **[v2.31.0-rc7](version_history.md#v2310-rc7)** | 2026-11-22 | Pre-release. Film scans: VueScan's infrared no longer taken for transparency, grey profiles really tested, no copy of a SilverFast infrared page; the JPEG recovery deletes an archive only on its checksum, a 16-bit PNG keeps a master with TIFF tags, adopt no longer takes a burst frame for the archived photo; auto mode's `--sync` resume and "convert to sRGB" on JPEG archives work |
+| [v2.31.0-rc6](version_history.md#v2310-rc6) | 2026-11-22 | Pre-release. A later page of a multi-page TIFF no longer comes out turned upside down (rc5); a manifest's "no" to deleting converted originals reaches every row, and a missing Source no longer stops the other rows; settings changed in the wizard reach the next job; plain JXL → JXL recompression 15 % faster |
 | [v2.31.0-rc5](version_history.md#v2310-rc5) | 2026-11-22 | Pre-release. Safer deletes in a few unusual setups; a failed check before a delete is an error; Ctrl+C finishes the files in progress; each wizard task remembers its own values; faster archiving and sRGB copies, the same files; everything in v2.31.0-rc4 |
 | [v2.31.0-rc4](version_history.md#v2310-rc4) | 2026-11-22 | Pre-release. Error messages on one line with their whole cause; a TMP of 261 characters or more refused; `jxl_photo.py encode` and the other script commands start a little sooner; everything in v2.31.0-rc3 |
 | [v2.31.0-rc3](version_history.md#v2310-rc3) | 2026-11-22 | Pre-release. Archiving, decoding and deleting runs 18–22 % faster; exact EXIF values; a temp folder with `%` refused; the failed files listed again at the end; `--serve` for programs; a known-issues page; everything in v2.31.0-rc2 |
@@ -47,6 +48,17 @@ as [GitHub Releases](https://github.com/rsilvabr/jxl-photo/releases).
 | [v2.17.0](version_history.md#v2170) | 2026-10-24 | Film scans archived lossless and never recompressed lossy unless asked; they keep what their scanner software needs (whole XMP, private tags); thumbnail pages kept by default, except Capture One's |
 
 Every release since v1.0: [version_history.md](version_history.md#release-history).
+
+## v2.31.0-rc7
+
+2026-11-22. The seventh test release (pre-release) of v2.31.0; the last stable release is [v2.30.2](version_history.md#v2302).
+
+- **Film scans:** VueScan's RGB + infrared scans no longer have their infrared taken for transparency (see-through copies, a white Explorer thumbnail), a grey colour profile is really tested before a lossy encode, and no copy is made of a SilverFast scan's infrared page. If you archived such scans before, [known issues](known_issues.md) shows how to fix them by hand.
+- **Hardening of the deletes:** the JPEG recovery deletes an archive only when the JPEG matched its checksum; a 16-bit PNG export keeps a master that carries its TIFF's own tags, and a decode to TIFF keeps a JPEG archive; `--provenance adopt` no longer takes a burst frame of the same name for the archived photo; the toolkit's own JPEG exports are not archived as photos.
+- **Auto mode:** the documented `--sync` resume of a folder of JPEGs and their archives runs, and "convert to sRGB" converts the JPEG archives too.
+- **Smaller fixes:** `--repair-jbrd` checks its "OK" against the checksums, and a few edge cases.
+
+[Technical notes](version_history.md#v2310-rc7) · [what to check](upgrading.md)
 
 ## v2.31.0-rc6
 

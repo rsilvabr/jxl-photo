@@ -42,7 +42,19 @@
   rc6's reviews S5 and second S2). The cautious ICC probe (#693): cjxl's own error exit,
   twice, is the verdict "skip" (cached); a timeout, a killed process or a
   djxl failure is "cannot tell" — that file keeps its profile in XMP only,
-  nothing cached
+  nothing cached. A GRAY profile is probed on a grey image (#731: on an RGB
+  one cjxl refused it and every grey profile was "skip"; the cache key's test
+  generation is `t=3` — bump it whenever the probe's verdicts may change). A
+  page with an extra sample and NO `ExtraSamples` tag (VueScan's RGBI) is
+  recorded `jxlphoto-extrasamples:0` (#729, TIFF 6.0: unspecified): every
+  reader takes "no marker" as alpha. `--provenance adopt` (#732) proves an
+  unmarked archive by its OWN kind (`_jxl_is_lossless`, jxlinfo; unknown =
+  the run's distance): lossless = pixel-identical, lossy = `ADOPT_MIN_PSNR`
+  (35 dB, a safety setting, never in the overlay — not the delete gate's
+  20 dB), and a `DateTimeOriginal`/`SubSecTimeOriginal`/`ImageUniqueID` both
+  files carry that differs refuses it first (`_capture_identity_mismatch`). A
+  #701 rename that fails tries `<stem> (n)_jxlphoto-error.jxl`, never over a
+  file, then deletes the failed JXL (`_set_failed_output_aside`, #741)
 - `jxl_tiff_decoder.py` — JXL → TIFF (uses `djxl`). Also accepts
   `--exclude-folders` (same semantics as the encoder's). Smart sync never
   overwrites a TIFF that lacks its own `jxlphoto-src` marker (an original
@@ -58,7 +70,10 @@
   and moved them), and a command of its own puts back the camera's ExifIFD
   tags of those names (`_restored_tag_exif_copy`, `-wm cg`: a group-qualified
   exclusion deleted the raw ones — ExifTool writes a name in one IFD by
-  removing it from the others)
+  removing it from the others). Its delete gate keeps a lossless JPEG archive
+  (a jbrd JXL) and a JXL whose box cannot be read (`_jbrd_box_state`, #745): a
+  TIFF of its pixels is not the archive — only the transcoder's bit-exact
+  recovery deletes one
 - `jxl_jpeg_transcoder.py` — JPEG↔JXL lossless + JXL→JPEG/PNG lossy.
   Never writes XMP provenance markers into a jbrd container (they break
   `djxl --reconstruct_jpeg`); the encode delete gate proves bit-exact
@@ -76,7 +91,42 @@
   drops an all-opaque alpha otherwise — the encoder's `invisible_flag`, the
   recompressor's `_keep_invisible_flag`, the transcoder's convert); ships a
   `--repair-jbrd` audit/repair mode for archives written by affected
-  v2.0.0–v2.0.3 versions. `checksums.md5` lines are filed per output as it
+  v2.0.0–v2.0.3 versions — its "OK" for an archive with a `checksums.md5`
+  line means the rebuilt JPEG IS the line's (`REBUILDS ANOTHER JPEG`
+  otherwise), and a file it cannot read is `COULD NOT BE READ`
+  (`_jbrd_box_state`, common: None = cannot tell; `has_jbrd_box` stays
+  True/False), both errors (#738). **The decode direction deletes an archive
+  only when its recovered JPEG matched the `checksums.md5` line THIS run**
+  (`result[3]`, #733; a skipped JPEG without a line is kept too):
+  `djxl --reconstruct_jpeg`'s exit 0 is no proof — djxl 0.12/0.11 rebuild
+  ANOTHER JPEG with exit 0 from an archive of #669's kind; never put a
+  reconstruction back as the decode direction's proof.
+  `DELETE_SOURCE_REQUIRE_MD5 = False` relaxes the ENCODE direction only.
+  Auto mode: a colour conversion sends jbrd JXLs to the convert group like a
+  resize (#735; `_auto_jxl_output`, the wizard's plan, reads the same flags),
+  and a JPEG + the archive (jbrd box) whose line is its MD5 are up to date
+  both ways, dropped from EVERY list a group is planned from — the convert
+  list too (`_archive_pairs_up_to_date`, #737; not with `--overwrite`); only a
+  pair one of whose directions would write, or any pair of a colour/resize
+  run (the archive's copy would land on its original), is proven — a plain
+  run hashes no JPEG (review S6); the archive is bound to its line by content
+  (`_archive_of`: self-hash, else a reconstruction), and an archive alone whose
+  copy would land on its JPEG is left as it is (`_archives_onto_their_jpeg`).
+  The encode direction (JPEG/PNG → JXL) skips the decode-output folders where
+  THIS run writes them (`_decode_output_folder_names`: the shipped names
+  always; a renamed `RECOVERED_JPEG_FOLDER` or non-default `--output-name` in
+  modes 1/3 only; the run's `--export-jpeg-folder` in modes 6/7 only — NEVER a
+  settings name for every mode: a symmetric setup hid the user's own JPEG
+  folders, second review R2) and mode 4's `JPEG_SUFFIX_REPLACE_DEC` as a TOKEN
+  wherever `_replace_suffix_token` puts it — unless it equals
+  `JPEG_SUFFIX_TO_REPLACE` (#736). In mode 6 / 7 without a subfolder it
+  leaves out JPEG/PNG sources carrying `jxlphoto-derived`
+  (`_drop_derivative_pairs(..., overwrite=)`, which reads them with
+  `_image_xmp_mentions` — the XMP segment in Python, no ExifTool — only for a
+  pair that would write, with `--overwrite`, when `DELETE_SOURCE` is on, or
+  whose output another source shares; auto mode does that across its JPEG
+  and PNG groups too, `_label_shared_exports`).
+  `checksums.md5` lines are filed per output as it
   lands (staging: when its folder leaves staging; otherwise right AFTER the
   atomic swap, never before it — #556); a jbrd JXL without its line is
   adopted only by a real reconstruction hashed before and after
@@ -93,9 +143,10 @@
   rc5, #691: `_COLOUR_DERIVATIVE`, `_derivative_output`; `--output-icc`,
   resize or sharpen in the recompressor); a derivative never carries
   `jxlphoto-src`/`srcsum`. `_lossy_decode_keep_reason` keeps a `jbrd` JXL
-  against every pixel decode (#692) and a master whose 16-bit PNG has another
+  against every pixel decode (#692), a master whose 16-bit PNG has another
   profile than the one it carries in XMP (#691's PNGs from older versions: a
-  faithful decode embeds exactly that profile, measured). A colour-only run
+  faithful decode embeds exactly that profile, measured) and a master that
+  carries `jxlphoto-tifftag` tokens, which no PNG holds (#734). A colour-only run
   leaves to the skip logic (`should_process`), instead of refusing, an
   existing output with no derived label whose marks name THIS source
   (`_check_derivative_targets`, `_provenance_ok`) — never forced: such a file
@@ -121,7 +172,11 @@
   names of its SETTINGS (`_own_output_folder_names`, #710). A 4th channel
   whose `jxlphoto-extrasamples` says it is not alpha (a scanner's IR) is
   dropped before a derivative's conversion and from the thumbnail (#695,
-  #700); an existing jbrd output (no markers, ever) is
+  #700); a derivative run makes no copy of a scanner's IR MASK page
+  (`jxlphoto-subfiletype` & 4, `_is_mask_page`, common, #730 — the
+  transcoder's `_skip_thumbnail_pages` too); `_derive_pixels` refuses when
+  djxl reported neither profile (#739: "cannot tell" is not "own space"); an
+  in-place group held by keep-smaller says so (#742); an existing jbrd output (no markers, ever) is
   overwritten only by its own bytes or by an archive of the same JPEG
   (`_jbrd_overwrite_refusal`, #558 — its verbatim copy may be the only one
   once `--delete-source` removed the source); multi-page groups (jxlphoto-mpg, keyed by folder) delete
@@ -589,7 +644,8 @@ changes first.
   other than the first, at most 160 px; the encoder keeps archiving it as a
   real page so the TIFF comes back whole, do not reclassify it there: the
   decoder restores every thumbnail as SubfileType 1 and `exclude` would drop
-  it); a plain recompression keeps them so the split stays complete.
+  it) and a scanner's IR mask page (#730: `jxlphoto-subfiletype` & 4,
+  `_is_mask_page`); a plain recompression keeps them so the split stays complete.
   So does the transcoder's resized/sharpened/colour-converted JXL -> JPEG/PNG
   (`_skip_thumbnail_pages`, #555; no marker read on a dry run).
 - **Each manifest entry runs as a SEPARATE child process.** A child's own safety
@@ -1232,7 +1288,15 @@ changes first.
   commit. A test that fails at the end is re-run alone against the extracted
   HEAD (`git show HEAD:<file>`).
 - The suite and the battery set `JXLPHOTO_LOG_DIR` (conftest / `run()`), so no
-  test writes to `Logs\`. Every subprocess call in the four backends goes
+  test writes to `Logs\` — an ad-hoc probe script must set it too, or it
+  writes there. Both also run with a throwaway `APPDATA`, and so does each
+  side of every `tools/side_by_side.py` scenario, empty at its start (since
+  rc7: the encoder's cautious ICC cache, `%APPDATA%\jxl-photo\icc-cache`, is
+  the toolkit's only `APPDATA` reader; the suite's lossy test encodes filled
+  this PC's real cache, and a side found or missed its entry by this PC's
+  history), with `PYTHONUSERBASE` pinned so a subprocess keeps the same user
+  site. A probe script or a contract test run by hand that encodes lossy
+  sets `APPDATA` (or `--icc-cache-dir`) too. Every subprocess call in the four backends goes
   through `_run_captured` except the version probes (`_tool_version`,
   `_warn_if_libjxl_too_old`), `_run_to_memory` (#671, then the decodes of
   round 87 — see "Full-size decodes stay in memory": an output that must

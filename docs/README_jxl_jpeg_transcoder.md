@@ -301,6 +301,25 @@ cannot be read is kept. To process a derivative folder on purpose, use mode
 This changes nothing for the bit-exact JPEG recovery: a lossless JPEG archive
 never carries a marker, and a derivative holds no JPEG to recover.
 
+**When encoding (JPEG/PNG → JXL), the same rule leaves out the exports**
+(since v2.31.0-rc7), in mode 6 and in mode 7 without an explicit subfolder: a
+JPEG or PNG carrying `jxlphoto-derived` (a resized or colour-converted copy
+of a master, e.g. in `_EXPORT\JPG_web`) is a copy made from a master, not a
+photo to archive — a deleting run used to archive it next to the real
+archives and empty the export folder. The mark is read from the file's own
+XMP segment (no ExifTool run), only for a file the run would write or when
+`--delete-source` is on, `--overwrite` is given, or another file lands on the
+same output. The recursive JPEG/PNG search also skips this tool's own output
+folders where the run writes them: `recovered_jpeg`, `JPEG_recovered` and
+`converted` always (as before), a renamed `RECOVERED_JPEG_FOLDER` or a
+non-default `--output-name` in modes 1/3, the run's `--export-jpeg-folder` in
+modes 6/7, and mode 4's `JPEG_SUFFIX_REPLACE_DEC` as a token (`shoot
+JPEG_recovered`, `JPEG_recovered_shoot`) — with a renamed folder, every auto
+run used to archive the last run's recovered JPEGs again, one folder deeper.
+A name from the settings never hides folders in the other modes, and mode 4's
+token is not skipped when it is the token the encode direction reads
+(`JPEG_SUFFIX_TO_REPLACE`): with a symmetric setup the JPEG folders are yours.
+
 ## Output modes
 
 Modes 0-8 mirror the original [`jxl_jpg_lossless_transcoder.py`](https://github.com/rsilvabr/jxl_jpg_lossless_transcoder) structure:
@@ -614,9 +633,15 @@ its source:
   the run goes on.
 
 What still deletes, behind its gates: the bit-exact JPEG recovery of a
-lossless JPEG → JXL archive (`djxl --reconstruct_jpeg` + the checksum), and a
-16-bit PNG — except for a JXL with floating-point or deeper-than-16-bit
-samples (`jxlinfo` says so), which no 16-bit PNG copies: that JXL is kept.
+lossless JPEG → JXL archive — only when the recovered JPEG matches the
+archive's `checksums.md5` line in that run (since v2.31.0-rc7; an archive
+without its line, or a run with `--no-verify`, is kept, because djxl 0.11 and
+0.12 rebuild another JPEG, with exit 0, from some archives cjxl 0.13 writes:
+see the note on libjxl 0.13 below) — and a 16-bit PNG, except for a JXL with
+floating-point or deeper-than-16-bit samples (`jxlinfo` says so), which no
+16-bit PNG copies, and a master that carries TIFF tags (`jxlphoto-tifftag`:
+an IPTC block, Photoshop resources, a scanner's private tags), which a PNG
+cannot hold (since v2.31.0-rc7): those JXLs are kept.
 
 ### A JXL made from a rotated JPEG
 
@@ -785,7 +810,16 @@ py jxl_jpeg_transcoder.py "F:\Photos\2024" --repair-jbrd
   Consequence: if you still have the ORIGINAL JPEG, its MD5 no longer
   matches the database, and an encode-direction `--delete-source` keeps it
   (correctly — it is not bit-exact recoverable).
-- Exit code is 1 while any file is still broken, 0 otherwise.
+- An archive with its `checksums.md5` line is `OK` only when the JPEG
+  rebuilt now is the one the line names (since v2.31.0-rc7). Otherwise it is
+  reported `REBUILDS ANOTHER JPEG`: with djxl 0.11 or 0.12 the likely cause
+  is an archive cjxl 0.13 wrote with its defaults (check it with djxl 0.13 or
+  later); with djxl 0.13, a JXL that is not the file the line was written
+  for, or a damaged one. Nothing is changed in such a file.
+- A file that cannot be read (held by another program, gone meanwhile) is
+  reported `COULD NOT BE READ` — never "without jbrd (not applicable)".
+- Exit code is 1 while any file is still broken, rebuilds another JPEG or
+  could not be read, 0 otherwise.
 
 **Every JPEG→JXL archive made with v2.0.0+ should pass through this check
 once** before the source JPEGs are discarded.
@@ -853,6 +887,18 @@ py jxl_jpeg_transcoder.py "F:\Photos" --mode 8 --sync
 - Resuming interrupted batch operations without re-processing completed files
 - Update archives when source files are modified
 - Incremental backups
+
+In auto mode a JPEG and its own archive in one folder (an in-place run,
+`--mode 8`) are each the other's output, so one of the two is always "newer".
+Since v2.31.0-rc7 such a pair is up to date when the archive (a lossless one,
+with its jbrd box, bound to its line by its own content) has a
+`checksums.md5` line that is that JPEG's MD5:
+neither file is written, and the run goes on with the rest (it used to stop
+with "Output would overwrite another input", exit 2). Only a pair the run
+would otherwise write is checked, so a plain run reads none of those JPEGs.
+Without the line, or with another MD5 (a re-exported JPEG), the run stops as
+before — and so does `--overwrite`, which asks for every output again,
+including each of the two over the other.
 
 **Comparison with `--overwrite`:**
 
@@ -952,7 +998,10 @@ disposable by construction:
   (`--force-transcode`, `--decode` in auto mode) reproduces the original bytes
   and cannot shape pixels; combining it with the shaping flags is refused
   (exit 2). In auto mode every JXL is instead decoded and re-encoded, and a
-  single log line says how many carried a JPEG reconstruction.
+  single log line says how many carried a JPEG reconstruction. The same goes
+  for a colour conversion alone (`--to-srgb`, `--icc-profile`) since
+  v2.31.0-rc7: an auto run used to recover such archives bit for bit, in
+  their own profile, without a word.
 - **It never proves the master is archived.** The `jxlphoto-src:`/
   `jxlphoto-srcsum:` markers are removed from the copied metadata and replaced
   by `jxlphoto-derived:<recipe>` (e.g. `sRGB@long2048+screen`). A 2048 px JPEG
@@ -1062,7 +1111,7 @@ Log output:
 
 **Note:** MD5 verification only applies to lossless transcoding. Lossy conversion (`--force-convert`) intentionally changes pixel data, so MD5 verification is skipped.
 
-**Note (libjxl ≥ 0.12):** on decode, `djxl` is invoked with `--reconstruct_jpeg`, which fails cleanly if the original JPEG cannot be reconstructed losslessly. Together with the `jbrd` check, this gives two independent guarantees that a recovered JPEG is bit-exact (a failure becomes a per-file error; the batch continues). On older `djxl` the flag is not passed and behavior is unchanged.
+**Note (libjxl ≥ 0.12):** on decode, `djxl` is invoked with `--reconstruct_jpeg`, which fails cleanly if the original JPEG cannot be reconstructed at all (a failure becomes a per-file error; the batch continues). On older `djxl` the flag is not passed. Its exit 0 does **not** prove the rebuilt JPEG is the original: djxl 0.12 and 0.11 rebuild another JPEG, with exit 0, from an archive cjxl 0.13 wrote with its defaults ([below](#an-archive-every-libjxl-rebuilds-bit-for-bit)). Only the MD5 comparison with the archive's `checksums.md5` line proves it — which is why, since v2.31.0-rc7, `--delete-source` deletes an archive only after that comparison passed in the same run (`OK [MD5 PASS]`), and `--repair-jbrd` reports an archive whose rebuilt JPEG is not the one its line names (`REBUILDS ANOTHER JPEG`) instead of calling it OK.
 
 * * *
 
