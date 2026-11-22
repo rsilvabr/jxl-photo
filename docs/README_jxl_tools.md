@@ -662,6 +662,15 @@ Multi-page TIFFs: split — one JXL per page (thumbnail pages excluded)
 - **The `from` column:** `you` (changed here or in the quality step), `last
   job`, `settings` (Settings → wrapper defaults), `script` (the script's own
   setting, or the script settings of menu 9 → 2); empty for a fixed default.
+  `last job` is the last job **of the same task** (since v2.31.0-rc5): an
+  8-bit PNG export no longer sets the depth of the next "Restore TIFFs", nor
+  the copies' folder the masters' folder. A value you left at the script's
+  setting follows that setting when it changes (menu 9 → 2). After the
+  update, the first new job of a task starts from the last job if it was the
+  same task, else from the Settings. The staging folder, the number of
+  workers, the folder and its exclusions stay the last job's, whatever its
+  task: they describe the PC and the library, not the task. *Repeat last job* and the
+  presets replay what the job ran, and nothing an earlier job had answered.
 - **What is not offered** says why: no derivative (colour, sRGB,
   resize/sharpen) in place (modes 0/8) or with `[D]` — a derivative never
   deletes its source, so the run could only be refused later. Resize and

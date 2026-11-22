@@ -574,6 +574,13 @@ Options:
                   (+18 % measured on 69 real TIFFs). Until v2.30.x the flag did
                   nothing without --delete-source.
                   With --delete-source: the same check gates the deletion.
+                  A JXL this run wrote that FAILS it is an error of the run
+                  (exit 1, since v2.31.0-rc5): its TIFF is kept and the JXL
+                  stays beside it as <name>_jxlphoto-error.jxl, never under its
+                  final name, so the next run encodes the TIFF again (no script
+                  takes a *_jxlphoto-error.jxl as a source; delete it once you
+                  have looked at it). Until rc4 the run said OK and the failed
+                  JXL kept its name.
                   A lossy master that stores its profile as an ICC blob
                   (ICC_PNG_STRATEGY always/heuristic) cannot be compared — djxl
                   returns it in linear sRGB — so the check fails for it (its
@@ -691,7 +698,7 @@ Options:
 | `1` | One or more files failed |
 | `2` | Aborted (e.g. duplicate output destinations, invalid arguments) |
 | `3` | User declined the delete-source confirmation |
-| `130` | Interrupted with Ctrl+C (cancelled) |
+| `130` | Interrupted with Ctrl+C: no file started after it, the files in progress finished, the summary printed (a second Ctrl+C stops at once) |
 
 A run that had errors names the failed files once more at its end
 (`Errors (N):`, WARNING lines, the first ten), for whoever reads only the last

@@ -33,6 +33,113 @@ verbatim copy of one. The entries below say how to find those.
 
 ## The list, newest first
 
+### A master that failed its check before a delete kept its name — before v2.31.0-rc5 (#701)
+
+**What:** with `--delete-source`, a JXL that failed its round-trip check in
+the delete gate kept its TIFF (right) but also its final name, and every
+`--sync` after it took it for up to date. Rare: a check fails only on a
+broken encode.
+**Which files:** masters made from TIFFs in deleting runs.
+**How to tell:** the run's log has `KEEP source (round-trip verification
+FAILED`; the TIFF is still beside its JXL.
+**What to do:** encode those TIFFs again with `--overwrite`.
+
+### The Explorer thumbnail of an RGB+IR scan — before v2.31.0-rc5 (#700)
+
+**What:** the thumbnail of a 4-sample film scan (RGB + infrared) was
+flattened on white through the IR channel, taken as alpha: paler colours.
+Only the thumbnail; the image is right.
+**Which files:** JXLs of RGB+IR scans with an Explorer thumbnail.
+**What to do:** `--refresh-explorer-thumbnails` on their folder (encoder or
+recompressor) makes the thumbnails again.
+
+### A TIFF re-exported during its encode — before v2.31.0-rc5 (#699)
+
+**What:** a TIFF rewritten while its page was being encoded, in a run that
+did not delete: the master held the old version with a newer date, so every
+`--sync` after it said "up to date". Rare: it takes an export landing during
+that very file's encode.
+**Which files:** masters made from TIFFs.
+**How to tell:** a master whose `jxlphoto-srcsum` is not its TIFF's (a sync
+with `--provenance content`, or the decoder's restore compared with the TIFF).
+**What to do:** encode the TIFF again with `--overwrite`.
+
+### Private TIFF tags from 65000 up — TIFFs decoded before v2.31.0-rc5 (#698)
+
+**What:** the decoder wrote a TIFF's private tags back from the master's
+`jxlphoto-tifftag` tokens, but those from 65000 up (65000 is Adobe Camera
+Raw's OwnerName for ExifTool) were moved or removed by the EXIF copy after
+them. The master keeps them.
+**Which files:** TIFFs restored from masters of TIFFs that had such tags.
+**What to do:** decode them again from their masters if you need those tags.
+
+### A caption with `|` — before v2.31.0-rc5 (#697)
+
+**What:** the clean-up of the encode record rewrote a caption or comment
+with a `|` in it although it held no record: `Tokyo|Kyoto` became
+`Tokyo | Kyoto`, `A || B` became `A | B`.
+**Which files:** masters and copies whose dc:Description or UserComment had
+a `|`.
+**What to do:** correct the caption by hand, or encode again from the TIFF.
+
+### Page 0 of a multi-page TIFF took page 1's EXIF values — before v2.31.0-rc5 (#696)
+
+**What:** for the EXIF tags several pages carry, page 0's master took the
+last page's value: `PageNumber 1 2`, an `Artist` given only to page 1, a
+SilverFast scan's `CompressedBitsPerPixel`; the TIFF decoded from it the
+same. Camera TIFFs with a thumbnail page and two-page scans are concerned.
+**Which files:** masters of page 0 of multi-page TIFFs, and TIFFs decoded
+from them.
+**What to do:** nothing for the image; encode again from the TIFF with
+`--overwrite` if those tags matter to you.
+
+### A resized copy of an RGB+IR scan — before v2.31.0-rc5 (#695)
+
+**What:** the recompressor's derivative (resize, sharpening, colour
+conversion) of a 4-sample film scan took the infrared as alpha: the resize
+weighted the colour by it and the copy came out RGBA.
+**Which files:** derivatives of RGB+IR scans.
+**What to do:** make them again (the recompressor re-derives over its own
+derivatives with `--overwrite`).
+
+### A lossy master without its ICC in the codestream — before v2.31.0-rc5 (#693)
+
+**What:** with `ICC_PNG_STRATEGY = cautious`, an ICC probe that could not
+run (cjxl or djxl failed or timed out under load) was cached as "this
+profile is unsafe": the lossy masters with that profile after it went out
+without the ICC in the codestream (viewers show them in sRGB). The profile is
+in their XMP and the decoder restores it: a TIFF restored from them is right.
+**Which files:** lossy masters made from TIFFs with that strategy.
+**What to do:** clear the ICC test cache (wizard menu 8, or
+`--clear-icc-cache`) and, if the colours in viewers matter, encode those
+masters again with `--overwrite`.
+
+### A colour-converted 16-bit PNG carried its master's marks — before v2.31.0-rc5 (#691)
+
+**What:** a 16-bit PNG the transcoder made from a JXL with `--to-srgb` or
+`--icc-profile` carried the master's `jxlphoto-src`/`srcsum` marks, as a
+faithful copy does. A later run decoding the same JXLs to 16-bit PNG with
+`--delete-source --delete-skipped` found it ("SKIP (exists)") and deleted the
+master. Since v2.31.0-rc5 such a PNG is a derivative (it never deletes, and
+it carries `jxlphoto-derived` instead of those marks), and the delete gate
+keeps a master whose PNG has another profile than the one the master carries
+in its XMP — every master the TIFF encoder made. A JXL without it (one the
+transcoder made from a JPEG or a PNG, or one from elsewhere) cannot be
+judged that way. Rare: it takes a colour-converted 16-bit PNG and then a
+deleting run over the same folder.
+**Which files:** 16-bit PNGs made with `--to-srgb` or `--icc-profile`.
+**How to tell:** the list of the 16-bit PNGs that carry a master's marks and
+no derived mark, with their profile (one whose profile is not its master's is
+a colour-converted one):
+
+```
+exiftool -r -ext png -if "$XMP-dc:Relation =~ /jxlphoto-src:/ and $XMP-dc:Relation !~ /jxlphoto-derived/ and $BitDepth == 16" -p "$Directory/$FileName | $ICC_Profile:ProfileDescription" "D:\Photos"
+```
+
+**What to do:** before a run with `--delete-source --delete-skipped` that
+decodes JXLs to 16-bit PNG, delete those PNGs or make them again with
+v2.31.0-rc5 or later (the same colour command with `--overwrite`).
+
 ### A temp folder with `%` in its path — before v2.31.0-rc3 (#687)
 
 **What:** ExifTool reads a `%` in a file name as a format code. With a `%`
@@ -103,6 +210,11 @@ djxl 0.12 (`djxl archive.jxl rebuilt.jpg`) and compare the result with the
 original's MD5 in the folder's `checksums.md5`.
 **What to do:** keep djxl 0.13 or newer, or archive those JPEGs again (the
 original JPEG comes back with djxl 0.13).
+**The same up to v2.31.0-rc4 (#694)** for an archive made while `cjxl
+--version` did not answer in time (a busy PC): the run could not tell it had
+cjxl 0.13 and left the flag out, without a word. Since rc5 the probe tries
+again with more time and a run that still cannot tell says so. The same
+proof (djxl 0.12 against `checksums.md5`) finds them.
 
 ### A grey copy kept its master's marks — v2.30.2-rc1 and older (#672)
 

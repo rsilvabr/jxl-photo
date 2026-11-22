@@ -11,6 +11,41 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
+## v2.31.0 (since rc5): colour-converted exports never delete; a failed check renames the JXL; Ctrl+C
+
+- **A JXL → JPEG/PNG with its colour converted is a derivative** (the
+  transcoder's `--to-srgb`, `--icc-profile`), as the recompressor's
+  `--output-icc` always was: it never deletes its source, and it carries
+  `jxlphoto-derived` instead of the master's `jxlphoto-src`/`srcsum`.
+  **What to check:** a command line that combines a colour conversion with
+  `--delete-source` converts and keeps the sources now. The same colour-only
+  command run again over what an older version exported skips those files,
+  as before, instead of refusing them; `--overwrite` remakes them as
+  derivatives. 16-bit PNGs an older version
+  converted this way are listed in [known_issues.md](known_issues.md) (#691),
+  with what to do before a deleting run over them.
+- **A JXL that fails its round-trip check before a delete is an error**
+  (the encoder, `--delete-source`): the run exits 1, the TIFF is kept and
+  each failing page's JXL stays beside it as `<name>_jxlphoto-error.jxl`, so
+  the next run encodes that TIFF again. No script takes such a file as a source; delete it once
+  you have looked at it. Until rc4 the run said OK and the failed JXL kept its
+  name.
+- **Ctrl+C finishes the files in progress** (every script): no file starts
+  after it and no source is deleted after it, the summary is printed, the exit
+  code is 130. A second Ctrl+C stops at once. The recompressor used to delete
+  the converted sources after a Ctrl+C; it keeps them now.
+- **The wizard: each task remembers its own last values.** A new job starts
+  from the last job of the same task (the staging folder and the number of
+  workers stay the last job's, whatever its task); after the update, the
+  first new job of another task than your last one starts from your Settings
+  and the scripts' settings. A value left at the script's setting follows
+  that setting when you change it (menu 9). *Repeat last job* and the presets
+  replay what the job ran.
+- **New masters and copies differ in the bytes of their Explorer thumbnail:**
+  it is made from the image in memory now, not from a decode of the finished
+  file (the same pixels for a lossless master with a colour profile). Nothing
+  to do; a comparison of files by their hash across versions will see it.
+
 ## v2.31.0 (since rc3): a temp folder with `%`, or a TMP of 261 characters, is refused; exact EXIF values
 
 - **A TMP of 261 characters or more is refused (since v2.31.0-rc4).** On

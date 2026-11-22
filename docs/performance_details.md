@@ -54,7 +54,7 @@ story by theme.
 | [v2.30.2](version_history.md#v2302-rc2) | Full-size decodes stay in memory: the thumbnail, copies, decoded TIFFs, the checks before a delete | resized JPEG copy of a 45 MP master: 14.1 → 4.5 s |
 | [v2.30.2](version_history.md#v2302) | A new master written once instead of seven times; planning reads a stub of each JXL; a decoded TIFF rewritten fewer times | archiving writes 79 MB instead of 520; decoding 15.8 → 5.6 s |
 | [v2.31.0-rc2](version_history.md#v2310-rc2) | sRGB derivative: colour converted in Python, image to cjxl in memory | 60 masters, sRGB copies at d=0.7 e7: 133 → 123 s (temp folder on an NVMe drive), 176–196 → 121 s (on a SATA SSD); 16 % less CPU |
-| v2.31.0 | ExifTool kept open; a decoded TIFF written once; one decode for the thumbnail and the page check; the delete gate's checks in parallel; ImageMagick's PNG in memory; `--serve`; `jxl_photo.py encode` (and the other script commands) dispatched before the wizard loads | 4 TIFFs archived one call each with every page checked: 16.9 → 13.2 s; 6 masters decoded: 5.1 → 4.2 s; a deleting run of 6 TIFFs: 11.3 → 9.0 s; 6 masters resized to 2048 px: 4.1 → 3.6 s; 30 JPEGs archived through one `--serve` process instead of a call each: 8.9 → 4.8 s; `jxl_photo.py encode`/`transcode --version`: 413 → 379 ms, 312 → 272 ms |
+| v2.31.0 | ExifTool kept open; a decoded TIFF written once; one decode for the thumbnail and the page check, then none (the thumbnail from the image in memory); cjxl's threads shared among the encodes; the decoder's preview by a table; the delete gate's checks in parallel; ImageMagick's PNG in memory; `--serve`; `jxl_photo.py encode` (and the other script commands) dispatched before the wizard loads | 4 TIFFs archived one call each with every page checked: 16.9 → 13.2 s; 6 masters decoded: 5.1 → 4.2 s; a deleting run of 6 TIFFs: 11.3 → 9.0 s; 6 masters resized to 2048 px: 4.1 → 3.6 s; 30 JPEGs archived through one `--serve` process instead of a call each: 8.9 → 4.8 s; `jxl_photo.py encode`/`transcode --version`: 413 → 379 ms, 312 → 272 ms; since rc5 (cjxl's threads shared among the encodes, the Explorer thumbnail from the image in memory, the decoder's preview by a table), 37 varied exports with 8 workers: archived 22.3 → 17.6 s, sRGB copies 32.5 → 26.0 s, decoded 13.5 → 11.8 s |
 
 ## The starting design
 
@@ -448,7 +448,34 @@ decoded and compared with its TIFF page before it takes its final name; with
 an Explorer thumbnail, the same page was decoded a second time for it. Since
 v2.31.0 the thumbnail's decode is kept for the check when the file being
 checked holds the very same image data (its codestream's sha256): one decode
-per page. Normal runs keep nothing.
+per page. Normal runs keep nothing. Since v2.31.0-rc5 the thumbnail is not a
+decode at all (next section), and the check decodes once on its own.
+
+### The Explorer thumbnail from the image in memory
+
+Until v2.31.0-rc4 the encoder decoded each new master again, whole, to make its
+768 px thumbnail: djxl wrote the full image and ImageMagick read it back to
+shrink it, 14–21 % of an archiving run with thumbnails on. Since v2.31.0-rc5 it
+is made from the TIFF page the encoder already holds, before cjxl, in the
+page's own profile, by the same ImageMagick command; the recompressor's sRGB
+copies make theirs from the pixels they have just converted in Python.
+Compared with the decode on 73 real outputs: identical wherever the TIFF has a
+colour profile. A failure falls back to the decode.
+
+### cjxl's threads shared among the encodes running at once
+
+Each cjxl starts one thread per logical core. With 8 to 16 workers that was
+hundreds of threads on 32 cores, waiting on each other. Since v2.31.0-rc5, when
+several encodes run at once each gets `--num_threads = max(4, 2 × cores ÷
+encodes at once)`; one encode alone keeps every core. The files are byte for
+byte the same with any thread count (measured: lossy and lossless,
+`--buffering 0`, 16-bit RGB and 8-bit gray).
+
+### The decoder's preview by a table
+
+The 8-bit JPEG preview of a decoded TIFF divided every 16-bit sample by 257 in
+floating point. Since v2.31.0-rc5 a table of the 65 536 values gives the same
+byte for each: 0.68 → 0.38 s per 45 MP page.
 
 ### A script command that does not load the wizard
 

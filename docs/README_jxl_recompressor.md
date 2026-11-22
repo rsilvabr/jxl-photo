@@ -1060,7 +1060,7 @@ EXPORT_JXL_SUBFOLDER = ""                   # mode 7
 | 1 | One or more files failed / pre-flight refused the run |
 | 2 | Usage error (argparse) or the run aborted early (disk full) |
 | 3 | Aborted by the user at the delete confirmation |
-| 130 | Interrupted with Ctrl+C (summary still printed with partial results) |
+| 130 | Interrupted with Ctrl+C: no file started after it, the files in progress finished, the summary printed (a second Ctrl+C stops at once) |
 
 A run that had errors names the failed files once more at its end
 (`Errors (N):`, WARNING lines, the first ten), for whoever reads only the last

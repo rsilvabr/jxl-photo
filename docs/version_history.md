@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.31.0-rc4](#v2310-rc4)** | 2026-11-22 | Pre-release. A tool's error message on one line with its whole cause; a TMP of 261 characters or more refused (on Windows such a process hangs when it starts any program); `jxl_photo.py encode` and the other script commands start 35–40 ms sooner; everything in v2.31.0-rc3 |
+| **[v2.31.0-rc5](#v2310-rc5)** | 2026-11-22 | Pre-release. The fixes of a full sweep of rc4 (#690–#711): a colour-converted JPEG/PNG never deletes its master, a JPEG archive is never deleted by a decode of its pixels, an unreadable encode record leaves the file alone, a failed check before a delete is an error; Ctrl+C finishes the files in progress; each wizard task remembers its own values; cjxl's threads shared among the encodes and the Explorer thumbnail made from the image in memory, faster with the same files; everything in v2.31.0-rc4 |
+| [v2.31.0-rc4](#v2310-rc4) | 2026-11-22 | Pre-release. A tool's error message on one line with its whole cause; a TMP of 261 characters or more refused (on Windows such a process hangs when it starts any program); `jxl_photo.py encode` and the other script commands start 35–40 ms sooner; everything in v2.31.0-rc3 |
 | [v2.31.0-rc3](#v2310-rc3) | 2026-11-22 | Pre-release. ExifTool kept open and the decoder's TIFF metadata written once: archiving, decoding and deleting runs 18–22 % faster; EXIF values copied exactly; `--serve` for programs that convert file by file; the failed files repeated at the end; a temp folder with `%` refused; a known-issues page; everything in v2.31.0-rc2 |
 | [v2.31.0-rc2](#v2310-rc2) | 2026-11-20 | Pre-release. sRGB copies (`--output-icc`) converted in Python and handed to cjxl in memory: 8–38 % faster depending on the temp folder's disk, the same copies; everything in v2.31.0-rc1 |
 | [v2.31.0-rc1](#v2310-rc1) | 2026-11-20 | Pre-release. `--verify-roundtrip` without `--delete-source` checks every page of a TIFF → JXL run before it takes its final name (it used to check only before a deletion); photo-backup's encode command relies on it |
@@ -114,9 +115,147 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.31.0-rc5
+
+**Released 2026-11-22, the fifth test release (pre-release) of v2.31.0**;
+the last stable release is [v2.30.2](#v2302). Everything in
+[v2.31.0-rc4](#v2310-rc4) is in it. The fixes of an independent full sweep of
+rc4 (Fable's, its reproduction scripts run on real photos in hostile
+folders): 22 bugs, #690–#711, most of them unusual combinations, three that
+could cost an archive in the setups they describe; and three speed-ups that
+leave the files as they were, but for the Explorer thumbnail's bytes. What to
+check is in [upgrading](upgrading.md): a colour-converted JPEG/PNG export
+never deletes now, a failed check before a delete renames the JXL, Ctrl+C
+finishes the files in progress, and the wizard remembers each task's own
+values.
+
+**Sources that could be lost.**
+- **The recompressor no longer re-encodes a file whose encode record it
+  could not read (#690).** When the planning batch that reads the records
+  stalled or timed out, every file in it read as "no record — unknown
+  origin", which is converted by default: a lossless film scan was
+  re-encoded lossy in place with exit 0, past the film-scan, regeneration and
+  downgrade guards. "Cannot tell" is not "no record" (the rule of #563): such a
+  file is left as it is and counted as an error.
+- **A colour-converted JPEG/PNG of a JXL is a derivative (#691,** the owner's
+  decision**).** The transcoder's `--to-srgb` and `--icc-profile` made a 16-bit
+  PNG that carried the master's provenance marks; a later run with
+  `--delete-source --delete-skipped` took it for the master's copy and deleted
+  the ProPhoto master. Now such an output is marked `jxlphoto-derived`, carries
+  no src/srcsum and never deletes its source, as the recompressor's
+  `--output-icc` always did. For the files older versions made: the delete
+  gate keeps a master whose 16-bit PNG has another colour profile than the one
+  the master carries (a faithful decode embeds exactly that profile, measured
+  on lossless and lossy masters; [known issues](known_issues.md) says how to
+  find them where the master carries none), and the same colour-only command
+  run again skips such an export of the same master, as before, instead of
+  refusing it (`--overwrite` remakes it as a derivative).
+- **A JPEG archive is never deleted by a decode of its pixels (#692).** A
+  lossless JPEG → JXL archive (`jbrd`) decoded to a 16-bit PNG with
+  `--delete-source` was deleted, and the original JPEG with it — an Ultra HDR
+  gain map included. Only the bit-exact recovery deletes it now.
+
+**Files written wrong.**
+- **An ICC probe that could not run is not a verdict (#693).** With
+  `ICC_PNG_STRATEGY = cautious`, a probe that failed for a passing reason (cjxl
+  or djxl timing out under load) was cached as "unsafe", and every later lossy
+  master with that profile went out without the ICC in its codestream. It is
+  "cannot tell" now: nothing cached, and that file keeps its profile in XMP
+  only (the way that always encodes), with a warning; a profile cjxl itself
+  refuses (its own error, twice) stays the cached verdict "skip", as before.
+  The probes' timeouts read `CJXL_TIMEOUT` (they were 120 s).
+- **cjxl's version asked twice (#694).** When `cjxl --version` did not answer
+  in 10 s, the libjxl 0.13 flags were left out without a word (#669: JPEG
+  archives that djxl 0.12 rebuilds differently; #670: an all-opaque alpha
+  dropped). The probe tries again with 60 s, and a run that encodes and still
+  cannot tell says so (the owner's choice: a warning, not a refusal).
+- **RGB+IR film scans (#695, #700).** The recompressor's resized copy of a
+  4-sample scan weighted the colour by the infrared (taken as alpha) and came
+  out RGBA; its Explorer thumbnail was flattened on white through it. A
+  channel the encoder marked as not alpha (`jxlphoto-extrasamples:0`) is left
+  out of both now.
+- **Each page of a multi-page TIFF keeps its own EXIF (#696).** For the tags
+  several pages carry, page 0's master took the last page's value
+  (`PageNumber 1 2`, an `Artist` of page 1, a SilverFast scan's
+  `CompressedBitsPerPixel`); it was so before #684 too. Every page's master
+  takes its own page's now (in a folder with `%`, the first two pages).
+- **A caption with `|` is kept as written (#697):** `Tokyo|Kyoto` became
+  `Tokyo | Kyoto` when the encode record's clean-up re-joined every field.
+- **Private TIFF tags from 65000 up come back (#698):** ExifTool knows those
+  codes by name (65000 is Adobe Camera Raw's OwnerName) and the decoder's EXIF
+  copy, after the tokens were written back, moved them. The camera's own EXIF
+  tags of the same names (WhiteBalance, Contrast, OwnerName, SerialNumber)
+  are kept beside them.
+- **A TIFF re-exported during its encode (#699)** left the old version as its
+  master, newer than the new TIFF, so every sync after it said "up to date".
+  The encoder compares the TIFF with what its page read before the JXL takes
+  its name now, delete or not; a TIFF gone meanwhile keeps its JXL.
+
+**Runs that said OK, stopped late or never redid.**
+- **A failed check before a delete is an error (#701,** the owner's
+  decision**).** With `--delete-source`, a JXL that failed its round-trip check
+  kept its TIFF but also its final name, the run said OK and the next sync
+  took it for up to date. Now the run exits 1 and each failing page's JXL
+  stays beside its TIFF as `<name>_jxlphoto-error.jxl`; no script takes such a
+  file as a source, and the next run encodes the TIFF again. A check that
+  could not run (djxl killed, a locked file) keeps the TIFF and renames
+  nothing.
+- **Ctrl+C (#702).** In the encoder, the decoder and the transcoder the pool
+  waited for every queued file (12 of 12 converted after a Ctrl+C at the 2nd)
+  and the run ended without its summary. Now no file starts, those in progress
+  finish, no source is deleted after it, the summary is printed and the exit
+  code is 130; a second Ctrl+C stops at once. During a run's planning a
+  Ctrl+C still stops at once, as before.
+- **The decoder redoes a TIFF restored from an incomplete page group (#703).**
+- **The wizard (#704–#709).** A new job started from the last values of ANY
+  task: after an 8-bit PNG export, "Restore TIFFs" asked for 8-bit TIFFs;
+  after copies made in `sRGB_JXL`, the next masters went there. Each task
+  remembers its own last run now (the staging folder and the number of
+  workers stay the last job's), and a default changed in Settings reaches
+  every task. The last job saved is the run itself: a
+  "Repeat last job" no longer replays `--provenance adopt` or
+  `--no-overwrite-guard` an earlier job had answered (the second is refused
+  next to a delete, after the HHMM). A script setting changed in menu S
+  reaches the next job. Two manifest holes: an `--export-marker` in the expert
+  flags now counts for the collision check, and a JXL → JXL row into its own
+  folder in mode 2 is seen as in place.
+- **The recompressor's own folders by their settings' names (#710),** and the
+  jxlinfo notes said once per job of a `--serve` process (#711).
+
+**Faster, the same files.**
+- **cjxl's threads shared among the encodes running at once (V1).** Each cjxl
+  starts one thread per logical core, so 8 to 16 at once were hundreds of
+  threads on 32 cores. With several workers each gets max(4, 2 × cores ÷
+  encodes at once); one encode alone keeps them all. The files are byte for
+  byte the same with any thread count (lossy and lossless, `--buffering 0`,
+  16-bit RGB and 8-bit gray, measured). Fable measured it alone: 7.5–13 % faster with 8 to 16 workers (40 varied exports, Explorer thumbnails on and off).
+- **The Explorer thumbnail from the image in memory (V2,** the owner's yes**).**
+  The encoder decoded each new master again to make its 768 px thumbnail; it
+  makes it from the TIFF page it already holds now, in the page's own profile,
+  before cjxl; the recompressor's sRGB copies from the pixels it has just
+  converted. Compared with the decode on 73 real outputs: identical wherever
+  the TIFF has a colour profile, within 0.25 levels on average without one
+  (the old route ran an sRGB → sRGB conversion there). The thumbnail box's
+  bytes differ from rc4's. Together with V1, measured with the PC quiet (37 varied exports, 40 outputs, 8 workers, thumbnails on, sources and temp folder on an NVMe drive): archiving 22.3 → 17.6 s (−21 %), their sRGB copies 32.5 → 26.0 s (−20 %).
+- **The decoder's 8-bit preview by a table (V3):** the same byte for every
+  16-bit value as the rounding it replaces, 0.68 → 0.38 s per 45 MP page; decoding the same 40 masters 13.5 → 11.8 s (−13 %).
+- Tests: 4464 pass; the real-photo battery 182/182; photo-backup's contract
+  33/33 (JP-1 to JP-24). Every fix has a test that fails on rc4 (or, for a
+  hole a review found in a fix of this round, on the code before that
+  review). Two independent reviews of the fixes found 2 + 1 must-fix and
+  8 + 3 should-fix problems, all fixed (among them: Ctrl+C in a delete gate,
+  a profile cjxl refuses, the camera's EXIF tags of the same name as a
+  restored private tag, an export of the master overwritten). side_by_side
+  against rc4 on real photos differs only in the version written into the
+  logs and the XMP history; the wizard's transcripts only in that version,
+  the task memory in the config and one "from" label.
+
+---
+
 ## v2.31.0-rc4
 
-**Released 2026-11-22, the fourth test release (pre-release) of v2.31.0**;
+**Released 2026-11-22, the fourth test release (pre-release) of v2.31.0**,
+superseded by [v2.31.0-rc5](#v2310-rc5) the same day;
 the last stable release is [v2.30.2](#v2302). Everything in
 [v2.31.0-rc3](#v2310-rc3) is in it. Three small changes, two of them found by
 photo-backup while it moved to `--serve`; none changes a file the toolkit

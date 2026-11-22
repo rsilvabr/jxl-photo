@@ -20,7 +20,24 @@
 ## Active scripts
 - `jxl_tiff_encoder.py` — TIFF → JXL (uses `cjxl`). Also accepts
   `--exclude-folders` (folder NAMES, ';'-separated, matched relative to the
-  input root as segments)
+  input root as segments). A JXL this run wrote that fails the delete gate's
+  round-trip check is an error and is renamed `<stem>_jxlphoto-error.jxl`
+  (`ERROR_SUFFIX`, #701, the owner's call) — every failing page, only on a real verdict
+  (`_is_verdict`: "could not verify", a check that raised, a page gone are
+  `_NO_VERDICT` and keep the old warning) — never the final name, so the next
+  run encodes the TIFF again; every finder skips such a file
+  (`_is_error_output` in `_iter_jxls` and the transcoder's `_iter_by_ext`). A
+  TIFF changed while its page was encoded is an error before the swap, delete
+  or not (#699): compared with what THIS page read (`_stat_identity` at the
+  start of the page's reads, not the planning's record); a TIFF gone
+  meanwhile keeps its JXL. Each page's master takes its own IFD's EXIF
+  (#696: `-ifd0:all#` after `-exif:all#` for page 0, `-IFD0:all<IFDn:all#`
+  for page N — `-ifdN:all#` would write IFDN of the master;
+  `_exiftool_source(ifd=)` for the MIE container of a `%` path, which holds
+  IFD0 and IFD1 only). The cautious ICC probe (#693): cjxl's own error exit,
+  twice, is the verdict "skip" (cached); a timeout, a killed process or a
+  djxl failure is "cannot tell" — that file keeps its profile in XMP only,
+  nothing cached
 - `jxl_tiff_decoder.py` — JXL → TIFF (uses `djxl`). Also accepts
   `--exclude-folders` (same semantics as the encoder's). Smart sync never
   overwrites a TIFF that lacks its own `jxlphoto-src` marker (an original
@@ -28,7 +45,15 @@
   admits the source to `--delete-skipped`. An existing TIFF is judged when
   its group's decode starts; the fresh decode replaces it (locally or out of
   staging) only if it is still the file judged (`_output_changed_since_judged`,
-  #560 — an edit saved meanwhile), else `"refused"`
+  #560 — an edit saved meanwhile), else `"refused"`. A TIFF with fewer full
+  pages than its group's JXLs is decoded again, not "up to date"
+  (`_fewer_pages_than_group`, #703; thumbnail entries are not counted). The
+  EXIF copy leaves out, by NAME, the tags the `jxlphoto-tifftag` tokens
+  restore (`_restored_tag_exclusions`, #698: ExifTool knows 65000+ by name
+  and moved them), and a command of its own puts back the camera's ExifIFD
+  tags of those names (`_restored_tag_exif_copy`, `-wm cg`: a group-qualified
+  exclusion deleted the raw ones — ExifTool writes a name in one IFD by
+  removing it from the others)
 - `jxl_jpeg_transcoder.py` — JPEG↔JXL lossless + JXL→JPEG/PNG lossy.
   Never writes XMP provenance markers into a jbrd container (they break
   `djxl --reconstruct_jpeg`); the encode delete gate proves bit-exact
@@ -58,9 +83,19 @@
   write DERIVATIVES (`jxlphoto-derived:<recipe>`) — never deleting, refused
   with the bit-exact recovery, `jxlphoto-src`/`srcsum` stripped from the
   copied metadata (a 2048 px JPEG must never prove the master is archived),
-  and an existing non-derivative destination is refused. Derivative = resize
-  or sharpen here (`--output-icc`, resize or sharpen in the recompressor); a
-  derivative never carries `jxlphoto-src`/`srcsum`
+  and an existing non-derivative destination is refused. Derivative = resize,
+  sharpen or a colour conversion here (`--to-srgb`, `--icc-profile` since
+  rc5, #691: `_COLOUR_DERIVATIVE`, `_derivative_output`; `--output-icc`,
+  resize or sharpen in the recompressor); a derivative never carries
+  `jxlphoto-src`/`srcsum`. `_lossy_decode_keep_reason` keeps a `jbrd` JXL
+  against every pixel decode (#692) and a master whose 16-bit PNG has another
+  profile than the one it carries in XMP (#691's PNGs from older versions: a
+  faithful decode embeds exactly that profile, measured). A colour-only run
+  leaves to the skip logic (`should_process`), instead of refusing, an
+  existing output with no derived label whose marks name THIS source
+  (`_check_derivative_targets`, `_provenance_ok`) — never forced: such a file
+  may be an older version's colour export, a faithful export or the user's
+  retouch of it, and nothing tells them apart (second review of rc5, M1)
 - `jxl_recompressor.py` — JXL → JXL recompressor (v2.1.0): reads the recorded
   lineage chain (`gen=N | cjxl d=/e= | …`, append-only — the encoder and the
   recompressor both append one entry per encode and reconcile `gen` as
@@ -70,7 +105,14 @@
   gen=1, so the guard must not fire on a file's first recompression), copies
   jbrd JXLs verbatim by default, keep-smaller net; same delete gates.
   `--delete-skipped` without `--delete-source` is inert (warning only), like
-  the other scripts; an existing jbrd output (no markers, ever) is
+  the other scripts. An encode record the planning batch could not read is
+  "cannot tell", never "no record": the file is left as it is and counted as
+  an error (`unread` → action `skip_unread`, #690 — read as unknown origin it
+  was re-encoded lossy in place). Its own output folders are skipped by the
+  names of its SETTINGS (`_own_output_folder_names`, #710). A 4th channel
+  whose `jxlphoto-extrasamples` says it is not alpha (a scanner's IR) is
+  dropped before a derivative's conversion and from the thumbnail (#695,
+  #700); an existing jbrd output (no markers, ever) is
   overwritten only by its own bytes or by an archive of the same JPEG
   (`_jbrd_overwrite_refusal`, #558 — its verbatim copy may be the only one
   once `--delete-source` removed the source); multi-page groups (jxlphoto-mpg, keyed by folder) delete
@@ -306,7 +348,9 @@ changes first.
   there. `tests/test_common_module.py` enforces it, plus: every global read
   there is defined there (a moved helper with a bare `TEMP_DIR` would raise
   NameError only on its rare path), one copy only (a script binds or shims
-  a common name, never defines it again).
+  a common name, never defines it again). `tests/test_common_g_reach.py`:
+  every `g.<name>` a script can reach in common exists in that script (an
+  AttributeError otherwise, on the rare path only).
 - **Test doubles.** A test patches the SCRIPT (`monkeypatch.setattr(enc,
   "_run_captured", fake)`, or `enc.time` / `enc.subprocess`), as before. A
   `g`-function sees it through `g`. For the names the common module reads
@@ -465,7 +509,10 @@ changes first.
   passes `codec=` too. The recompressor's cjxl runs with `-x strip=xmp`: its
   carried XMP plus the restamp's `-tagsfromfile -xmp:all` makes exiftool
   ADD the copied list to the carried one for every `+=` in that call,
-  doubling the History and `dc:Relation` (#531). Do not remove it.
+  doubling the History and `dc:Relation` (#531). Do not remove it. The
+  record clean-up (`_strip_encode_params`) takes out only the toolkit's own
+  blocks and keeps the rest of a field byte for byte (#697: it re-joined
+  every `|` of a caption).
 - **`OVERWRITE_GUARD` (v2.14.0)** turns off ONLY the "marker names another
   source" refusal (encoder `_foreign_overwrite_reason`, decoder main()
   block + `_decode_output_is_ours`, recompressor
@@ -507,7 +554,16 @@ changes first.
   `thumb.pam`, the old route. The refresh
   (`--refresh-explorer-thumbnails`) restores each file's mtime: the
   encoder's sync compares it with the TIFF's. Helpers parity-pinned
-  (encoder + recompressor).
+  (encoder + recompressor). **Since rc5 (V2, the owner's yes) the thumbnail
+  is made from pixels the script already holds** where it has them: the
+  encoder's TIFF page before cjxl, in the page's own profile (`icc_bytes`,
+  the real one even when the PNG goes without it), and the recompressor's
+  Python colour conversion (`_MEMORY_THUMB`, keyed by the source) —
+  `_thumbnail_from_array` (raw samples on magick's stdin in the array's own
+  byte order, `_array_raw_input`), through the decode route's own command
+  (`_thumbnail_jpeg`, one copy). Proven against the decode on 73 real outputs
+  (identical wherever the TIFF has a profile). Any failure falls back to the
+  decode of the finished file, as before.
 - **A split's group id hashes its page set (#303)**, so a TIFF re-encoded
   with FEWER pages would leave the old pages under the old id (#551). After a
   run, `_clean_stale_split_pages` removes a leftover THUMBNAIL page of a TIFF
@@ -716,6 +772,28 @@ changes first.
   Object, so its cjxl/djxl/ExifTool die with it. The wizard never sends it:
   `NOT_OFFERED`, and `_expert_flags_problem` refuses it. `tests/test_serve.py`
   (subprocesses: the loop moves fds 0 and 1).
+- **Ctrl+C (#702, rc5).** While a backend's pool runs, the first Ctrl+C
+  sets the run's own flag `_ctrl_c_seen` and latches the abort switch
+  (`_ctrl_c_finishes_the_run`: a SIGINT handler in the main thread, no lock —
+  that thread may hold `_abort_lock`): no file starts, the ones in progress
+  finish, NO source is deleted after it (every delete gate asks `_interrupted`
+  per source, the recompressor's too), the summary is printed, and `main()`
+  ends with KeyboardInterrupt after it (`_end_if_interrupted`), which
+  `__main__` turns into exit 130; a serve process ends with 130 without
+  answering that job, as before. A second Ctrl+C raises at once, also after
+  another abort (a full disk). The handler's entry clears the flag. A press
+  during a planning stops at once, as before: the transcoder enters the
+  handler in `main()` UNARMED (`armed=False`), before its commands' planning,
+  and their own `_reset_abort` arms it (`_ctrl_c_handler_active`; it also
+  keeps a press already latched). A new pool and a new delete gate go inside
+  that block, and a gate asks `_interrupted` at each source and again right
+  before its delete. The suite's conftest clears the latch and the flag after
+  every test.
+- **A version probe that does not answer is not "an old cjxl" (#694).**
+  `_tool_version` tries twice (`_VERSION_PROBE_TIMEOUTS`, 10 then 60 s) and a
+  run whose cjxl version stays unknown warns once (`_warn_if_version_unknown`,
+  naming #669 and #670): the 0.13 flags (`_jpeg_archive_flags`,
+  `_keep_alpha_flags`) are left out then.
 - **The failed files again at the end (v2.31.0).** Without `--summary-json`,
   each `emit_summary_json` calls `_log_failure_recap` (common): `Errors (N):`
   and the first ten `  -> name: reason` at WARNING. Never ERROR: each failure
@@ -761,7 +839,10 @@ changes first.
   codestream payloads), and `_decode_jxl_for_verify` takes it (`_take_kept_decode`,
   once) only when the file it checks has the same digest — pixels and profiles
   come from the codestream only. Normal runs keep nothing and pass no extra
-  flag. Anything else decodes as before.
+  flag. Anything else decodes as before. Since rc5 the thumbnail comes from
+  the page in memory (V2), so the check decodes once on its own; the kept
+  decode serves only when that route fails and the file is decoded for the
+  thumbnail.
 - **Worker memory cap**: the encoder caps `--workers`
   (`_memory_capped_workers`, parity-pinned with the recompressor's unused
   copy). The recompressor caps the full-size cjxl instead
@@ -772,6 +853,13 @@ changes first.
   does not compare them — they may differ again. A resized
   derivative budgets cjxl by the size it ENCODES (`cjxl_pixels` from
   `_largest_encode_pixels`, #535) and the side steps by the full source.
+  **cjxl's threads (V1, rc5):** while a pool runs, each full-size encode gets
+  `--num_threads=max(4, 2 × logical cores ÷ encodes at once)`
+  (`_cjxl_threads_for`; `_cjxl_threads_while` sets `_CJXL_THREADS` for the
+  pool and clears it after, however it ends; one encode at a time: no flag,
+  every core) — the encoder's pool, the recompressor's cjxl slots. The files
+  are byte for byte the same with any thread count (measured: lossy,
+  lossless, `--buffering 0`, 16-bit RGB, 8-bit gray).
 - **Re-run defaults differ per script**: the TIFF encoder/decoder default to
   smart sync (source newer than output), the JPEG transcoder skips existing
   outputs. Not a bug — documented in each README.
@@ -851,6 +939,10 @@ changes first.
   one real path per FOLDER (`_iter_by_ext`; #665: a resolve() per file was
   three quarters of a 40 000-file count). `tests/test_plan_is_the_run.py`
   pins the plan to the scripts' own dry runs of the same argv (19 rows).
+  The manifest's decision to skip the collision walk reads each row's marker
+  from that same parse (`_row_plan_markers`, #708: an `--export-marker` in
+  the expert flags), and a JXL → JXL row is in place when the recompressor's
+  own plan says so (`_recompressor_replaces_file`).
   Nothing here may open exiftool or a whole TIFF (#652): the count and the
   walk read no marker and no box. `python tools/verdicts.py <old rev>
   <new rev|WORKTREE>` compares the wrapper's counts and collisions of two
@@ -1025,7 +1117,15 @@ changes first.
   replay goes through `_run_saved_session(_preset_session(p))`;
   `job_from_session_v1`/`session_v1_from_job` are lossless (test with the
   owner's real presets, `tests/fixtures/owner_presets_v1.json`). The last
-  job stays in the `last_*` fields.
+  job stays in the `last_*` fields. **A NEW job starts from the last run of
+  its own task** (`ToolConfig.task_memory`, not a `last_*` name, so no
+  snapshot or preset carries it; read through `_task_memory(workflow)`,
+  #704/#705); a value equal to the script's setting is kept there as None,
+  "the script's own" (`_script_own_fields`, #709). A new read of a `last_*`
+  value on a new-job path goes through `_task_memory`. **The last job saved
+  is the run:** `_RUN_SCOPED_SESSION_FIELDS` are cleared before each save and
+  `_pending_session_fields` are read, not popped — [s], [d] and [r] each save
+  the same job (#706, #707).
 - **Pre-run refusals live in `_GATE_RULES`** (`_job_gates(menu, wf, path)`,
   paths `common`/`direct`/`manifest`/`preset`), called by
   `execute_workflow`, `_execute_manifest_workflow` and `_run_saved_session`

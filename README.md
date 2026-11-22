@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.31.0-rc4** (2026-11-22, pre-release; last stable: [v2.30.2](docs/version_history.md#v2302)) · [What's new](#whats-new-in-v2310-rc4) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.31.0-rc5** (2026-11-22, pre-release; last stable: [v2.30.2](docs/version_history.md#v2302)) · [What's new](#whats-new-in-v2310-rc5) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 **Windows program, no Python needed:** [jxl-photo-exe](https://github.com/rsilvabr/jxl-photo-exe/releases/latest) — unzip and double-click; cjxl/djxl, ExifTool, ImageMagick and jxl-thumb included.
 
@@ -205,16 +205,18 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## What's new in v2.31.0-rc4
+## What's new in v2.31.0-rc5
 
-2026-11-22. The fourth test release (pre-release) of v2.31.0; the last stable release is [v2.30.2](docs/version_history.md#v2302).
+2026-11-22. The fifth test release (pre-release) of v2.31.0; the last stable release is [v2.30.2](docs/version_history.md#v2302).
 
-- **Error messages say why, on one line.** When cjxl, djxl, ImageMagick or ExifTool fail, the log line now carries their whole explanation; it often started mid-sentence or with cjxl's version banner, the cause on the lines below.
-- **A TMP of 261 characters or more is refused** at the start, with what to change: on Windows, a process with such a TMP hangs when it starts any program. Only a program that points TMP at a very deep folder could meet it. See [upgrading](docs/upgrading.md).
-- **`jxl_photo.py encode` and the other script commands start a little sooner** (35–40 ms a call).
-- Since v2.31.0-rc3: archiving, decoding and deleting 18–22 % faster (ExifTool kept open), exact EXIF values, a temp folder with `%` refused, the failed files listed again at the end, `--serve` for programs, a [known issues](docs/known_issues.md) page. Since rc1 and rc2: `--verify-roundtrip` also checks when nothing is deleted, and sRGB copies are converted without ImageMagick.
+- **Safer deletes in a few unusual setups.** A colour-converted JPEG/PNG of a master (`--to-srgb`, `--icc-profile`) never deletes it, and a 16-bit PNG converted by an older version no longer passes for a copy of its master; a JPEG archive is never deleted by a decode of its pixels; the recompressor leaves alone a file whose encode record it could not read.
+- **A failed check before a delete is an error:** the TIFF is kept, the JXL stays beside it as `<name>_jxlphoto-error.jxl`, and the next run encodes the TIFF again.
+- **Ctrl+C finishes the files in progress**, deletes nothing after it and prints the summary, in every script; a second Ctrl+C stops at once.
+- **The wizard remembers each task's own values:** an 8-bit PNG export no longer sets the bit depth of the next restore, nor the copies' folder that of the masters.
+- **Faster, the same files:** cjxl's threads shared among the encodes running at once, and the Explorer thumbnail made from the image in memory instead of a second decode — archiving 37 varied exports with 8 workers 22.3 → 17.6 s, their sRGB copies 32.5 → 26.0 s, decoding them 13.5 → 11.8 s.
+- Smaller fixes for film scans with an infrared channel, the EXIF of multi-page TIFFs, captions with `|`, private TIFF tags and a TIFF re-exported during its encode. What to check: [upgrading](docs/upgrading.md); files older versions wrote: [known issues](docs/known_issues.md).
 
-[Technical notes](docs/version_history.md#v2310-rc4) · [earlier releases, in short](docs/whats_new.md) · [every release](docs/version_history.md#release-history)
+[Technical notes](docs/version_history.md#v2310-rc5) · [earlier releases, in short](docs/whats_new.md) · [every release](docs/version_history.md#release-history)
 
 ---
 

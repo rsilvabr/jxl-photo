@@ -10,7 +10,8 @@ as [GitHub Releases](https://github.com/rsilvabr/jxl-photo/releases).
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.31.0-rc4](version_history.md#v2310-rc4)** | 2026-11-22 | Pre-release. Error messages on one line with their whole cause; a TMP of 261 characters or more refused; `jxl_photo.py encode` and the other script commands start a little sooner; everything in v2.31.0-rc3 |
+| **[v2.31.0-rc5](version_history.md#v2310-rc5)** | 2026-11-22 | Pre-release. Safer deletes in a few unusual setups; a failed check before a delete is an error; Ctrl+C finishes the files in progress; each wizard task remembers its own values; faster archiving and sRGB copies, the same files; everything in v2.31.0-rc4 |
+| [v2.31.0-rc4](version_history.md#v2310-rc4) | 2026-11-22 | Pre-release. Error messages on one line with their whole cause; a TMP of 261 characters or more refused; `jxl_photo.py encode` and the other script commands start a little sooner; everything in v2.31.0-rc3 |
 | [v2.31.0-rc3](version_history.md#v2310-rc3) | 2026-11-22 | Pre-release. Archiving, decoding and deleting runs 18–22 % faster; exact EXIF values; a temp folder with `%` refused; the failed files listed again at the end; `--serve` for programs; a known-issues page; everything in v2.31.0-rc2 |
 | [v2.31.0-rc2](version_history.md#v2310-rc2) | 2026-11-20 | Pre-release. sRGB copies converted without ImageMagick or a temporary image: 8–38 % faster depending on the temp folder's disk, the same copies; everything in v2.31.0-rc1 |
 | [v2.31.0-rc1](version_history.md#v2310-rc1) | 2026-11-20 | Pre-release. `--verify-roundtrip` also checks when nothing is deleted: every page of a TIFF → JXL run is compared with its TIFF before it gets its final name |
@@ -45,6 +46,19 @@ as [GitHub Releases](https://github.com/rsilvabr/jxl-photo/releases).
 | [v2.17.0](version_history.md#v2170) | 2026-10-24 | Film scans archived lossless and never recompressed lossy unless asked; they keep what their scanner software needs (whole XMP, private tags); thumbnail pages kept by default, except Capture One's |
 
 Every release since v1.0: [version_history.md](version_history.md#release-history).
+
+## v2.31.0-rc5
+
+2026-11-22. The fifth test release (pre-release) of v2.31.0; the last stable release is [v2.30.2](version_history.md#v2302).
+
+- **Safer deletes in a few unusual setups.** A colour-converted JPEG/PNG of a master (`--to-srgb`, `--icc-profile`) never deletes it, and a 16-bit PNG converted by an older version no longer passes for a copy of its master; a JPEG archive is never deleted by a decode of its pixels; the recompressor leaves alone a file whose encode record it could not read.
+- **A failed check before a delete is an error:** the TIFF is kept, the JXL stays beside it as `<name>_jxlphoto-error.jxl`, and the next run encodes the TIFF again.
+- **Ctrl+C finishes the files in progress**, deletes nothing after it and prints the summary, in every script; a second Ctrl+C stops at once.
+- **The wizard remembers each task's own values:** an 8-bit PNG export no longer sets the bit depth of the next restore, nor the copies' folder that of the masters.
+- **Faster, the same files:** cjxl's threads shared among the encodes running at once, and the Explorer thumbnail made from the image in memory instead of a second decode — archiving 37 varied exports with 8 workers 22.3 → 17.6 s, their sRGB copies 32.5 → 26.0 s, decoding them 13.5 → 11.8 s.
+- Smaller fixes for film scans with an infrared channel, the EXIF of multi-page TIFFs, captions with `|`, private TIFF tags and a TIFF re-exported during its encode. What to check: [upgrading](upgrading.md); files older versions wrote: [known issues](known_issues.md).
+
+[Technical notes](version_history.md#v2310-rc5)
 
 ## v2.31.0-rc4
 

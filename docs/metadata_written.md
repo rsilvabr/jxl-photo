@@ -214,7 +214,9 @@ exiftool -struct -XMP-xmpMM:History file.jxl
 ## Derivatives
 
 A derivative is a recompressor or transcoder output made with `--output-icc`,
-`--resize-*` or `--sharpen`. It keeps everything the master had — its EXIF
+`--resize-*` or `--sharpen`, and since v2.31.0-rc5 a transcoder JPEG/PNG with
+its colour converted (`--to-srgb`, `--icc-profile`; before, such a file
+carried the master's `jxlphoto-src`/`srcsum`, #691). It keeps everything the master had — its EXIF
 in the master's byte order (since v2.25.0; before, a copy's EXIF was always
 big-endian) — except:
 
