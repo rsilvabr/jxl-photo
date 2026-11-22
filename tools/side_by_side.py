@@ -415,6 +415,15 @@ def run_side(sc: Scenario, code_dir: Path, run_dir: Path, pristine: Path,
              logs_root: Path, lane: str) -> List[dict]:
     _rmtree(run_dir)
     shutil.copytree(pristine, run_dir)
+    # Each side of a scenario starts with an empty APPDATA of its own: the
+    # encoder's cautious ICC cache lives there (%APPDATA%\jxl-photo\icc-cache).
+    # With the PC's real one, a side found or missed its cache entry by the
+    # history of this PC, and the runs wrote into it (rc7). Python's user
+    # site stays where it is.
+    import site as _site
+    appdata = logs_root.parent / "appdata"
+    _rmtree(appdata)
+    appdata.mkdir(parents=True)
     initial = observe(run_dir)
     steps = []
     for k, st in enumerate(sc.steps, 1):
@@ -433,7 +442,9 @@ def run_side(sc: Scenario, code_dir: Path, run_dir: Path, pristine: Path,
         if lane == "w1" and "--workers" not in args:
             args += ["--workers", "1"]
         env = {**os.environ, "JXLPHOTO_LOG_DIR": str(logs), "JXLPHOTO_SETTINGS": "",
-               "JXLPHOTO_JXL_THUMB": "0", "PYTHONIOENCODING": "utf-8", "PYTHONDONTWRITEBYTECODE": "1"}
+               "JXLPHOTO_JXL_THUMB": "0", "PYTHONIOENCODING": "utf-8", "PYTHONDONTWRITEBYTECODE": "1",
+               "APPDATA": str(appdata),
+               "PYTHONUSERBASE": os.environ.get("PYTHONUSERBASE") or _site.getuserbase()}
         t0 = time.time()
         r = subprocess.run([sys.executable, "-B", str(code_dir / SCRIPT[st.script]), *args],
                            input=(st.stdin or "").encode("utf-8") if st.stdin else None,
@@ -646,7 +657,7 @@ def main(argv=None) -> int:
     report.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"report: {report}")
     if not args.keep:
-        for sub in ("pristine", "logs", HOSTILE_PCT, HOSTILE_PLAIN):
+        for sub in ("pristine", "logs", "appdata", HOSTILE_PCT, HOSTILE_PLAIN):
             _rmtree(work / sub)
     if ran == 0:
         return 2

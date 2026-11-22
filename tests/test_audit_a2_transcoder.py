@@ -404,7 +404,8 @@ def test_te_skipped_decode_without_md5_needs_a_reconstruction(tmp_path, monkeypa
     monkeypatch.setattr(tra, "DELETE_SOURCE_REQUIRE_MD5", False)
     _main([jxl.parent, "--mode", "1", "--decode", "--delete-source",
            "--delete-skipped", "--delete-confirm-off"], monkeypatch)
-    if same_jpeg:
-        assert not jxl.exists(), "control: its own reconstruction proves the archive"
-    else:
-        assert jxl.exists(), "the JXL was deleted next to an unrelated JPEG"
+    # Since rc7 (T1) its own reconstruction is no proof either: djxl 0.11/0.12
+    # rebuild another JPEG from some archives with exit 0, and a JPEG such a
+    # rebuild left here matches the next one. Without its checksum line the
+    # archive stays, whatever DELETE_SOURCE_REQUIRE_MD5 says (encode only).
+    assert jxl.exists(), "the JXL was deleted with no checksum to prove the JPEG"

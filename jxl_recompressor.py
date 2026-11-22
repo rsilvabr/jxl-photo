@@ -39,7 +39,7 @@ import numpy as np
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.31.0-rc6"
+TOOLKIT_VERSION = "2.31.0-rc7"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 
@@ -736,7 +736,7 @@ _OVERLAY_SAFETY_SETTINGS = frozenset({
     "DELETE_SOURCE", "DELETE_CONFIRM", "DELETE_SKIPPED", "DELETE_SOURCE_REQUIRE_MD5",
     "STORE_MD5", "OVERWRITE_GUARD", "VERIFY_ROUNDTRIP", "VERIFY_LOSSY_MIN_MEAN_RATIO",
     "VERIFY_LOSSY_MIN_PSNR", "ALLOW_INCOMPLETE_GROUPS", "PROVENANCE_CHECK",
-    "ADOPT_SCAN", "OVERWRITE", "STRIP_METADATA", "AUTO_REPAIR_JBRD",
+    "ADOPT_SCAN", "ADOPT_MIN_PSNR", "OVERWRITE", "STRIP_METADATA", "AUTO_REPAIR_JBRD",
     "EMBED_ICC_IN_JXL"})
 
 
@@ -940,6 +940,7 @@ _magick_out_path = _common._magick_out_path
 
 
 _is_camera_thumbnail_page = _common._is_camera_thumbnail_page
+_is_mask_page = _common._is_mask_page
 
 
 # dc:Relation token naming what the FIRST master of this photo was made from:
@@ -1666,6 +1667,7 @@ def _read_encode_params_batch(paths: list) -> dict:
                                               for t in rel_values)
                                           or _is_camera_thumbnail_page(
                                               rel_values, width, height)),
+                                "mask": _is_mask_page(rel_values),
                                 "unread": False}
 
     def on_error(chunk, e):
@@ -3226,7 +3228,15 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
         # labelled with the XMP ICC. The source then becomes a float PFM
         # decode with djxl's own profile assigned explicitly. (The memory
         # route is only taken for RGB pixels in the file's own space.)
-        blob = mem is None and _decoded_in_original_space(out_icc, orig_icc) is False
+        # Neither profile written: nothing proves the space, as in
+        # _recompress_encode and the decoder (rc7, the targeted review's O1:
+        # read as "the file's own space", the XMP ICC was assigned).
+        _space = None if mem is not None else _decoded_in_original_space(out_icc, orig_icc)
+        if mem is None and _space is None:
+            raise RuntimeError("djxl did not report the decoded and original colour "
+                               "spaces (--icc_out/--orig_icc_out), so nothing proves "
+                               "a derivative keeps the colours — refusing")
+        blob = mem is None and _space is False
         grey = mem is None and _png_is_grayscale(dec_png)
         # #695: an extra channel that is NOT alpha — a scanner's IR, which JPEG
         # XL stores as alpha (its jxlphoto-extrasamples marker says so) — is
@@ -3931,16 +3941,32 @@ def process_group(items, workers: int):
         members = _group_members[key]
         ready = _group_ready.pop(key, [])
         if len(ready) < len(members):
+            # A sibling whose re-encode was only not smaller (KEEP_SMALLER, a
+            # "skipped" in place) did not fail: say so, and how to replace the
+            # group (the targeted review's O5 — "did not convert" read as an
+            # error, and every run redoes these encodes).
+            _ready_ids = {id(it) for it in ready}
+            _held_by = [results.get(str(m["src"]), (None,))[0]
+                        for m in members if id(m) not in _ready_ids]
+            if _held_by and all(s == "skipped" for s in _held_by):
+                # A "skipped" in place is keep-smaller or a policy that keeps
+                # the page as it is (a scan's copy policy, a lossy ICC blob):
+                # neither is a failure (the rc7 review's N5).
+                _reason = (f"{len(_held_by)} sibling page(s) of the same multi-page "
+                           f"document stayed as they are this run (no smaller after "
+                           f"the re-encode — keep-smaller —, or kept as they are by a "
+                           f"policy) — no page of the group was replaced; "
+                           f"--no-keep-smaller replaces a group keep-smaller held")
+            else:
+                _reason = ("a sibling page of the same multi-page document did not "
+                           "convert this run — no page of the group was replaced")
             for it in ready:
                 try:
                     it["write"].unlink()
                 except OSError:
                     pass
                 results[str(it["src"])] = ("skipped", str(it["final"]))
-                logger.warning(
-                    f" GROUP HELD IN PLACE | {it['src'].name} | a sibling page of "
-                    f"the same multi-page document did not convert this run — no "
-                    f"page of the group was replaced")
+                logger.warning(f" GROUP HELD IN PLACE | {it['src'].name} | {_reason}")
             return
         # Every page must still be the file this run read BEFORE the first
         # one is replaced: _replace_in_place would refuse only the changed
@@ -5754,6 +5780,12 @@ def main():
         if DERIVATIVE and it["thumb"]:
             it["action"] = "skip_thumbnail"
             it["reason"] = "thumbnail page of a split TIFF: no derivative is made of it"
+        # Nor of a scan's IR MASK page (SubfileType 4: SilverFast's infrared
+        # page): a 2048 px grey copy of the infrared landed in sRGB_JXL beside
+        # the photo (rc7, the targeted review's F4).
+        elif DERIVATIVE and info.get("mask", False):
+            it["action"] = "skip_thumbnail"
+            it["reason"] = "IR mask page of a split scan: no derivative is made of it"
         # Its record could not be read (the batch failed, stalled, or gave no
         # entry): every guard above read it as "no record". Nothing is
         # written from it and the file counts as an error (#690).
@@ -6186,8 +6218,9 @@ def main():
                        f"--on-downgrade convert (or --on-regeneration / --on-unknown "
                        f"convert) to write them.")
     if n_thumb_skip:
-        logger.info(f"{n_thumb_skip} thumbnail page(s) of split TIFFs skipped: a derivative "
-                    f"is made of the photo, not of the preview its TIFF carried.")
+        logger.info(f"{n_thumb_skip} thumbnail or IR mask page(s) of split TIFFs skipped: "
+                    f"a derivative is made of the photo, not of the preview or the "
+                    f"infrared its TIFF carried.")
 
     _n_mem = sum(1 for _src, _detail in failures
                  if any(s in str(_detail).lower() for s in _MEMORY_ERROR_SIGNATURES))

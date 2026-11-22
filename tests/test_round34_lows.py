@@ -170,9 +170,13 @@ def test_thumbnail_only_tiff_still_encodes_page_0_in_skip_mode(tmp_path, monkeyp
 # 4. The adopt-scan refusal names the distance mismatch
 # ─────────────────────────────────────────────
 
-def test_adopt_scan_refusal_hints_at_the_archive_distance(tmp_path):
-    """The scan verifies against the CURRENT --distance: a d=0.1 archive under
-    a d=0 run refuses everything, and the message must say why and what to do."""
+def test_adopt_scan_judges_the_archive_by_its_own_kind(tmp_path):
+    """Until rc7 the scan verified against the CURRENT --distance: a d=0.1
+    archive under a d=0 run was refused ("different --distance"). Since rc7
+    (F1) the archive's own kind decides — jxlinfo says lossy, so it is judged
+    as lossy, against ADOPT_MIN_PSNR — and this photo's own archive is
+    adopted. Its TIFF is a skip (up to date) and stays without
+    --delete-skipped."""
     src, jxl_out = tmp_path / "src", tmp_path / "jxl"
     _tiff(src / "a.tif")
     r = _run(src, jxl_out, "--mode", "2", "--distance", "0.1", "--strip",
@@ -183,10 +187,9 @@ def test_adopt_scan_refusal_hints_at_the_archive_distance(tmp_path):
              "--delete-source", "--delete-confirm-off", "--provenance", "adopt",
              cwd=tmp_path)
     out = r.stdout + r.stderr
-    assert r.returncode == 1, out                   # refused: nothing converted
-    assert (src / "a.tif").exists(), "a refused source must never be deleted"
-    assert "different --distance" in out, out
-    assert "--no-adopt-scan" in out, out
+    assert r.returncode == 0, out
+    assert "stamped 1 of 1 adopted" in out, out
+    assert (src / "a.tif").exists(), "a skipped source is kept without --delete-skipped"
 
 
 # ─────────────────────────────────────────────

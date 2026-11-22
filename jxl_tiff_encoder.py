@@ -29,7 +29,7 @@ from PIL import Image
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.31.0-rc6"
+TOOLKIT_VERSION = "2.31.0-rc7"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 
@@ -1008,6 +1008,20 @@ DERIVED_XMP_PREFIX = "jxlphoto-derived:"
 # --delete-source that silently destroyed the earlier photo: its source was
 # deleted by the first run and its archive overwritten by the second.
 
+ADOPT_MIN_PSNR = 35.0
+# [PROVENANCE_CHECK = "adopt", with ADOPT_SCAN] The dB a LOSSY unmarked archive
+# must reach against this TIFF before it is stamped as its archive; a LOSSLESS
+# one must decode pixel-identical. Not the delete gate's VERIFY_LOSSY_MIN_PSNR
+# (20 dB, which only catches a broken encode): a burst frame of the same name
+# measured 25.8 dB and was adopted, and the stamp then let a later run delete
+# that TIFF or overwrite the other photo's archive (rc7, the targeted review's
+# F1). Measured: this toolkit's masters 52-65 dB at d=0.05-0.1, a camera's
+# thumbnail page 41-50 dB, a photo 40-50 dB at d=1; unrelated photos 10-12 dB.
+# An archive written at a high distance (a photo is 25-30 dB at d=15) is
+# refused — the TIFF stays; --no-adopt-scan adopts without the scan. The
+# capture time and ImageUniqueID in the EXIF are compared too: a frame of a
+# burst or a tripod sequence can be closer than any pixel floor.
+
 ADOPT_SCAN = True
 # [PROVENANCE_CHECK = "adopt" only] Prove the pairing before adopting an output
 # that carries no marker, by decoding it and comparing with the source. True is
@@ -1199,7 +1213,7 @@ _OVERLAY_SAFETY_SETTINGS = frozenset({
     "DELETE_SOURCE", "DELETE_CONFIRM", "DELETE_SKIPPED", "DELETE_SOURCE_REQUIRE_MD5",
     "STORE_MD5", "OVERWRITE_GUARD", "VERIFY_ROUNDTRIP", "VERIFY_LOSSY_MIN_MEAN_RATIO",
     "VERIFY_LOSSY_MIN_PSNR", "ALLOW_INCOMPLETE_GROUPS", "PROVENANCE_CHECK",
-    "ADOPT_SCAN", "OVERWRITE", "STRIP_METADATA", "AUTO_REPAIR_JBRD",
+    "ADOPT_SCAN", "ADOPT_MIN_PSNR", "OVERWRITE", "STRIP_METADATA", "AUTO_REPAIR_JBRD",
     "EMBED_ICC_IN_JXL"})
 
 
@@ -2016,12 +2030,18 @@ def _clear_icc_cache() -> bool:
         return False
 
 
-def _synthetic_image_for_icc(depth: int) -> np.ndarray:
+def _synthetic_image_for_icc(depth: int, grey: bool = False) -> np.ndarray:
     """Create a small neutral RGB gradient image with no true black values.
 
     All channels are identical so that a well-behaved ICC round-trip preserves
     the mean value.  Color shifts caused by the ICC would otherwise make the
     simple mean-ratio check unreliable.
+
+    grey: a single-channel image, for a GRAY profile. An RGB test image with a
+    grey profile is refused by cjxl ("Gray color space not permitted on RGB
+    PNG"), twice: every grey profile was cached "skip", and its lossy masters
+    carried sRGB grey in their codestream — mid-greys about 25 % too dark in a
+    viewer (rc7, the targeted review's F3).
     """
     size = _CAU_TEST_SIZE
     if depth == 8:
@@ -2030,6 +2050,8 @@ def _synthetic_image_for_icc(depth: int) -> np.ndarray:
     else:
         # 16-bit values from 0x8000 to 0xFFFF
         base = np.linspace(0x8000, 0xFFFF, size * size, dtype=np.uint16).reshape(size, size)
+    if grey:
+        return base
     img = np.stack([base, base, base], axis=2)
     return img
 
@@ -2111,7 +2133,7 @@ def _cautious_test_icc_depth(icc_bytes: bytes, depth: int, distance=None):
     film scan under SCAN_DISTANCE is tested at its own distance (#573)."""
     if distance is None:
         distance = CJXL_DISTANCE
-    img = _synthetic_image_for_icc(depth)
+    img = _synthetic_image_for_icc(depth, grey=bytes(icc_bytes[16:20]) == b"GRAY")
     if depth == 8:
         original_norm = float(img.mean()) / 255.0
     else:
@@ -2170,8 +2192,15 @@ def _cautious_test_icc_depth(icc_bytes: bytes, depth: int, distance=None):
                          f"decode would come back in linear sRGB; unsafe to embed")
             return False
 
-        decoded = np.array(Image.open(out_png).convert("RGB"))
-        decoded_norm = float(decoded.mean()) / 255.0
+        # A 16-bit grey PNG opens as I;16 (or I), which convert("RGB") clips
+        # at 255: its mean always read 1.0, so the 16-bit grey probe could
+        # never fail on brightness (the rc7 review's S5). Read it at its own
+        # scale; a colour PNG reads as 8-bit RGB, as before.
+        with Image.open(out_png) as _im:
+            if _im.mode in ("I;16", "I;16B", "I;16L", "I"):
+                decoded_norm = float(np.asarray(_im, dtype=np.float64).mean()) / 65535.0
+            else:
+                decoded_norm = float(np.asarray(_im.convert("RGB")).mean()) / 255.0
         ratio = decoded_norm / original_norm if original_norm > 0 else 0.0
         safe = decoded_norm >= (_CAU_MIN_MEAN / 255.0) and ratio >= _CAU_MIN_RATIO
         logger.debug(
@@ -2203,11 +2232,13 @@ def _cautious_should_embed_icc(icc_bytes: bytes, tiff_path: Path, distance=None)
     # (#573): a lossless verdict must never answer for a lossy scan.
     # Include the cjxl version in the key: an encoder upgrade can change
     # how a profile behaves, so stale verdicts from older cjxl builds
-    # must not be trusted. ":t=2" is the test-format generation: t=2 added
+    # must not be trusted. ":t=N" is the test-format generation: t=2 added
     # the lossy-ICC-blob refusal, so a t=1 "embed" verdict for a table-curve
-    # profile must be retested instead of trusted.
+    # profile must be retested instead of trusted; t=3 tests a grey profile on
+    # a grey image (rc7, F3), so the "skip" every grey profile was given is
+    # tested again.
     cjxl_ver = _tool_version(_get_cjxl_cmd() or "cjxl") or (0, 0, 0)
-    versioned_key = f"{key}:d={distance}:m={1 if CJXL_MODULAR else 0}:v={'.'.join(map(str, cjxl_ver))}:t=2"
+    versioned_key = f"{key}:d={distance}:m={1 if CJXL_MODULAR else 0}:v={'.'.join(map(str, cjxl_ver))}:t=3"
 
     def _cached_verdict():
         cached = _load_icc_cache().get(versioned_key)
@@ -3926,8 +3957,11 @@ def _restamp_moved(all_items, dry_run):
     restamped_map, failures = {}, []
     _differs_list = []
     _seen = set()
+    # A set to test against: `j not in outs` on the sorted list was quadratic
+    # (18.5 s of silent CPU at 20 000 outputs; the targeted review's P1).
+    _outs_set = set(outs)
     for t, j, *_rest in all_items:
-        if j not in outs or str(j) in _seen:
+        if j not in _outs_set or str(j) in _seen:
             continue
         _seen.add(str(j))
         info = marks.get(str(j)) or {"src": None, "srcsum": None}
@@ -4210,12 +4244,15 @@ def _is_verdict(detail) -> bool:
 
 
 def _verify_roundtrip_page(tiff_path: Path, page_idx: int, jxl_path: Path,
-                           distance: float):
+                           distance: float, min_psnr=None):
     """Does `jxl_path` really hold page `page_idx` of `tiff_path`?
 
     Returns (ok, detail). Any failure to even run the check returns False: this
     gates an irreversible delete, so "could not tell" must mean "keep".
+    `min_psnr`: the lossy floor (default VERIFY_LOSSY_MIN_PSNR; the adopt scan
+    passes ADOPT_MIN_PSNR).
     """
+    floor = VERIFY_LOSSY_MIN_PSNR if min_psnr is None else min_psnr
     try:
         with tempfile.TemporaryDirectory(prefix="jxl_verify_", dir=TEMP_DIR) as tmp:
             dec = _decode_jxl_for_verify(jxl_path, Path(tmp),
@@ -4247,9 +4284,87 @@ def _verify_roundtrip_page(tiff_path: Path, page_idx: int, jxl_path: Path,
     detail = f"mean ratio {ratio:.3f}, PSNR {psnr:.1f} dB"
     if not (lo <= ratio <= hi):
         return False, f"{detail} — brightness is not the source's"
-    if psnr < VERIFY_LOSSY_MIN_PSNR:
-        return False, f"{detail} — below the {VERIFY_LOSSY_MIN_PSNR} dB floor"
+    if psnr < floor:
+        return False, f"{detail} — below the {floor} dB floor"
     return True, detail
+
+
+def _set_failed_output_aside(bad: Path) -> str:
+    """#701: a JXL this run wrote that failed its pixel check never keeps its
+    final name — the next --sync would take it as up to date. Renamed
+    <stem>_jxlphoto-error.jxl; when that fails (the previous error file open
+    in a viewer: the targeted review's O4), <stem> (2)_jxlphoto-error.jxl and
+    on, never over another file; when no rename works, the failed JXL is
+    deleted (this run wrote it, and its source is kept). Returns the words for
+    the ERROR line."""
+    first = None
+    names = [bad.with_name(bad.stem + ERROR_SUFFIX + bad.suffix)]
+    names += [bad.with_name(f"{bad.stem} ({n}){ERROR_SUFFIX}{bad.suffix}") for n in range(2, 10)]
+    for i, target in enumerate(names):
+        if i and target.exists():
+            continue
+        try:
+            os.replace(bad, target)
+            return f"its JXL was renamed {target.name}"
+        except OSError as e:
+            first = first or e
+            if not bad.exists():
+                return f"its JXL is gone ({e})"
+    try:
+        bad.unlink()
+        return (f"its JXL could not be renamed ({first}), so it was deleted (it failed, "
+                f"and this run wrote it)")
+    except OSError as e:
+        return (f"its JXL could not be renamed ({first}) or deleted ({e}): delete "
+                f"{bad.name} by hand, or the next run takes it as up to date")
+
+
+_CAPTURE_IDENTITY_TAGS = ("DateTimeOriginal", "SubSecTimeOriginal", "ImageUniqueID")
+
+
+def _capture_identity_mismatch(tiff_path: Path, jxl_path: Path):
+    """The capture-identity tag (_CAPTURE_IDENTITY_TAGS) the TIFF and the JXL
+    both carry with DIFFERENT values, as a short text, or None: they agree,
+    neither or only one carries it, or a file cannot be read — the pixel check
+    then decides alone. A frame of a burst or of a tripod sequence with the
+    same name can be closer in pixels than any floor, never in capture time
+    (rc7, the targeted review's F1)."""
+    found = []
+    for p in (tiff_path, jxl_path):
+        try:
+            r = _run_exiftool_argfile(["-j", "-s"] + [f"-{t}" for t in _CAPTURE_IDENTITY_TAGS]
+                                      + [str(p)], timeout=EXIFTOOL_TIMEOUT)
+            found.append((json.loads(r.stdout or "[{}]") or [{}])[0])
+        except Exception:
+            return None
+    tif_tags, jxl_tags = found
+    for tag in _CAPTURE_IDENTITY_TAGS:
+        a, b = tif_tags.get(tag), jxl_tags.get(tag)
+        if a not in (None, "") and b not in (None, "") and str(a).strip() != str(b).strip():
+            return f"{tag} {b!r} is not the TIFF's {a!r}"
+    return None
+
+
+def _jxl_is_lossless(jxl_path: Path):
+    """jxlinfo's own word for an archive: True ("lossless"), False ("lossy"),
+    None when it cannot tell (no jxlinfo, an error) — the adopt scan then
+    compares as before, at this run's distance."""
+    exe = shutil.which("jxlinfo")
+    if not exe:
+        return None
+    try:
+        r = _run_captured([exe, str(jxl_path)], EXIFTOOL_TIMEOUT, text=True)
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    for line in (r.stdout or "").splitlines():
+        if line.startswith("JPEG XL image"):
+            if "lossless" in line:
+                return True
+            if "lossy" in line:
+                return False
+    return None
 
 
 def _would_skip(tiff_path: Path, final_path: Path) -> bool:
@@ -4473,6 +4588,14 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                     _extrasamples = tuple(int(v) for v in (page.extrasamples or ()))
                 except (TypeError, ValueError):
                     _extrasamples = ()
+                # More samples than the colours need and NO ExtraSamples tag
+                # (VueScan's RGBI scans): TIFF 6.0 calls that extra sample
+                # unspecified, which is what ExtraSamples 0 says. Without the
+                # marker every later step took the infrared for transparency —
+                # the copies, the Explorer thumbnail, the decoded TIFF (rc7, the
+                # targeted review's F2).
+                if not _extrasamples and spp in (2, 4):
+                    _extrasamples = (0,)
                 # Private tags exiftool cannot copy (TIFFTAG_XMP_PREFIX).
                 _private_tags, _private_why = _private_tiff_tags(tif, page)
                 if _private_why and not STRIP_METADATA:
@@ -4569,6 +4692,17 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                         f"profile is not grayscale "
                         f"({icc_bytes[16:20].decode('ascii', 'replace')}); keeping "
                         f"it in XMP only (a grayscale PNG cannot carry it)")
+                    icc_bytes = None
+                # The mirror (the rc7 review's S4): a GREY profile on colour
+                # pixels — cjxl refuses that PNG too ("Gray color space not
+                # permitted on RGB PNG"). Since the cautious probe tests a grey
+                # profile on a grey image (#731) it may say "embed" for it.
+                elif (not is_grayscale and icc_bytes and len(icc_bytes) >= 20
+                        and icc_bytes[16:20] == b"GRAY"):
+                    logger.warning(
+                        f"  >{tiff_path.name} (page {page_idx}): the page's ICC "
+                        f"profile is grayscale on colour pixels; keeping it in XMP "
+                        f"only (a colour PNG cannot carry it)")
                     icc_bytes = None
 
             # 5. Encode PNG with optional ICC in iCCP chunk (for cjxl encoding)
@@ -6031,14 +6165,7 @@ def _delete_checked_sources(results_by_tiff, tasks, moved_finals, use_staging, c
                 # source stays, and the next run encodes the page again.
                 _delete_stats["kept"] += 1
                 for _r, _page, detail in _bad_pages:
-                    _bad = Path(_r[2])
-                    _renamed = _bad.with_name(_bad.stem + ERROR_SUFFIX + _bad.suffix)
-                    try:
-                        os.replace(_bad, _renamed)
-                        _where = f"its JXL was renamed {_renamed.name}"
-                    except OSError as e:
-                        _where = (f"its JXL could not be renamed ({e}): the file under "
-                                  f"its final name is the one that failed")
+                    _where = _set_failed_output_aside(Path(_r[2]))
                     _why = (f"round-trip verification FAILED on page {_page}: {detail} — "
                             f"the source is kept, {_where}, and the next run encodes it "
                             f"again")
@@ -7073,25 +7200,46 @@ def _guard_existing_outputs(args, all_items, _restamped, failed_files):
                 if args.dry_run:
                     _would_adopt.append((t, j))
                     continue
+                # Another photo of the same name — a burst frame, a tripod
+                # sequence — can be closer in pixels than any floor; its
+                # capture time is not the same (rc7, F1). Checked with
+                # --no-adopt-scan too: two ExifTool reads, no decode — the
+                # cost that flag saves (the rc7 review's S7).
+                _other = _capture_identity_mismatch(t, j)
+                if _other:
+                    _bad_sources.setdefault(
+                        str(t), (j, f"the adopt check says this output is another photo: "
+                                    f"its {_other} — not stamped"))
+                    continue
                 if not ADOPT_SCAN:
                     _adopted_blind.append((t, j))
                     continue
-                _ok_v, _detail = _verify_roundtrip_page(t, page_idx, j, _distance_for(t))
+                # The ARCHIVE's own kind decides the comparison: a lossless one
+                # must decode pixel-identical, a lossy one reach ADOPT_MIN_PSNR
+                # (the delete gate's 20 dB adopted a burst frame at 25.8 dB,
+                # F1). jxlinfo cannot tell: this run's distance, as before.
+                _lossless = _jxl_is_lossless(j)
+                if _lossless is None:
+                    _d_adopt = _distance_for(t)
+                elif _lossless:
+                    _d_adopt = 0.0
+                else:
+                    _d_adopt = _distance_for(t) or 1.0
+                _ok_v, _detail = _verify_roundtrip_page(t, page_idx, j, _d_adopt,
+                                                        min_psnr=ADOPT_MIN_PSNR)
                 if _ok_v:
                     _adopted.append((t, j))
                     continue
-                # The scan verifies against the CURRENT --distance, so the
-                # likeliest mass refusal is not a foreign archive at all:
-                # an archive written at d=0.1 can never survive THIS run's
-                # d=0 pixel comparison. Name that cause and its remedies —
+                # A lossy archive below ADOPT_MIN_PSNR can still be this photo's,
+                # written at a high distance: name that cause and its remedy —
                 # mirror of the delete-gate hint in _delete_sources.
                 _bad_sources.setdefault(
                     str(t), (j, f"the adopt scan says this output is not this "
-                                f"source ({_detail}) — if the archive was written "
-                                f"at a different --distance than this run "
-                                f"(d={_distance_for(t)}), re-run with the archive's "
-                                f"distance, or pass --no-adopt-scan to adopt "
-                                f"without the scan" + _scan_distance_hint(t)))
+                                f"source ({_detail}; a lossless archive must decode "
+                                f"pixel-identical, a lossy one reach {ADOPT_MIN_PSNR} "
+                                f"dB) — if it is this photo's archive written at a high "
+                                f"distance, pass --no-adopt-scan to adopt it without "
+                                f"the scan" + _scan_distance_hint(t)))
                 continue
             _why = ("no provenance marker — this archive predates them; re-run with "
                     "--provenance adopt to verify and stamp it"
@@ -7575,7 +7723,11 @@ def main():
                 if _why is None:
                     _stamped += 1
                 else:
-                    logger.debug(f"Could not stamp {_j}: {_why}")
+                    # A WARNING with its reason (the targeted review's O3: a
+                    # DEBUG line only, "stamped 0 of N" said nothing more; the
+                    # gate then keeps such a source, as it should).
+                    logger.warning(f"  Could not stamp {_j.name}: {_why} — it stays without "
+                                   f"provenance marks (a delete gate gets no proof from it)")
             logger.info(
                 f"Provenance: stamped {_stamped} of {len(provenance_to_stamp)} adopted "
                 f"output(s) — later runs check them strictly.")

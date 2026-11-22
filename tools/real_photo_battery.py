@@ -2746,6 +2746,14 @@ def main():
         rmtree(root)
     LOGS = B / "logs"
     LOGS.mkdir(parents=True)
+    # The encoder's cautious ICC cache is %APPDATA%\jxl-photo\icc-cache: every
+    # script run below gets a throwaway APPDATA in the scratch folder, so the
+    # battery never writes the PC's real cache (rc7; the toolkit reads APPDATA
+    # for that cache only). Python's user site stays where it is.
+    import site as _site
+    os.environ.setdefault("PYTHONUSERBASE", _site.getuserbase())
+    (B / "_appdata").mkdir()
+    os.environ["APPDATA"] = str(B / "_appdata")
     logs_before = (sum(1 for p in (REPO / "Logs").rglob("*") if p.is_file())
                    if (REPO / "Logs").is_dir() else 0)
     t0 = time.time()

@@ -54,6 +54,15 @@ os.environ["JXLPHOTO_LOG_DIR"] = _TEST_LOG_DIR
 os.environ["JXLPHOTO_SETTINGS"] = ""
 # No "new release" check: a test never asks GitHub.
 os.environ["JXLPHOTO_NO_UPDATE_CHECK"] = "1"
+# The encoder's cautious ICC cache lives in %APPDATA%\jxl-photo\icc-cache: the
+# suite's lossy encodes of its test profiles wrote their verdicts into this
+# PC's real cache (the rc7 review). A throwaway APPDATA instead — the toolkit
+# reads APPDATA for that cache only. Python's user site is pinned where it is
+# (PYTHONUSERBASE), so a subprocess finds the same packages.
+import site as _site  # noqa: E402
+os.environ.setdefault("PYTHONUSERBASE", _site.getuserbase())
+_TEST_APPDATA = tempfile.mkdtemp(prefix="jxlphoto_test_appdata_")
+os.environ["APPDATA"] = _TEST_APPDATA
 
 # A wide console for rich: it wraps at the terminal width, so a phrase the
 # tests look for could be split by the wrap — and under pytest-xdist
@@ -79,6 +88,7 @@ def pytest_sessionfinish(session, exitstatus):
     # delete an open file: close them first or the folder is left behind.
     logging.shutdown()
     shutil.rmtree(_TEST_LOG_DIR, ignore_errors=True)
+    shutil.rmtree(_TEST_APPDATA, ignore_errors=True)
 
 
 @functools.lru_cache(maxsize=None)

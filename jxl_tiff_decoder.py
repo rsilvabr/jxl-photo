@@ -38,7 +38,7 @@ import tifffile
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.31.0-rc6"
+TOOLKIT_VERSION = "2.31.0-rc7"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 
@@ -897,7 +897,7 @@ _OVERLAY_SAFETY_SETTINGS = frozenset({
     "DELETE_SOURCE", "DELETE_CONFIRM", "DELETE_SKIPPED", "DELETE_SOURCE_REQUIRE_MD5",
     "STORE_MD5", "OVERWRITE_GUARD", "VERIFY_ROUNDTRIP", "VERIFY_LOSSY_MIN_MEAN_RATIO",
     "VERIFY_LOSSY_MIN_PSNR", "ALLOW_INCOMPLETE_GROUPS", "PROVENANCE_CHECK",
-    "ADOPT_SCAN", "OVERWRITE", "STRIP_METADATA", "AUTO_REPAIR_JBRD",
+    "ADOPT_SCAN", "ADOPT_MIN_PSNR", "OVERWRITE", "STRIP_METADATA", "AUTO_REPAIR_JBRD",
     "EMBED_ICC_IN_JXL"})
 
 
@@ -1294,6 +1294,9 @@ def _orientation_reset_args(*a, **k): return _common._orientation_reset_args(_G,
 
 
 _reduced_by_integer_decode = _common._reduced_by_integer_decode
+
+
+_jbrd_box_state = _common._jbrd_box_state
 
 
 _djxl_icc_args = _common._djxl_icc_args
@@ -3748,6 +3751,27 @@ def _delete_decoded_sources(results, tasks, moved_finals, use_staging):
                 f" KEPT {len(task['entries'])} source(s) | {task['main_jxl'].name} | "
                 f"{_red[0].name} holds {_red[1]}: the TIFF is not a full copy of "
                 f"it, so the JXL stays the archive")
+            continue
+        # #745 (rc7, the review's M1): a lossless JPEG archive (a jbrd box)
+        # holds the original JPEG's bytes — and whatever follows its image
+        # (an MPO preview, an HDR gain map) — which no TIFF of its pixels
+        # holds: only the transcoder's bit-exact recovery deletes it (#692,
+        # #733). A box that cannot be read is "cannot tell": kept too.
+        _arch = None
+        for _e in task["entries"]:
+            _jb = _jbrd_box_state(_e[0])
+            if _jb is not False:
+                _arch = (_e[0], "a lossless JPEG archive" if _jb else
+                         "a file whose JPEG-archive box could not be read")
+                break
+        if _arch:
+            _delete_stats["kept"] += (len(task["entries"])
+                                      + len(task.get("ignored_thumbs", [])))
+            logger.warning(
+                f" KEPT {len(task['entries'])} source(s) | {task['main_jxl'].name} | "
+                f"{_arch[0].name} is {_arch[1]}: a TIFF of its pixels leaves out the "
+                f"original JPEG's bytes — only the transcoder's bit-exact recovery "
+                f"(--force-transcode --decode) deletes it")
             continue
         # D2 (2026-10-08 audit): a decode the user degraded on purpose
         # (--depth 8 from 16 bits, --basic dropping the XMP profile) is a

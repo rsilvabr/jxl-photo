@@ -48,7 +48,7 @@ from typing import Optional
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.31.0-rc6"
+TOOLKIT_VERSION = "2.31.0-rc7"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 
@@ -674,6 +674,10 @@ DELETE_SOURCE = False
 # WARNING: irreversible. Only enable after testing on a small batch.
 
 DELETE_SOURCE_REQUIRE_MD5 = True
+# [encode direction] False lets a JPEG be deleted without its checksums.md5
+# line, on the reconstruction's proof alone. The decode direction (JXL -> the
+# original JPEG) always needs the line: there the rebuilt JPEG has nothing
+# else to be compared with (rc7, T1).
 DELETE_CONFIRM = True
 
 # Paths
@@ -1234,7 +1238,7 @@ _OVERLAY_SAFETY_SETTINGS = frozenset({
     "DELETE_SOURCE", "DELETE_CONFIRM", "DELETE_SKIPPED", "DELETE_SOURCE_REQUIRE_MD5",
     "STORE_MD5", "OVERWRITE_GUARD", "VERIFY_ROUNDTRIP", "VERIFY_LOSSY_MIN_MEAN_RATIO",
     "VERIFY_LOSSY_MIN_PSNR", "ALLOW_INCOMPLETE_GROUPS", "PROVENANCE_CHECK",
-    "ADOPT_SCAN", "OVERWRITE", "STRIP_METADATA", "AUTO_REPAIR_JBRD",
+    "ADOPT_SCAN", "ADOPT_MIN_PSNR", "OVERWRITE", "STRIP_METADATA", "AUTO_REPAIR_JBRD",
     "EMBED_ICC_IN_JXL"})
 
 
@@ -1342,6 +1346,7 @@ _magick_out_path = _common._magick_out_path
 
 
 _is_camera_thumbnail_page = _common._is_camera_thumbnail_page
+_is_mask_page = _common._is_mask_page
 
 
 # Final paths (normcase) whose existing jxlphoto-derived label names another
@@ -1610,6 +1615,10 @@ def read_jxl_self_hash_db(jxl_path: Path) -> Optional[str]:
 
 has_jbrd_box = _common.has_jbrd_box
 
+
+_jbrd_box_state = _common._jbrd_box_state
+
+
 _exif_box_rank = _common._exif_box_rank
 
 
@@ -1630,7 +1639,8 @@ PNG_EXTS = frozenset({".png"})
 def _iter_by_ext(paths, exts, root=None, skip_tool_output=False):
     """The files of `paths` with one of `exts`, sorted, each real file once
     (a folder reached twice through a junction is not converted twice), and
-    how many sit in this tool's own output folders (skip_tool_output).
+    how many sit in this tool's own output folders (skip_tool_output: True,
+    or the set of folder names, _decode_output_folder_names).
 
     One lstat per candidate. The real path that dedups them is the folder's,
     resolved once per folder, plus the file's name; only a symbolic link to a
@@ -1662,7 +1672,8 @@ def _iter_by_ext(paths, exts, root=None, skip_tool_output=False):
                 continue
         elif not S_ISREG(st.st_mode):
             continue
-        if skip_tool_output and root is not None and _is_tool_output_path(f, root):
+        if skip_tool_output and root is not None and _is_tool_output_path(
+                f, root, None if skip_tool_output is True else skip_tool_output):
             skipped += 1
             continue
         try:
@@ -1693,22 +1704,66 @@ def find_jpegs_flat(input_path: Path):
 # them, otherwise auto mode re-encodes its own recovered files on every rerun
 # (ping-pong). JXL finders are deliberately NOT filtered: encoder-produced
 # folders (converted_jxl/, 16B_JXL/, ...) are legitimate decode sources.
+# The shipped names; _decode_output_folder_names adds the run's own (rc7, A4).
 _TOOL_DECODE_OUTPUT_FOLDERS = frozenset({
     "recovered_jpeg", "jpeg_recovered", "converted",
 })
 
 
-def _is_tool_output_path(p: Path, root: Path) -> bool:
+def _decode_output_folder_names(args=None) -> frozenset:
+    """This tool's decode-direction output folder names, lowercased: the
+    shipped ones always, plus — only in the modes that write there, from this
+    run's arguments — the folder a mode 1/3 decode creates inside each source
+    folder (RECOVERED_JPEG_FOLDER, or a non-default --output-name) and, in
+    modes 6/7, the run's own --export-jpeg-folder. Only the shipped literals
+    used to be read: with RECOVERED_JPEG_FOLDER = "JPEG_back" every auto run
+    archived the last run's recovered JPEGs again, one folder deeper (rc7, A4;
+    #710's rule). Never a name for every mode: with a symmetric setup
+    (JPEG_SIBLING_FOLDER = "JPEG") the user's own JPEG folders were skipped in
+    every run, nothing archived and exit 0 (the rc7 second review's R2). Mode
+    4's folder is the token test of _is_tool_output_path."""
+    names = set()
+    mode = getattr(args, "mode", None) if args is not None else None
+    if mode in (1, 3):
+        if RECOVERED_JPEG_FOLDER:
+            names.add(str(RECOVERED_JPEG_FOLDER).lower())
+        out_name = getattr(args, "output_name", None)
+        if out_name and str(out_name).strip() and out_name != CONVERT_OUTPUT_FOLDER:
+            names.add(str(out_name).strip().lower())
+    if mode in (6, 7):
+        # The run's own flag (the wizard's plan reads these finders without
+        # main(), which copies it into EXPORT_JPEG_FOLDER: the review's N3).
+        flag = getattr(args, "export_jpeg_folder", None)
+        if flag and str(flag).strip():
+            names.add(str(flag).strip().lower())
+    return _TOOL_DECODE_OUTPUT_FOLDERS | names
+
+
+def _is_tool_output_path(p: Path, root: Path, names=None) -> bool:
     """True if any folder component BETWEEN the scan root and the file is a
-    known decode-output folder. Evaluated RELATIVE to the scan root, so
-    pointing the tool directly AT a folder named 'converted'/'recovered_jpeg'
-    (e.g. to re-archive recovered JPEGs) still works — only files NESTED
-    inside such folders below the root are skipped.
+    known decode-output folder (`names`, default _decode_output_folder_names()),
+    or carries mode 4's decode suffix (_<JPEG_SUFFIX_REPLACE_DEC>). Evaluated
+    RELATIVE to the scan root, so pointing the tool directly AT a folder named
+    'converted'/'recovered_jpeg' (e.g. to re-archive recovered JPEGs) still
+    works — only files NESTED inside such folders below the root are skipped.
 
     A path of the walk itself starts with the root's own parts: those are
     cut off directly — relative_to compares every parent and was half of a
     20 000-JPEG count (#665); any other path still goes through it.
     """
+    if names is None:
+        names = _decode_output_folder_names()
+    # Mode 4's decode folder holds JPEG_SUFFIX_REPLACE_DEC as a TOKEN, where
+    # _replace_suffix_token put it: bounded by _, -, a space or the ends, at
+    # any position ("shoot JPEG_recovered", "JPEG_recovered_shoot") — not only
+    # at the end after "_" (the review's S3: those layouts nested on every run).
+    # Not when the decode writes the very token the encode reads
+    # (JPEG_SUFFIX_REPLACE_DEC = JPEG_SUFFIX_TO_REPLACE: shoot_JPEG <->
+    # shoot_JXL, a round trip that never nests): those are the user's own
+    # JPEG folders (the second review's R2).
+    _dec = (JPEG_SUFFIX_REPLACE_DEC or "").lower()
+    token = (re.compile(r"(?:^|[_\- ])" + re.escape(_dec) + r"(?=$|[_\- ])")
+             if _dec and _dec != (JPEG_SUFFIX_TO_REPLACE or "").lower() else None)
     root_parts = root.parts
     parts = p.parts
     if parts[:len(root_parts)] == root_parts:
@@ -1718,15 +1773,20 @@ def _is_tool_output_path(p: Path, root: Path) -> bool:
             rel_parts = p.relative_to(root).parts
         except ValueError:
             rel_parts = parts
-    return any(part.lower() in _TOOL_DECODE_OUTPUT_FOLDERS for part in rel_parts[:-1])
+    for part in rel_parts[:-1]:
+        low = part.lower()
+        if low in names or (token and token.search(low)):
+            return True
+    return False
 
 
-def find_jpegs_recursive(input_path: Path):
+def find_jpegs_recursive(input_path: Path, args=None):
+    names = _decode_output_folder_names(args)
     files, skipped = _iter_by_ext(input_path.rglob("*"), JPEG_EXTS,
-                                  root=input_path, skip_tool_output=True)
+                                  root=input_path, skip_tool_output=names)
     if skipped:
         logger.info(f"Skipped {skipped} JPEG file(s) inside toolkit output folders "
-                    f"({', '.join(sorted(_TOOL_DECODE_OUTPUT_FOLDERS))})")
+                    f"({', '.join(sorted(names))})")
     return files
 
 def find_jxls_flat(input_path: Path):
@@ -1739,9 +1799,9 @@ def find_jxls_recursive(input_path: Path):
     files, _ = _iter_by_ext(input_path.rglob("*"), JXL_EXTS)
     return files
 
-def find_pngs_recursive(input_path: Path):
-    files, skipped = _iter_by_ext(input_path.rglob("*"), PNG_EXTS,
-                                  root=input_path, skip_tool_output=True)
+def find_pngs_recursive(input_path: Path, args=None):
+    files, skipped = _iter_by_ext(input_path.rglob("*"), PNG_EXTS, root=input_path,
+                                  skip_tool_output=_decode_output_folder_names(args))
     if skipped:
         logger.info(f"Skipped {skipped} PNG file(s) inside toolkit output folders")
     return files
@@ -2626,8 +2686,13 @@ def _repair_one_jbrd(jxl_path: Path, dry_run: bool):
         os.replace(str(tmp), str(jxl_path))
         if (read_md5_db(jxl_path) is not None
                 or read_jxl_self_hash_db(jxl_path) is not None):
-            store_md5_db(jxl_path, rec_md5)
-            store_jxl_self_hash_db(jxl_path, md5_of_file(jxl_path))
+            # Said as it went (rc7): a db held by another program times out
+            # (False), and every gate then reads the file as unproven.
+            if (store_md5_db(jxl_path, rec_md5) is False
+                    or store_jxl_self_hash_db(jxl_path, md5_of_file(jxl_path)) is False):
+                return "repaired", ("checksums.md5 could NOT be updated (held by another "
+                                    "program?): run --repair-jbrd again, or later "
+                                    "deletes keep this file's source")
             return "repaired", "checksums.md5 updated for the repaired file"
         return "repaired", "no checksums.md5 entry to update"
     finally:
@@ -2801,7 +2866,9 @@ def _relayout_one_jbrd(jxl_path: Path, dry_run: bool, problem: str):
         os.replace(str(tmp), str(jxl_path))
         if (read_md5_db(jxl_path) is not None
                 or read_jxl_self_hash_db(jxl_path) is not None):
-            store_jxl_self_hash_db(jxl_path, md5_of_file(jxl_path))
+            if store_jxl_self_hash_db(jxl_path, md5_of_file(jxl_path)) is False:
+                return "relaid", (f"{problem}; checksums.md5 could NOT be updated (held "
+                                  f"by another program?)")
             return "relaid", f"{problem}; checksums.md5 updated"
         return "relaid", problem
     finally:
@@ -2822,7 +2889,11 @@ def cmd_repair_jbrd(args) -> int:
     image data is intact. For every JXL under the input root:
 
       * no jbrd box          -> not applicable (nothing to reconstruct)
-      * reconstruction OK    -> fine, left untouched
+      * cannot be read       -> COULD NOT BE READ, an error (rc7: never "no jbrd")
+      * reconstruction OK    -> fine, left untouched — with a checksums.md5
+                                line, only when the rebuilt JPEG is the one the
+                                line names (REBUILDS ANOTHER JPEG otherwise, an
+                                error, nothing changed: rc7, #738)
       * reconstruction fails -> the markers are stripped ON A COPY and the
                                 reconstruction retested; only a copy that
                                 reconstructs replaces the file (REPAIRED),
@@ -2838,8 +2909,9 @@ def cmd_repair_jbrd(args) -> int:
     box (the cjxl default before v2.19.2), or an Exif box after the XMP or
     the image data, is rewritten by _relayout_one_jbrd — codestream and jbrd
     untouched, the very same JPEG rebuilt, or the file is left as it was.
-    Exit code: 0 when nothing is STILL BROKEN, 1 otherwise (a layout that
-    could not be fixed is a warning: the archive itself is fine).
+    Exit code: 1 when any file is STILL BROKEN, REBUILDS ANOTHER JPEG or
+    COULD NOT BE READ; 0 otherwise (a layout that could not be fixed is a
+    warning: the archive itself is fine).
     """
     log_file = setup_logger()
     root = args.input
@@ -2850,7 +2922,7 @@ def cmd_repair_jbrd(args) -> int:
     if not args.dry_run:
         _sweep_orphan_temps(files)
     counts = {"ok": 0, "repaired": 0, "broken": 0, "no_jbrd": 0,
-              "relaid": 0, "relay_failed": 0}
+              "unread": 0, "mismatch": 0, "relaid": 0, "relay_failed": 0}
     lock = threading.Lock()
     t0 = time.time()
     # The EXIF layout step (#562) needs cjxl; the reconstruction repair does
@@ -2863,9 +2935,36 @@ def cmd_repair_jbrd(args) -> int:
     def work(f):
         lines = []          # (level, text), logged together under the lock
         if not has_jbrd_box(f):
+            if _jbrd_box_state(f) is None:
+                # T1b (rc7): a file that cannot be read is "cannot tell" —
+                # never "without jbrd (not applicable)" (#563's rule).
+                lines.append((logger.error, "COULD NOT BE READ (locked by another "
+                                            "program, or gone?) — whether it is a JPEG "
+                                            "archive cannot be told; run the audit again"))
+                return "unread", False, lines
             return "no_jbrd", False, lines
         state = "ok"
-        if not _jxl_reconstruct_ok(f):
+        # T1b (rc7): "OK" is a checked answer where the archive has its
+        # checksums.md5 line — the JPEG rebuilt now must be the one the line
+        # names. djxl 0.11/0.12 rebuild ANOTHER JPEG, with exit 0, from an
+        # archive cjxl 0.13 wrote with its defaults (#669).
+        stored = read_md5_db(f)
+        if stored is None:
+            rebuilds = _jxl_reconstruct_ok(f)
+        else:
+            rebuilt_md5 = _jxl_reconstruct_md5(f)
+            rebuilds = rebuilt_md5 is not None
+            if rebuilds and rebuilt_md5 != stored:
+                hint = ("this djxl is older than 0.13, and an archive cjxl 0.13 wrote with "
+                        "its defaults rebuilds another JPEG with it (#669, "
+                        "docs/known_issues.md): check it with djxl 0.13 or later"
+                        if not _tool_at_least("djxl", 0, 13) else
+                        "the JXL is not the file that line was written for, or it is "
+                        "damaged: keep the original JPEG if you still have it")
+                lines.append((logger.error, f"REBUILDS ANOTHER JPEG (not the one its "
+                                            f"checksums.md5 line names — {hint})"))
+                return "mismatch", False, lines
+        if not rebuilds:
             try:
                 state, detail = _repair_one_jbrd(f, args.dry_run)
             except Exception as e:
@@ -2918,7 +3017,8 @@ def cmd_repair_jbrd(args) -> int:
                 counts["relaid"] += 1
             elif relaid is None:
                 counts["relay_failed"] += 1
-            done = sum(counts[k] for k in ("ok", "repaired", "broken", "no_jbrd"))
+            done = sum(counts[k] for k in ("ok", "repaired", "broken", "no_jbrd",
+                                           "unread", "mismatch"))
             left = (time.time() - t0) / done * (len(files) - done)
             eta = f"  ~{left / 60:.0f} min left" if done % 25 == 0 and left > 60 else ""
             for log, text in lines:
@@ -2930,9 +3030,13 @@ def cmd_repair_jbrd(args) -> int:
         list(pool.map(run_one, files))
     ok, repaired = counts["ok"], counts["repaired"]
     still_broken, no_jbrd = counts["broken"], counts["no_jbrd"]
+    unread, mismatch = counts["unread"], counts["mismatch"]
     logger.info(f"Repair summary: {ok} OK, {repaired} "
                 + ("repairable (dry run)" if args.dry_run else "repaired")
-                + f", {still_broken} still broken, {no_jbrd} without jbrd")
+                + f", {still_broken} still broken, {no_jbrd} without jbrd"
+                + (f", {mismatch} rebuild another JPEG than their checksums.md5 line"
+                   if mismatch else "")
+                + (f", {unread} could not be read" if unread else ""))
     if counts["relaid"] or counts["relay_failed"]:
         logger.info(f"EXIF for IrfanView: {counts['relaid']} file(s) "
                     + ("would be fixed (dry run)" if args.dry_run else "fixed")
@@ -2953,11 +3057,15 @@ def cmd_repair_jbrd(args) -> int:
                 + (" (dry run)" if args.dry_run else "")] = counts["relaid"]
     if counts["relay_failed"]:
         _extras["EXIF layout left as is"] = counts["relay_failed"]
+    if mismatch:
+        _extras["rebuild another JPEG than their checksums.md5 line"] = mismatch
+    if unread:
+        _extras["could not be read"] = unread
     record_summary(ok=ok + repaired, overwritten=0, skipped=no_jbrd,
-                   errors=still_broken, log_file=log_file, extras=_extras,
-                   dry_run=bool(args.dry_run))
+                   errors=still_broken + mismatch + unread, log_file=log_file,
+                   extras=_extras, dry_run=bool(args.dry_run))
     emit_summary_json(args.summary_json)
-    return 1 if still_broken else 0
+    return 1 if (still_broken or mismatch or unread) else 0
 
 
 @_holds_staging
@@ -3222,18 +3330,16 @@ def _delete_transcoded_sources(results, tasks, moved_finals, use_staging, decode
                         f"from this file) | {src_path.name}")
                     continue
                 if decode:
-                    # #581: deleting the JXL on the strength of ANY
-                    # same-named JPEG needs a real proof without the
-                    # checksum — the reconstruction (the encode side has
-                    # its own reconstruction gate below).
-                    if not (_tool_at_least("djxl", 0, 12)
-                            and _jxl_reconstructs_to(src_path, final_file)):
-                        _delete_stats["kept"] += 1
-                        logger.warning(
-                            f" KEEP (already archived, no checksum, and the JXL "
-                            f"does not reconstruct this JPEG) | {src_path.name}")
-                        continue
-                    logger.debug(f" provenance OK (reconstruction) | {src_path.name}")
+                    # #581, then T1 (rc7): without its checksum line nothing
+                    # proves the JPEG on disk is the original — not even the
+                    # reconstruction: djxl 0.11/0.12 rebuild another JPEG
+                    # from some archives with exit 0, and a JPEG an earlier
+                    # such rebuild left here matches it. The JXL is kept.
+                    _delete_stats["kept"] += 1
+                    logger.warning(
+                        f" KEEP (already recovered, but no checksums.md5 line proves "
+                        f"the JPEG here is the original) | {src_path.name}")
+                    continue
                 else:
                     logger.warning(
                         f" DELETING an already-archived source with NO provenance check "
@@ -3301,22 +3407,6 @@ def _delete_transcoded_sources(results, tasks, moved_finals, use_staging, decode
                     _delete_stats["kept"] += 1
                     logger.warning(f" KEEP (djxl<0.12: bit-exact recovery cannot be verified) | {src_path.name}")
                     continue
-        if decode and not was_skipped and not _tool_at_least("djxl", 0, 12):
-            # djxl < 0.12 has no --reconstruct_jpeg, so bit-exact recovery
-            # is NOT guaranteed by the tool. The source may only be
-            # deleted when the MD5 comparison ran AND passed THIS run
-            # (result[3]). --no-verify skips that comparison entirely —
-            # without it, deletion would rest on the structural SOI/EOI
-            # check alone: too weak for an irreversible gate.
-            #
-            # Not applied to a SKIP: no djxl ran at all there, and the
-            # provenance block above already compared the JPEG on disk
-            # against the original's stored md5 — which is the very
-            # bit-exactness this check is a proxy for.
-            if not result[3]:
-                _delete_stats["kept"] += 1
-                logger.warning(f" KEEP (djxl<0.12 and recovery not MD5-verified) | {src_path.name}")
-                continue
         if decode and not was_skipped and str(src_path) in _auto_repaired:
             # The JPEG came from a repaired COPY, not from this JXL: the
             # archive is still broken (v2.0.0-v2.0.3 marker damage) and
@@ -3326,6 +3416,26 @@ def _delete_transcoded_sources(results, tasks, moved_finals, use_staging, decode
             _delete_stats["kept"] += 1
             logger.warning(f" KEEP (decoded from an auto-repaired copy; heal the "
                            f"archive with --repair-jbrd before --delete-source) | {src_path.name}")
+            continue
+        if decode and not was_skipped and not result[3]:
+            # T1 (rc7): an archive is deleted only when the JPEG rebuilt from
+            # it matched its checksums.md5 line THIS run (result[3]). djxl's
+            # exit 0 is no proof, even with --reconstruct_jpeg: djxl 0.12 and
+            # 0.11 rebuild ANOTHER JPEG, with exit 0, from an archive cjxl 0.13
+            # wrote with its defaults (#669; 4 of 7 probed). Without the line
+            # (another program's archive, a .jxl copied alone) or with
+            # --no-verify, nothing proves the original came back: keep.
+            _delete_stats["kept"] += 1
+            if not _tool_at_least("djxl", 0, 12):
+                _why_kept = "djxl<0.12 and recovery not MD5-verified"
+            elif read_md5_db(src_path) is not None:
+                _why_kept = ("the recovered JPEG was not compared with its checksums.md5 "
+                             "line (--no-verify)")
+            else:
+                _why_kept = ("no checksums.md5 line proves the recovered JPEG is the "
+                             "original — djxl 0.11/0.12 can rebuild another JPEG with "
+                             "exit 0; delete the JXL by hand once you have checked it")
+            logger.warning(f" KEEP ({_why_kept}) | {src_path.name}")
             continue
         if not _verify_file_integrity(final_file):
             _delete_stats["kept"] += 1
@@ -3878,11 +3988,13 @@ def _derivative_requested(args) -> bool:
 def _auto_jxl_output(src: Path, args, single_file: bool):
     """Where an auto run writes a JXL: the convert route's place for a
     derivative (resize/sharpening decode and re-encode every JXL, a jbrd
-    archive too: cmd_auto, #663), else the place both routes agree on, else
-    the route its jbrd box picks — the box is read only when the two routes
-    would write different paths (a rename, a PNG)."""
+    archive too: cmd_auto, #663; a colour conversion too since rc7, A3), else
+    the place both routes agree on, else the route its jbrd box picks — the
+    box is read only when the two routes would write different paths (a
+    rename, a PNG)."""
     on_convert = _output_on_route(src, args, False, single_file)
-    if _derivative_requested(args):
+    if _derivative_requested(args) or bool(getattr(args, "icc_profile", None)
+                                            or getattr(args, "to_srgb", False)):
         return on_convert
     on_transcode = _output_on_route(src, args, True, single_file)
     if str(on_transcode) == str(on_convert):
@@ -3994,8 +4106,12 @@ def _planned_sources(args, read_markers=True) -> list:
             out = _output_on_route(f, args, bool(lossless), single_file)
             if out is not None:
                 pairs.append((f, out))
-    if read_markers and route != "transcode" and not single_file:
-        pairs = _drop_derivative_pairs(pairs, args.mode)
+    # The transcode route's JPEG archiving leaves out JPEG exports too (rc7,
+    # A4); its JXL recovery never left out derivatives.
+    if read_markers and not single_file and (
+            route != "transcode" or not any(s.suffix.lower() in JXL_EXTS for s, _o in pairs)):
+        pairs = _drop_derivative_pairs(pairs, args.mode,
+                                       overwrite=bool(getattr(args, "overwrite", False)))
     return [f for f, _o in pairs]
 
 
@@ -4016,8 +4132,12 @@ def _planned_pairs(args, read_markers=True) -> list:
                    else _output_on_route(f, args, lossless, single_file))
             if out is not None:
                 pairs.append((f, out))
-    if read_markers and route != "transcode" and not single_file:
-        pairs = _drop_derivative_pairs(pairs, args.mode)
+    # The transcode route's JPEG archiving leaves out JPEG exports too (rc7,
+    # A4); its JXL recovery never left out derivatives.
+    if read_markers and not single_file and (
+            route != "transcode" or not any(s.suffix.lower() in JXL_EXTS for s, _o in pairs)):
+        pairs = _drop_derivative_pairs(pairs, args.mode,
+                                       overwrite=bool(getattr(args, "overwrite", False)))
     return pairs
 
 
@@ -4032,7 +4152,7 @@ def _transcode_sources(args, decode):
         files = find_jxls_flat(args.input) if args.mode in (0, 1) else find_jxls_recursive(args.input)
         output_root = args.output or args.input
     else:
-        files = find_jpegs_flat(args.input) if args.mode in (0, 1) else find_jpegs_recursive(args.input)
+        files = find_jpegs_flat(args.input) if args.mode in (0, 1) else find_jpegs_recursive(args.input, args)
         output_root = args.output or args.input
     return files, output_root
 
@@ -4116,6 +4236,11 @@ def cmd_transcode(args, auto_decode: bool = False):
         if out is None:
             continue  # Skip files outside _EXPORT for modes 6/7
         pairs.append((f, out))
+    # A JPEG export made from a master (jxlphoto-derived) is not archived
+    # (rc7, A4; the decode direction's #602 rule, mirrored).
+    if not decode and not args.input.is_file():
+        pairs = _drop_derivative_pairs(pairs, args.mode,
+                                       overwrite=bool(getattr(args, "overwrite", False)))
 
     # Progress total must reflect modes 6/7 filtering, not the raw scan
     _counter["total"] = len(pairs)
@@ -5469,7 +5594,8 @@ def _lossy_decode_keep_reason(src_path: Path, final_file: Path):
         # embeds exactly the master's own profile (measured: lossless and
         # lossy masters); a PNG with another one is not a copy of it.
         try:
-            _master_icc = _carried_icc(*_read_creator_and_relation(src_path))
+            _creator, _relation = _read_creator_and_relation(src_path)
+            _master_icc = _carried_icc(_creator, _relation)
             _png_icc = _png_iccp(final_file)
         except Exception as e:
             # Review S3: a read that fails keeps this source; the gate goes on.
@@ -5477,6 +5603,14 @@ def _lossy_decode_keep_reason(src_path: Path, final_file: Path):
         if _master_icc and _png_icc and bytes(_png_icc) != bytes(_master_icc):
             return ("KEEP (the PNG's colour profile is not the JXL's own: a colour-converted "
                     "copy, not a copy of it)")
+        # A5 (rc7): a master made from a TIFF carries the TIFF's own tags
+        # (IPTC block, Photoshop resources, a scanner's private tags) as
+        # jxlphoto-tifftag tokens, which only a JXL -> TIFF decode writes
+        # back; a PNG holds none of them (#646). Once the TIFF is gone, the
+        # master is their only copy.
+        if any(t.startswith(TIFFTAG_PREFIX) for t in _relation):
+            return ("KEEP (the JXL carries TIFF tags a PNG cannot hold — IPTC, Photoshop "
+                    "or scanner data its TIFF had; only the decoder writes them back)")
     return None
 
 
@@ -5526,9 +5660,11 @@ def _read_thumb_markers_batch(paths: list) -> set:
             if src is None or rel is None:
                 continue
             values = rel if isinstance(rel, list) else [str(rel)]
+            # A scan's IR mask page too (rc7, F4: _is_mask_page).
             if (any(str(t).strip() == THUMB_FLAG for t in values)
                     or _is_camera_thumbnail_page(values, entry.get("ImageWidth"),
-                                                 entry.get("ImageHeight"))):
+                                                 entry.get("ImageHeight"))
+                    or _is_mask_page(values)):
                 found.add(os.path.normcase(str(Path(src))))
 
     def on_error(chunk, e):
@@ -5542,24 +5678,119 @@ def _read_thumb_markers_batch(paths: list) -> set:
 
 _DERIVED_INPUT_LABELS: dict = {}
 
+_XMP_APP1_HEADS = (b"http://ns.adobe.com/xap/1.0/\x00", b"http://ns.adobe.com/xmp/extension/\x00")
 
-def _drop_derivative_pairs(pairs, mode):
-    """The decode direction's pairs minus the JXL sources that carry a
-    jxlphoto-derived marker — modes 6/7 without an explicit subfolder (the
-    261103 review of delivery A, S2). A derivative next to its master shares
-    the master's name and lands on the same JPEG/PNG. A source whose marker
-    cannot be read is kept (the duplicate-output check still guards it).
-    The labels are remembered for the run: auto mode plans twice."""
+
+def _image_xmp_mentions(path: Path, needle: bytes):
+    """True when a JPEG's XMP segments (APP1, standard and extended, before
+    the image data) or a PNG's XMP chunk (iTXt "XML:com.adobe.xmp", before
+    IDAT) hold `needle`; False when they do not; None when the file cannot be
+    read or is not what its name says — "cannot tell". Read in Python, the
+    headers only: an ExifTool pass reads every JPEG to its end."""
+    import zlib
+    try:
+        with open(path, "rb") as f:
+            head = f.read(8)
+            if head[:2] == b"\xff\xd8":
+                f.seek(2)
+                while True:
+                    seg = f.read(4)
+                    if len(seg) < 4 or seg[0] != 0xFF:
+                        return None
+                    marker = seg[1]
+                    if marker == 0xFF:
+                        f.seek(-3, 1)
+                        continue
+                    if marker == 0x01 or 0xD0 <= marker <= 0xD8:
+                        f.seek(-2, 1)
+                        continue
+                    if marker in (0xDA, 0xD9):
+                        return False
+                    size = struct.unpack(">H", seg[2:4])[0]
+                    if size < 2:
+                        return None
+                    if marker == 0xE1:
+                        data = f.read(size - 2)
+                        if data.startswith(_XMP_APP1_HEADS) and needle in data:
+                            return True
+                    else:
+                        f.seek(size - 2, 1)
+            if head == b"\x89PNG\r\n\x1a\n":
+                while True:
+                    ch = f.read(8)
+                    if len(ch) < 8:
+                        return None
+                    n = struct.unpack(">I", ch[:4])[0]
+                    kind = ch[4:8]
+                    if kind == b"IDAT" or kind == b"IEND":
+                        return False
+                    if kind == b"iTXt":
+                        data = f.read(n)
+                        f.seek(4, 1)
+                        if data.startswith(b"XML:com.adobe.xmp\x00") and len(data) > 19:
+                            compressed = data[18] == 1
+                            rest = data[20:]
+                            for _ in range(2):          # language tag, translated keyword
+                                rest = rest[rest.index(b"\x00") + 1:]
+                            text = zlib.decompress(rest) if compressed else rest
+                            if needle in text:
+                                return True
+                    else:
+                        f.seek(n + 4, 1)
+            return None
+    except (OSError, ValueError, zlib.error, struct.error):
+        return None
+
+
+def _output_missing_or_older(src: Path, out: Path) -> bool:
+    """True when `out` does not exist or is older than `src` (a stat that
+    fails counts as "missing"): a pair a run would write."""
+    try:
+        o = os.stat(out)
+    except OSError:
+        return True
+    try:
+        return os.stat(src).st_mtime > o.st_mtime
+    except OSError:
+        return True
+
+
+def _drop_derivative_pairs(pairs, mode, overwrite=False):
+    """The pairs minus the sources that carry a jxlphoto-derived marker —
+    modes 6/7 without an explicit subfolder (the 261103 review of delivery A,
+    S2). A derivative JXL next to its master shares the master's name and
+    lands on the same JPEG/PNG; a JPEG/PNG export (resized, colour-converted)
+    is a copy made from a master, never a source to archive and delete (rc7,
+    A4). A source whose marker cannot be read is kept (the duplicate-output
+    check still guards it). The labels are remembered for the run: auto mode
+    plans twice."""
     if not (mode == 6 or (mode == 7 and not EXPORT_JPEG_SUBFOLDER)):
         return pairs
     srcs = [str(s) for s, _o in pairs if s.suffix.lower() in JXL_EXTS]
     todo = [p for p in srcs if p not in _DERIVED_INPUT_LABELS]
     if todo:
         _DERIVED_INPUT_LABELS.update(_read_derived_markers_batch(todo))
+    _needle = DERIVED_XMP_PREFIX.encode("ascii")
+    _shared = {}
+    for _s, o in pairs:
+        _k = os.path.normcase(str(o))
+        _shared[_k] = _shared.get(_k, 0) + 1
+    for s, o in pairs:
+        if (s.suffix.lower() in JPEG_EXTS or s.suffix.lower() in PNG_EXTS) \
+                and str(s) not in _DERIVED_INPUT_LABELS \
+                and (DELETE_SOURCE or overwrite
+                     or _shared[os.path.normcase(str(o))] > 1
+                     or _output_missing_or_older(s, o)):
+            # Read only where it matters — the pair would write (a missing or
+            # older output, --overwrite), a delete is armed, or another source
+            # lands on the same output (the duplicate abort sees it: the
+            # review's S2). A --sync run over an archived library reads nothing.
+            _DERIVED_INPUT_LABELS[str(s)] = (DERIVED_XMP_PREFIX
+                                             if _image_xmp_mentions(s, _needle) else None)
     kept = [(s, o) for s, o in pairs if not _DERIVED_INPUT_LABELS.get(str(s))]
     _n = len(pairs) - len(kept)
     if _n:
-        logger.info(f"Ignored {_n} derivative JXL(s) below the export marker (they carry a jxlphoto-derived marker: copies made from a master, not masters) — to process them, run mode 7 with --export-subfolder set to their folder")
+        logger.info(f"Ignored {_n} derivative file(s) below the export marker (they carry a jxlphoto-derived marker: copies made from a master, not masters) — to process them, run mode 7 with --export-subfolder set to their folder")
     return kept
 
 
@@ -5577,7 +5808,7 @@ def _skip_thumbnail_pages(pairs, dry_run=False):
     if not thumbs:
         return pairs
     kept = [(s, o) for s, o in pairs if os.path.normcase(str(s)) not in thumbs]
-    logger.info(f"{len(pairs) - len(kept)} thumbnail page(s) of split TIFFs skipped: "
+    logger.info(f"{len(pairs) - len(kept)} thumbnail or IR mask page(s) of split TIFFs skipped: "
                 f"a derivative is made of the photo, not of the preview its TIFF "
                 f"carried.")
     return kept
@@ -6387,9 +6618,9 @@ def _convert_sources(args, direction, announce=True):
         files = [args.input]
         output_root = args.output or args.input.parent
     elif direction == "to_jxl":
-        jpegs = find_jpegs_flat(args.input) if args.mode in (0, 1) else find_jpegs_recursive(args.input)
+        jpegs = find_jpegs_flat(args.input) if args.mode in (0, 1) else find_jpegs_recursive(args.input, args)
         if announce or not getattr(args, "from_jpeg", False):
-            pngs = find_pngs_flat(args.input) if args.mode in (0, 1) else find_pngs_recursive(args.input)
+            pngs = find_pngs_flat(args.input) if args.mode in (0, 1) else find_pngs_recursive(args.input, args)
         else:
             pngs = []
         # --from-jpeg: restrict to JPEG inputs only. The wrapper's
@@ -6555,8 +6786,10 @@ def cmd_convert(args, from_jxl: bool = True):
     # of a split TIFF's thumbnail page (#555).
     if direction == "from_jxl" and (_is_derivative() or args.icc_profile):
         pairs = _skip_thumbnail_pages(pairs, dry_run=args.dry_run)
-    if direction == "from_jxl" and not args.input.is_file():
-        pairs = _drop_derivative_pairs(pairs, args.mode)
+    # A JPEG/PNG export (jxlphoto-derived) is not archived either (rc7, A4).
+    if not args.input.is_file():
+        pairs = _drop_derivative_pairs(pairs, args.mode,
+                                       overwrite=bool(getattr(args, "overwrite", False)))
 
     # Progress total must reflect modes 6/7 filtering, not the raw scan
     _counter["total"] = len(pairs)
@@ -6855,8 +7088,8 @@ def _auto_sources(args, announce=True):
         png_files = find_pngs_flat(args.input) if _walk_png else []
         jxl_files = find_jxls_flat(args.input) if _walk_jxl else []
     else:
-        jpeg_files = find_jpegs_recursive(args.input) if _walk_jpeg else []
-        png_files = find_pngs_recursive(args.input) if _walk_png else []
+        jpeg_files = find_jpegs_recursive(args.input, args) if _walk_jpeg else []
+        png_files = find_pngs_recursive(args.input, args) if _walk_png else []
         jxl_files = find_jxls_recursive(args.input) if _walk_jxl else []
 
     # --from-jxl: restrict auto mode to the JXL decode direction. JPEG/PNG
@@ -6976,11 +7209,14 @@ def cmd_auto(args):
         else:
             jxl_convert_files.append(f)
 
-    if _is_derivative() and jxl_transcode_files:
+    if (_is_derivative() or _COLOUR_DERIVATIVE) and jxl_transcode_files:
         # Resize/sharpening needs PIXELS: the bit-exact reconstruction cannot
         # shape them, so every jbrd file is decoded and re-encoded instead.
+        # So does a colour conversion (--to-srgb, --icc-profile; rc7, A3: the
+        # archives came back in their own profile, without a word).
         logger.info(f"{len(jxl_transcode_files)} JXL(s) with a JPEG reconstruction are "
-                    f"decoded and re-encoded instead (resize/sharpen needs pixels)")
+                    f"decoded and re-encoded instead (resize/sharpen/colour conversion "
+                    f"needs pixels)")
         jxl_convert_files.extend(jxl_transcode_files)
         jxl_transcode_files = []
 
@@ -7032,7 +7268,66 @@ def cmd_auto(args):
         # progress denominator matches reality.
         if not lst and files:
             _counter["total"] = max(0, _counter.get("total", 0) - len(files))
+    # An export whose output a source of ANOTHER group shares (a camera JPEG
+    # and a PNG export of one name): each group's derivative filter counted
+    # only its own duplicates (the second review of rc7, R1). The label is
+    # remembered for the run, so the groups' processing leaves it out too.
+    if _label_shared_exports(all_pairs, args.mode):
+        def _without_exports(lst):
+            return [(s, o) for s, o in lst if not _DERIVED_INPUT_LABELS.get(str(s))]
+        for _k in planned:
+            planned[_k] = _without_exports(planned[_k])
+        all_pairs = _without_exports(all_pairs)
     _abort_on_duplicate_outputs(all_pairs)
+
+    # A1 (rc7): a JPEG and its own archive side by side — a resumed --sync run
+    # (README, "Smart Sync Mode"). Each is the other's output, so under --sync
+    # one direction is always "newer", and the check below aborted the run.
+    # When the archive's checksums.md5 line is this JPEG's md5, the pair is up
+    # to date: neither file is written (nor rebuilt over its own original).
+    # No line, or another md5: the check below judges it as before; so does
+    # --overwrite, which asks for every output again.
+    # Proven only where it matters: a direction that would write — or a
+    # colour conversion/resize, whose copy of the archive would land on its
+    # own original JPEG, refused (an error) on every run even when skipped.
+    _derive_run = bool(_is_derivative() or _COLOUR_DERIVATIVE)
+    _done_pair = [] if args.overwrite else _archive_pairs_up_to_date(
+        all_pairs, would_write=lambda s, o: (_derive_run
+                                             or should_process(s, o, args.sync, False)))
+    # Also an archive alone (--from-jxl: its JPEG is not planned) whose copy
+    # would land on the very JPEG it archives: nothing to do there.
+    _onto = ([] if (args.overwrite or not _derive_run)
+             else _archives_onto_their_jpeg(planned["JXL-lossy"]))
+    if _done_pair or _onto:
+        _drop = {os.path.normcase(str(p)) for pair in _done_pair for p in pair}
+        _drop |= {os.path.normcase(str(p)) for p in _onto}
+        # Every list a group is planned from again (the review's S1: a colour
+        # conversion or a resize puts the archive in the convert list).
+        jpeg_files = [f for f in jpeg_files if os.path.normcase(str(f)) not in _drop]
+        png_files = [f for f in png_files if os.path.normcase(str(f)) not in _drop]
+        jxl_transcode_files = [f for f in jxl_transcode_files
+                               if os.path.normcase(str(f)) not in _drop]
+        jxl_convert_files = [f for f in jxl_convert_files
+                             if os.path.normcase(str(f)) not in _drop]
+        for _k in planned:
+            planned[_k] = [(s, o) for s, o in planned[_k]
+                           if os.path.normcase(str(s)) not in _drop]
+        all_pairs = [(s, o) for s, o in all_pairs if os.path.normcase(str(s)) not in _drop]
+        _n_done = len(_drop)
+        _counter["total"] = max(0, _counter.get("total", 0) - _n_done)
+        if _done_pair:
+            logger.info(f"{len(_done_pair)} JPEG(s) next to their own archive (its "
+                        f"checksums.md5 line proves it): up to date, neither file is "
+                        f"written")
+        _onto_only = [p for p in _onto
+                      if not any(os.path.normcase(str(p)) == os.path.normcase(str(q))
+                                 for pair in _done_pair for q in pair)]
+        if _onto_only:
+            logger.info(f"{len(_onto_only)} JPEG archive(s) whose copy would land on the "
+                        f"very JPEG they archive: left as they are (a copy never "
+                        f"replaces the original)")
+    else:
+        _n_done = 0
     if not args.dry_run:
         _sweep_orphan_temps(dst for _, dst in all_pairs)
 
@@ -7095,7 +7390,7 @@ def cmd_auto(args):
     # Decode groups run BEFORE encode groups, so a same-stem pair can never
     # have its JXL source overwritten before decoding (extra belt on top of
     # the collision guard above).
-    totals = {"ok": 0, "err": 0, "skipped": 0, "aborted": 0, "overwritten": 0}
+    totals = {"ok": 0, "err": 0, "skipped": _n_done, "aborted": 0, "overwritten": 0}
     _source_identity.clear()
     _reset_abort()  # once per RUN, not per group: the four _process_file_group
                     # calls below must share one latch, so an abort in the first
@@ -7153,6 +7448,93 @@ def cmd_auto(args):
         extras={"Not attempted (run aborted)": totals["aborted"], **_delete_extras()})
     return (totals["err"], False)
 
+def _archive_pairs_up_to_date(pairs, would_write=None) -> list:
+    """(jpeg, jxl) for every JPEG of an auto run whose output is a JXL whose
+    own output is that same JPEG, when the JXL is a lossless archive (a jbrd
+    box) whose checksums.md5 line is the JPEG's md5: an archive next to its
+    own original, up to date both ways (A1, rc7). No line, a line that cannot
+    be read, another md5, a JXL without a jbrd box (a lossy JXL under a stale
+    line) or a JPEG that cannot be read: not proven, left to the collision
+    check. `would_write(src, out)`: only a pair one of whose two directions
+    would write is proven (the only kind the collision check flags) — a plain
+    run reads no JPEG for it (the review's S6)."""
+    by_src = {os.path.normcase(str(s)): (Path(s), Path(o)) for s, o in pairs}
+    found = []
+    for s, o in pairs:
+        s, o = Path(s), Path(o)
+        if s.suffix.lower() not in JPEG_EXTS or o.suffix.lower() not in JXL_EXTS:
+            continue
+        back = by_src.get(os.path.normcase(str(o)))
+        if back is None or os.path.normcase(str(back[1])) != os.path.normcase(str(s)):
+            continue
+        if would_write is not None and not (would_write(s, o) or would_write(o, s)):
+            continue
+        if _archive_of(o, s):
+            found.append((s, o))
+    return found
+
+
+def _archive_of(jxl: Path, jpeg: Path) -> bool:
+    """Is `jxl` the lossless archive of `jpeg`? A jbrd box, a checksums.md5
+    line that is the JPEG's md5, and the JXL bound to that line by its content
+    (its self-hash line, else a reconstruction: _jxl_binds_to_archived_jpeg —
+    a JXL replaced under the same name keeps the old line; the second review
+    of rc7). Anything that cannot be read: False."""
+    if not has_jbrd_box(jxl):
+        return False
+    stored = read_md5_db(jxl)
+    if not stored:
+        return False
+    try:
+        if md5_of_file(jpeg) != stored:
+            return False
+    except OSError:
+        return False
+    return _jxl_binds_to_archived_jpeg(jxl, jpeg, stored)
+
+
+def _archives_onto_their_jpeg(pairs) -> list:
+    """The JXL sources among `pairs` (the convert group of a colour conversion
+    or a resize) whose copy would land on the very JPEG they archive (an
+    existing JPEG, _archive_of): the copy cannot replace the original, so
+    there is nothing to do — the derivative check refused each on every run
+    (`--from-jxl --to-srgb` in place: the second review of rc7)."""
+    found = []
+    for s, o in pairs:
+        s, o = Path(s), Path(o)
+        if (s.suffix.lower() in JXL_EXTS and o.suffix.lower() in JPEG_EXTS
+                and o.exists() and _archive_of(s, o)):
+            found.append(s)
+    return found
+
+
+def _label_shared_exports(pairs, mode) -> bool:
+    """Read the jxlphoto-derived mark of every JPEG/PNG source whose output
+    another source of the run shares, into the run's labels
+    (_DERIVED_INPUT_LABELS), modes 6/7 as _drop_derivative_pairs. Auto mode
+    plans its JPEGs and PNGs apart, so each group's _drop_derivative_pairs saw
+    only its own duplicates: a camera JPEG and a PNG export of one name, run 2
+    and after aborted on the duplicate (the second review of rc7, R1). True
+    when an export was found."""
+    if not (mode == 6 or (mode == 7 and not EXPORT_JPEG_SUBFOLDER)):
+        return False
+    shared = {}
+    for _s, o in pairs:
+        k = os.path.normcase(str(o))
+        shared[k] = shared.get(k, 0) + 1
+    needle = DERIVED_XMP_PREFIX.encode("ascii")
+    found = False
+    for s, o in pairs:
+        s = Path(s)
+        if ((s.suffix.lower() in JPEG_EXTS or s.suffix.lower() in PNG_EXTS)
+                and str(s) not in _DERIVED_INPUT_LABELS
+                and shared[os.path.normcase(str(o))] > 1):
+            label = DERIVED_XMP_PREFIX if _image_xmp_mentions(s, needle) else None
+            _DERIVED_INPUT_LABELS[str(s)] = label
+            found = found or bool(label)
+    return found
+
+
 def _process_file_group(files, args, use_transcode=True, direction="from_jxl", collect_only=None):
     """Process a group of files with the same method.
     use_transcode=True: lossless JPEG<->JXL (direction per extension).
@@ -7186,8 +7568,10 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
         if out:
             pairs.append((f, out))
 
-    if direction == "from_jxl" and not args.input.is_file():
-        pairs = _drop_derivative_pairs(pairs, args.mode)
+    # A JPEG/PNG export (jxlphoto-derived) is not archived either (rc7, A4).
+    if not args.input.is_file():
+        pairs = _drop_derivative_pairs(pairs, args.mode,
+                                       overwrite=bool(getattr(args, "overwrite", False)))
 
     if collect_only is not None:
         # Pre-pass: only collect pairs for cross-group duplicate detection
@@ -7824,8 +8208,11 @@ def _configure_run(parser, args):
     # --icc-profile has nothing to convert there; saying nothing made the flag
     # look honored. Only the pure "transcode" route gets the warning: "auto"
     # converts the JXL pairs WITH the profile (cmd_auto), so the flag is not
-    # dead there.
-    if args.icc_profile is not None and cmd == "transcode":
+    # dead there — its JPEG archives included since rc7 (A3: they go to the
+    # convert group with the conversion, like a resize). A folder with
+    # --decode is routed to the transcode path too (_route): warned the same
+    # (the rc7 review's N1: it recovered ProPhoto archives without a word).
+    if args.icc_profile is not None and _route(cmd, auto_decode, args)[0] == "transcode":
         print("WARNING: --to-srgb/--icc-profile has no effect on the lossless "
               "transcode path (the original bytes are recovered). Use "
               "--force-convert for a color-managed re-encode.")

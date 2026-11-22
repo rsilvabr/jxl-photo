@@ -146,6 +146,20 @@ def test_repair_jbrd(menu, launched, tmp_path):
     assert launched[0][2] == str(folder) and "--dry-run" not in launched[0]
 
 
+def test_repair_jbrd_takes_one_jxl_and_checks_the_path_first(menu, launched, tmp_path):
+    """rc7 (the targeted review's cosmetics): a single .jxl, which
+    --repair-jbrd accepts, was refused as "Folder not found", and a missing
+    folder was refused only after "Audit only?"."""
+    one = _folder(tmp_path) / "photo (1).jxl"
+    one.write_bytes(b"\x00\x00\x00\x0cJXL \x0d\x0a\x87\x0a")
+    menu._ui = wp.ScriptedUI({"jbrd.folder": str(one), "jbrd.audit": True})
+    menu.repair_jbrd_flow({"djxl": True, "exiftool": True})
+    assert launched[0][2] == str(one) and "--dry-run" in launched[0]
+    menu._ui = wp.ScriptedUI({"jbrd.folder": str(tmp_path / "gone [x]")})
+    menu.repair_jbrd_flow({"djxl": True, "exiftool": True})
+    assert menu._ui.asked == ["jbrd.folder"] and len(launched) == 1
+
+
 def test_mode_details_view(menu):
     # "x" is no mode: asked again; the panels print with [FINAL]-safe plain text.
     menu._ui = wp.ScriptedUI({"mode.details": ["3"]})

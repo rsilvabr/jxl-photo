@@ -189,7 +189,7 @@ def test_642_no_copy_is_made_of_a_camera_thumbnail_page(tmp_path):
                     if p.parent != src / "converted_jxl")
     assert rc == 0, out
     assert copies == ["DSC_0001 (2).jxl"], (copies, out)
-    assert "thumbnail page" in " ".join(out.split()), out
+    assert "thumbnail or IR mask page(s)" in " ".join(out.split()), out
 
     # the transcoder's resized JPEGs: of the photo only (a copy of the two
     # masters alone, without the recompressor's output folder)
@@ -201,7 +201,7 @@ def test_642_no_copy_is_made_of_a_camera_thumbnail_page(tmp_path):
     jpegs = sorted(p.name for p in alone.glob("*.jp*g"))
     assert rc == 0, out
     assert jpegs == ["DSC_0001 (2).jpg"], (jpegs, out)
-    assert "1 thumbnail page(s) of split TIFFs skipped" in " ".join(out.split()), out
+    assert "1 thumbnail or IR mask page(s) of split TIFFs skipped" in " ".join(out.split()), out
 
 
 @needs_tools

@@ -45,7 +45,7 @@ import zlib
 from datetime import datetime
 from pathlib import Path
 
-TOOLKIT_VERSION = "2.31.0-rc6"
+TOOLKIT_VERSION = "2.31.0-rc7"
 
 
 class Script:
@@ -478,7 +478,16 @@ def has_jbrd_box(jxl_path: Path) -> bool:
     Returns True if this JXL can be losslessly transcoded back to JPEG.
     Parses ISOBMFF boxes sequentially until jbrd is found or EOF, so files
     with large metadata headers before jbrd are detected correctly.
+    A file that cannot be read answers False here; _jbrd_box_state tells
+    that case apart.
     """
+    return _jbrd_box_state(jxl_path) is True
+
+
+def _jbrd_box_state(jxl_path):
+    """has_jbrd_box's answer, or None when the file could not be read (an
+    OSError: locked by another program, gone, no permission) — "cannot tell",
+    never "no jbrd box" (#563's rule; rc7, the targeted review's T1b)."""
     try:
         with open(jxl_path, 'rb') as f:
             header = f.read(12)
@@ -517,6 +526,8 @@ def has_jbrd_box(jxl_path: Path) -> bool:
                 if payload > 0:
                     f.seek(payload, 1)
         return False
+    except OSError:
+        return None
     except Exception:
         return False
 
@@ -1861,6 +1872,34 @@ def _is_camera_thumbnail_page(tokens, width, height) -> bool:
             except ValueError:
                 return False
     return False
+
+
+_SUBFILETYPE_TOKEN = "jxlphoto-subfiletype:"
+
+
+def _is_mask_page(tokens) -> bool:
+    """True for a page the encoder marked as a MASK (jxlphoto-subfiletype with
+    the TIFF's mask bit, 4: SilverFast's infrared page). A derivative run makes
+    no copy of it, like a thumbnail page: a 2048 px grey copy of the infrared
+    landed in sRGB_JXL beside the photo (rc7, the targeted review's F4); a
+    plain recompression keeps it, so the split stays complete. Only a page
+    other than the first of a split, like _is_camera_thumbnail_page: a
+    single-page TIFF whose only page carries the flag is still a photo (the
+    rc7 review's N4). Pure: `tokens` are the JXL's dc:Relation values."""
+    mask = later_page = False
+    for t in tokens or ():
+        t = str(t).strip()
+        if t.startswith(_SUBFILETYPE_TOKEN):
+            try:
+                mask = bool(int(t[len(_SUBFILETYPE_TOKEN):]) & 4)
+            except ValueError:
+                mask = False
+        elif t.startswith(PAGE_PREFIX):
+            try:
+                later_page = int(t[len(PAGE_PREFIX):]) > 0
+            except ValueError:
+                later_page = False
+    return mask and later_page
 
 
 def _resize_geometry(w: int, h: int, mode, value, allow_upscale: bool = False):

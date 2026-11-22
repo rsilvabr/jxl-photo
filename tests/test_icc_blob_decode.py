@@ -518,8 +518,9 @@ def test_cautious_still_embeds_a_matrix_trc_profile(tmp_path, monkeypatch):
 
 @real
 def test_cautious_cache_key_bumped_and_old_verdicts_ignored(tmp_path, monkeypatch):
-    """The cache key carries :t=2 so every profile is retested once: a t=1
-    'embed' verdict for a table-curve profile must not keep working."""
+    """The cache key carries the test's generation (:t=3 since rc7, F3: a grey
+    profile is tested on a grey image) so every profile is retested once: an
+    older 'embed' verdict for a table-curve profile must not keep working."""
     monkeypatch.setattr(enc, "CJXL_DISTANCE", 1.0)
     monkeypatch.setattr(enc, "CJXL_MODULAR", False)
     stored = {}
@@ -533,11 +534,12 @@ def test_cautious_cache_key_bumped_and_old_verdicts_ignored(tmp_path, monkeypatc
     icc = romm_toe_icc()
     assert enc._cautious_should_embed_icc(icc, tmp_path / "x.tif") is False
     key = next(iter(stored))
-    assert key.endswith(":t=2"), key
+    assert key.endswith(":t=3"), key
 
-    old_key = key[: -len(":t=2")]
-    assert old_key != key
-    stored.clear()
-    stored[old_key] = {"embed": True}
-    assert enc._cautious_should_embed_icc(icc, tmp_path / "x.tif") is False, (
-        "a pre-t=2 'embed' verdict was honoured — the profile was not retested")
+    for old_key in (key[: -len(":t=3")], key[: -len(":t=3")] + ":t=2"):
+        assert old_key != key
+        stored.clear()
+        stored[old_key] = {"embed": True}
+        assert enc._cautious_should_embed_icc(icc, tmp_path / "x.tif") is False, (
+            f"an older 'embed' verdict ({old_key[-6:]}) was honoured — the profile "
+            f"was not retested")

@@ -28,7 +28,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.31.0-rc6"
+TOOLKIT_VERSION = "2.31.0-rc7"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 
@@ -5631,19 +5631,25 @@ class InteractiveMenu:
         if not folder:
             self.ui.line("No folder given — nothing done.")
             return
+        # Checked before the next question (rc7): a folder that does not exist
+        # was refused only after "Audit only?"; a single .jxl, which
+        # --repair-jbrd accepts, was refused as "Folder not found".
+        _p = Path(folder)
+        if not (_p.is_dir() or (_p.is_file() and _p.suffix.lower() == ".jxl")):
+            self._print_error(f"Not a folder or a .jxl file: {folder}" if _p.exists()
+                              else f"Folder not found: {folder}")
+            return
         audit = self.ui.ask_yes("jbrd.audit", "Audit only (dry run, nothing written)?",
                                 "Audit only (dry run, nothing written)? [Y/n]: ", True)
-
-        if not Path(folder).is_dir():
-            self._print_error(f"Folder not found: {folder}")
-            return
 
         cmd = [sys.executable, str(script), folder, '--repair-jbrd']
         if audit:
             cmd.append('--dry-run')
         rc = self._stream_child(cmd)
         if rc != 0:
-            self._print_error("Repair reported files still broken — see the log above.")
+            self._print_error("The audit reported problems (files still broken, an "
+                              "archive that rebuilds another JPEG, or files it could not "
+                              "read) — see the log above.")
 
     def explorer_thumbnail_flow(self, status) -> None:
         """Menu 6: Explorer thumbnails for JXLs that already exist.

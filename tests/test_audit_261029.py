@@ -165,7 +165,7 @@ def test_552_a_derivative_run_skips_thumbnail_pages(tmp_path):
                "--distance", "0.5", "--workers", "1")
     names = sorted(p.name for p in (ev / "_EXPORT" / "sRGB").iterdir())
     assert names == ["DSC_0004 [b].jxl"], log[-2000:]
-    assert "thumbnail page(s) of split TIFFs skipped" in log
+    assert "thumbnail or IR mask page(s) of split TIFFs skipped" in log
     assert "got NO derivative" not in log           # not a policy skip (#543)
 
 
@@ -186,7 +186,7 @@ def test_555_transcoder_derivatives_skip_thumbnail_pages(tmp_path, route):
     log = _run(tmp_path, "jxl_jpeg_transcoder.py", *args)
     names = sorted(p.name for p in out.rglob("*.jpg"))
     assert names == ["DSC_0005 [c].jpg"], log[-2000:]
-    assert "thumbnail page(s) of split TIFFs skipped" in log
+    assert "thumbnail or IR mask page(s) of split TIFFs skipped" in log
 
 
 # ------------------------------------------------------------------- #556
