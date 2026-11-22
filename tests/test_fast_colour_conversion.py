@@ -561,3 +561,32 @@ def test_fast_colour_possible_follows_the_run(monkeypatch):
 def test_the_setting_is_an_overlay_setting():
     assert rec._OVERLAY_SETTINGS["FAST_COLOR_CONVERSION"] == ("bool",)
     assert rec.FAST_COLOR_CONVERSION is True
+
+
+@needs_tools
+def test_v2_the_copys_thumbnail_comes_from_the_converted_pixels(tmp_path, monkeypatch, capsys):
+    """V2 (rc5): with the colour converted in Python, the Explorer thumbnail is
+    made from the converted image, in the target profile, before cjxl — the
+    finished copy is not decoded again. Lossless: the thumbnail the decode
+    made of the copy, up to the two sRGB profiles' rounding."""
+    from PIL import Image
+    master = _encode_masters(tmp_path / HOSTILE / "big", {"写真 big": _photo(800, 1000, 3)},
+                             _prophoto_icc(), distance="0") / "写真 big.jxl"
+    routes = []
+    for name in ("_thumbnail_from_array", "_make_explorer_thumbnail"):
+        def spy(*a, _real=getattr(rec, name), _n=name, **k):
+            routes.append((_n, _real(*a, **k)))
+            return routes[-1][1]
+        monkeypatch.setattr(rec, name, spy)
+    out, text = _derive(tmp_path, monkeypatch, capsys, master, "thumb",
+                        extra=["--explorer-thumbnail", "on"])
+    assert [n for n, _j in routes] == ["_thumbnail_from_array"], (routes, text[-2000:])
+    data = out.read_bytes()
+    i = data.find(b"jxlphoto-thumbnail:v1:")
+    assert i >= 0, "no thumbnail box"
+    stored = Image.open(io.BytesIO(data[data.index(bytes([0xFF, 0xD8]), i):])).convert("RGB")
+    work = tmp_path / "decode"
+    work.mkdir()
+    ref = Image.open(io.BytesIO(common._make_explorer_thumbnail(rec._G, out, work))).convert("RGB")
+    d = np.abs(np.asarray(stored, np.int16) - np.asarray(ref, np.int16))
+    assert d.mean() < 0.5 and d.max() <= 8, (float(d.mean()), int(d.max()))

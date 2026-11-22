@@ -45,7 +45,7 @@ import zlib
 from datetime import datetime
 from pathlib import Path
 
-TOOLKIT_VERSION = "2.31.0-rc4"
+TOOLKIT_VERSION = "2.31.0-rc5"
 
 
 class Script:
@@ -445,17 +445,22 @@ def _assemble_from_stub(real_path, stub_path, jpeg, fingerprint) -> None:
             pass
 
 
-def _thumbnail_for_assembly(g, real_path, tmp_dir, assembled_size):
+def _thumbnail_for_assembly(g, real_path, tmp_dir, assembled_size, marker_source=None,
+                            jpeg=None):
     """(jpeg, fingerprint) for _assemble_from_stub's thumbnail box, or
     (None, None): the decisions of _add_explorer_thumbnail, with the size the
-    file will have before its box (`assembled_size`). Made from cjxl's file:
-    the codestream — all djxl and the fingerprint read — is the master's."""
+    file will have before its box (`assembled_size`). Made from cjxl's file
+    unless `jpeg` is given (the page in memory, V2): the codestream — all
+    djxl and the fingerprint read — is the master's. `marker_source`: the
+    metadata stub, whose XMP says what an extra channel is (#700) — cjxl's
+    file has none yet."""
     fp = g._codestream_fingerprint(real_path)
     if fp is None:
         g.logger.warning(f"  >Explorer thumbnail skipped (not a JPEG XL container) "
                          f"| {Path(real_path).name}")
         return None, None
-    jpeg = g._make_explorer_thumbnail(real_path, tmp_dir)
+    if jpeg is None:
+        jpeg = g._make_explorer_thumbnail(real_path, tmp_dir, marker_source=marker_source)
     if jpeg is None:
         return None, None
     import io
@@ -700,6 +705,44 @@ def _cjxl_whole_image(distance, effort, buffering=None):
         return buffering == 0
     return (effort >= 10 or (effort in (8, 9) and distance > 0.5)
             or (effort == 7 and distance >= 3))
+
+
+def _cjxl_threads_for(concurrent):
+    """cjxl's --num_threads when `concurrent` encodes run at once (Fable's
+    sweep V1, 2026-11-22). Each cjxl starts one thread per logical core, so 8
+    to 16 of them were hundreds of threads on 32: max(4, 2 x cores /
+    concurrent) made the same files 6-13 % faster (40 varied exports and 8 of
+    45 MP, 8 and 16 workers; the files byte for byte the same — lossy and
+    lossless, --buffering 0 too, 16-bit RGB and 8-bit gray). None — cjxl's
+    own, every core — for a single encode or when that is every core anyway."""
+    try:
+        concurrent = int(concurrent or 0)
+    except (TypeError, ValueError):
+        return None
+    if concurrent <= 1:
+        return None
+    cores = os.cpu_count() or 1
+    n = max(4, (2 * cores) // concurrent)
+    return None if n >= cores else n
+
+
+def _cjxl_threads_flag(g):
+    """The run's --num_threads for its full-size encodes (g._CJXL_THREADS,
+    set while the script's pool runs; _cjxl_threads_for), else nothing."""
+    n = g._CJXL_THREADS
+    return [f"--num_threads={n}"] if n else []
+
+
+@contextlib.contextmanager
+def _cjxl_threads_while(g, concurrent):
+    """g._CJXL_THREADS for `concurrent` encodes at once while the block runs
+    (the script's pool), back to None after it however it ends — no run, and
+    no --serve job, inherits another's."""
+    g._CJXL_THREADS = _cjxl_threads_for(concurrent)
+    try:
+        yield
+    finally:
+        g._CJXL_THREADS = None
 
 
 def _cjxl_bytes_per_pixel(distance, effort, buffering=None, modular=False):
@@ -1456,15 +1499,32 @@ def _strip_encode_params(text: str):
     "gen=2 | My caption" are user text and stay. `orphans` counts how many
     were stripped so the caller can log it: an orphan means something wrote
     the field badly earlier.
+
+    The user's own text stays byte for byte (#697): only the block, the
+    separator next to it and a tail orphan go. The field used to be split on
+    every '|' and joined again with ' | ': a caption "Tokyo|Kyoto" came back
+    "Tokyo | Kyoto" and "A || B" came back "A | B" — rewritten in the master
+    even when the record lives in the History. Nothing to remove: the text is
+    returned exactly as it came.
     """
-    cleaned = _MACHINE_BLOCK_RE.sub("", str(text))
-    parts = [p.strip() for p in cleaned.split("|")]
-    parts = [p for p in parts if p]
+    s = str(text)
+    pieces = [p.strip() for p in _MACHINE_BLOCK_RE.split(s)]
+    had_block = len(pieces) > 1
+    # Each piece after a block starts with the separator that followed it.
+    pieces = [p if i == 0 else p.lstrip("|").strip() for i, p in enumerate(pieces)]
+    pieces = [p for p in pieces if p]
     orphans = 0
-    while parts and re.fullmatch(r"gen=\d+", parts[-1]):
-        parts.pop()
-        orphans += 1
-    return " | ".join(parts), orphans
+    if pieces:
+        segs = pieces[-1].split("|")
+        while segs and re.fullmatch(r"\s*gen=\d+\s*", segs[-1]):
+            segs.pop()
+            orphans += 1
+        if orphans:
+            pieces[-1] = "|".join(segs).strip().rstrip("|").strip()
+            pieces = [p for p in pieces if p]
+    if not had_block and not orphans:
+        return s, 0
+    return " | ".join(pieces), orphans
 
 
 def _history_record(values) -> str:
@@ -1852,19 +1912,45 @@ _VERSION_STDIN = subprocess.DEVNULL
 # libjxl version detection - used to gate flags that only exist in newer
 # cjxl/djxl builds. Unknown versions are treated as "old" (safe fallback:
 # no new flags are ever appended).
+# The limits of the version probe: a second, longer try before "unknown"
+# (#694: one 10 s timeout under load left a whole run without the libjxl 0.13
+# safeguards, and nothing said so).
+_VERSION_PROBE_TIMEOUTS = (10, 60)
+
+
 @functools.lru_cache(maxsize=None)
 def _tool_version(exe: str):
     """Return (major, minor, patch) of a cjxl/djxl-like tool, or None if unknown.
     stdin is NUL: a tool that read it would take a line of a --serve process's
-    jobs."""
-    try:
-        r = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=10,
-                           stdin=_VERSION_STDIN)
-        out = (r.stdout or "") + " " + (r.stderr or "")
-    except Exception:
-        return None
-    m = re.search(r"v?(\d+)\.(\d+)\.(\d+)", out)
-    return tuple(int(x) for x in m.groups()) if m else None
+    jobs. A probe that fails or times out is tried once more with a longer
+    limit; a version still unknown is None for the whole run, and the scripts
+    that encode say so at their start (_warn_if_version_unknown)."""
+    for timeout in _VERSION_PROBE_TIMEOUTS:
+        try:
+            r = subprocess.run([exe, "--version"], capture_output=True, text=True,
+                               timeout=timeout, stdin=_VERSION_STDIN)
+            out = (r.stdout or "") + " " + (r.stderr or "")
+        except Exception:
+            continue
+        m = re.search(r"v?(\d+)\.(\d+)\.(\d+)", out)
+        if m:
+            return tuple(int(x) for x in m.groups())
+    return None
+
+
+def _warn_if_version_unknown(g, exe: str) -> None:
+    """One WARNING at the start of a run that encodes when `exe --version`
+    gave no version (#694): every flag gated on libjxl's version then reads
+    as "old" for the run, so `--jpeg_reconstruction_lfs=0` (#669) and
+    `--strip_alpha=0` (#670) are not passed. The owner's call (2026-11-22):
+    say it, do not refuse the run."""
+    if g._tool_version(exe) is None:
+        g.logger.warning(
+            f"{exe} --version gave no version (it failed or timed out): this run cannot "
+            f"tell whether it is libjxl 0.13 or newer, so the 0.13 safeguards are not "
+            f"applied — a lossless JPEG archive may not be rebuilt bit for bit by djxl "
+            f"0.12 or older (#669), and a lossy encode may drop an all-opaque alpha "
+            f"channel (#670). Check that {exe} runs from this prompt.")
 
 
 def _reduced_by_integer_decode(info_text, frames_kept: bool):
@@ -2392,19 +2478,36 @@ def _log_failure_recap(g, failures) -> None:
 # === JXL finders of the decoder and the recompressor ===
 
 
+# The name suffix of a JXL whose pixel check failed in a deleting run (#701,
+# the owner's call 2026-11-22): `<name>_jxlphoto-error.jxl` keeps the file for
+# a look without letting it pass for the archive — the next run encodes the
+# photo again, and no script's folder scan takes it as a source.
+ERROR_SUFFIX = "_jxlphoto-error"
+
+
+def _is_error_output(path) -> bool:
+    """A JXL renamed after a failed round-trip check (ERROR_SUFFIX)."""
+    return Path(path).stem.lower().endswith(ERROR_SUFFIX)
+
+
 def _iter_jxls(g, paths, root=None):
     """The .jxl files among `paths` (each real file once, sorted), with the scan
     progress. A script that has EXCLUDE_FOLDERS (the decoder) leaves out the
     files below those folders and says how many; one without it (the
-    recompressor) filters nothing."""
+    recompressor) filters nothing. A JXL named *_jxlphoto-error (#701) is
+    never a source, and the count of those is said."""
     exclude = _script_get(g, "EXCLUDE_FOLDERS", None)
     seen = set()
     files = []
     excluded = 0
+    error_named = 0
     _scan = g._scan_state(root)
     for f in paths:
         g._scan_tick(_scan, len(files))
         if f.suffix.lower() not in g.JXL_EXTS:
+            continue
+        if _is_error_output(f):
+            error_named += 1
             continue
         try:
             if not f.is_file():
@@ -2421,6 +2524,9 @@ def _iter_jxls(g, paths, root=None):
     g._scan_done(_scan, len(files))
     if excluded > 0:
         g.logger.info(f"Excluded {excluded} file(s) under: {', '.join(exclude)}")
+    if error_named:
+        g.logger.info(f"Left out {error_named} JXL(s) named *{ERROR_SUFFIX}: an encode "
+                      f"whose round-trip check failed, kept for a look, never a source")
     return sorted(files)
 
 
@@ -3886,7 +3992,37 @@ def _convert_matrix_shaper(pixels, width: int, height: int, channels: int, trans
     return out.reshape(height, width, channels)
 
 
-def _make_explorer_thumbnail(g, jxl_path, tmp_dir):
+_EXTRASAMPLES_TOKEN = "jxlphoto-extrasamples:"
+
+
+def _extrasamples_not_alpha(tokens) -> bool:
+    """Do these dc:Relation tokens carry a jxlphoto-extrasamples marker that
+    says the extra channel is NOT alpha (TIFF ExtraSamples 0, unspecified: a
+    scanner's IR)? JPEG XL stores such a channel as alpha and keeps no other
+    role for it (#695, #700). No marker: False (treated as alpha)."""
+    for token in tokens or []:
+        token = str(token).strip()
+        if token.startswith(_EXTRASAMPLES_TOKEN):
+            values = [v.strip() for v in token[len(_EXTRASAMPLES_TOKEN):].split(",")]
+            return "0" in values
+    return False
+
+
+def _extra_channel_is_not_alpha(g, path) -> bool:
+    """_extrasamples_not_alpha of this file's dc:Relation (one exiftool read).
+    False when it cannot be read: the channel is then treated as alpha, as
+    before."""
+    try:
+        r = g._run_exiftool_argfile(["-j", "-XMP-dc:Relation", str(path)],
+                                    timeout=g.EXIFTOOL_TIMEOUT)
+        entry = (json.loads(r.stdout or "[]") or [{}])[0]
+    except Exception:
+        return False
+    rel = entry.get("Relation")
+    return _extrasamples_not_alpha(rel if isinstance(rel, list) else [rel] if rel else [])
+
+
+def _make_explorer_thumbnail(g, jxl_path, tmp_dir, marker_source=None):
     """An EXPLORER_THUMBNAIL_SIZE px sRGB JPEG of the file (bytes), or None
     with a warning: a thumbnail is never worth failing an archive file.
     djxl decodes WITHOUT a target colour space — asked for one it converts a
@@ -3902,8 +4038,7 @@ def _make_explorer_thumbnail(g, jxl_path, tmp_dir):
     command names the profile only when it exists. A PAM the raw read cannot
     carry still goes through thumb.pam, the route before #671."""
     tmp_dir = Path(tmp_dir)
-    pam, icc, jpg = tmp_dir / "thumb.pam", tmp_dir / "thumb_src.icc", tmp_dir / "thumb.jpg"
-    srgb = tmp_dir / "thumb_srgb.icc"
+    pam, icc = tmp_dir / "thumb.pam", tmp_dir / "thumb_src.icc"
     # The encoder's page check of the same file (its _KEPT_DECODE, asked for
     # while --verify-roundtrip checks every page): this decode is kept for it,
     # with the original profile too, so the page is decoded once.
@@ -3913,8 +4048,6 @@ def _make_explorer_thumbnail(g, jxl_path, tmp_dir):
     try:
         if shutil.which("djxl") is None or shutil.which("magick") is None:
             raise RuntimeError("needs djxl and ImageMagick (magick) on PATH")
-        from PIL import ImageCms
-        srgb.write_bytes(ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes())
         r = g._run_to_memory(["djxl", str(jxl_path), "-", "--output_format=pam",
                               f"--icc_out={icc}"]
                              + ([f"--orig_icc_out={orig}"] if keep is not None else []),
@@ -3929,42 +4062,130 @@ def _make_explorer_thumbnail(g, jxl_path, tmp_dir):
             source, pixels = [str(pam)], None
         else:
             source, pixels = raw
-        size = int(g.EXPLORER_THUMBNAIL_SIZE)
-        cmd = ["magick", *source, "-resize", f"{size}x{size}>"]
-        if icc.exists() and icc.stat().st_size:
-            cmd += ["-profile", str(icc)]
-        cmd += ["-profile", str(srgb), "-background", "white", "-flatten", "-strip",
-                "-quality", "85", "-sampling-factor", "2x2", "-interlace", "none",
-                "jpeg:" + g._magick_out_path(jpg)]
-        r = g._run_captured(cmd, g.CJXL_TIMEOUT, input=pixels)
-        if r.returncode != 0 or not jpg.exists():
-            raise RuntimeError(f"magick: {g._stderr_tail(r.stderr)}")
-        return jpg.read_bytes()
+        # #700: a 4th (or 2nd) channel that is NOT alpha — a scanner's IR,
+        # stored as alpha by JPEG XL — must not be composited: the thumbnail
+        # of an RGB+IR scan came out mixed with white. Read only for an image
+        # with such a channel (its jxlphoto-extrasamples marker), from
+        # `marker_source` when the file has no metadata yet (the encoder's
+        # one-pass assembly: the stub holds it).
+        _head = _pam_header(r.stdout)
+        drop_alpha = (_head is not None and _head[2] in (2, 4)
+                      and _extra_channel_is_not_alpha(g, marker_source or jxl_path))
+        return _thumbnail_jpeg(g, source, pixels, icc, drop_alpha, tmp_dir)
     except Exception as e:
         g.logger.warning(f"  >Explorer thumbnail skipped ({e}) | {Path(jxl_path).name}")
         return None
     finally:
-        for p in (pam, jpg):
-            try:
-                p.unlink()
-            except OSError:
-                pass
+        try:
+            pam.unlink()
+        except OSError:
+            pass
 
 
-def _add_explorer_thumbnail(g, jxl_path, tmp_dir) -> str:
+def _thumbnail_jpeg(g, source, pixels, icc, drop_alpha, tmp_dir) -> bytes:
+    """The thumbnail JPEG ImageMagick makes of `source` (its input arguments;
+    `pixels` its stdin): an extra channel that is not alpha dropped (#700),
+    resized to EXPLORER_THUMBNAIL_SIZE, the profile in the file `icc` (None,
+    absent or empty: none) assigned and converted to sRGB, flattened on
+    white. The one command of both routes: the finished file decoded
+    (_make_explorer_thumbnail) and the pixels a script holds
+    (_thumbnail_from_array). Raises when it fails."""
+    tmp_dir = Path(tmp_dir)
+    jpg, srgb = tmp_dir / "thumb.jpg", tmp_dir / "thumb_srgb.icc"
+    from PIL import ImageCms
+    srgb.write_bytes(ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes())
+    size = int(g.EXPLORER_THUMBNAIL_SIZE)
+    cmd = (["magick", *source] + (["-alpha", "off"] if drop_alpha else [])
+           + ["-resize", f"{size}x{size}>"])
+    if icc is not None and icc.exists() and icc.stat().st_size:
+        cmd += ["-profile", str(icc)]
+    cmd += ["-profile", str(srgb), "-background", "white", "-flatten", "-strip",
+            "-quality", "85", "-sampling-factor", "2x2", "-interlace", "none",
+            "jpeg:" + g._magick_out_path(jpg)]
+    try:
+        r = g._run_captured(cmd, g.CJXL_TIMEOUT, input=pixels)
+        if r.returncode != 0 or not jpg.exists():
+            raise RuntimeError(f"magick: {g._stderr_tail(r.stderr)}")
+        return jpg.read_bytes()
+    finally:
+        try:
+            jpg.unlink()
+        except OSError:
+            pass
+
+
+def _array_raw_input(img):
+    """(magick input arguments, pixel bytes) of an (H, W) or (H, W, C)
+    uint8/uint16 array a script holds (C 1-4: gray, gray+alpha, RGB, RGBA) —
+    the raw read _pam_raw_input makes of djxl's PAM, in the array's own byte
+    order, without a copy of a contiguous array. None for anything else."""
+    import numpy as np
+    if img.ndim == 2:
+        (h, w), c = img.shape, 1
+    elif img.ndim == 3:
+        h, w, c = img.shape
+    else:
+        return None
+    fmt = {1: "gray", 2: "graya", 3: "rgb", 4: "rgba"}.get(c)
+    if fmt is None or img.dtype not in (np.uint8, np.uint16) or not h or not w:
+        return None
+    a = np.ascontiguousarray(img)
+    order = a.dtype.byteorder
+    little = order == "<" or (order in ("=", "|") and sys.byteorder == "little")
+    return (["-size", f"{w}x{h}", "-depth", "8" if a.dtype == np.uint8 else "16",
+             "-endian", "LSB" if little else "MSB", f"{fmt}:-",
+             "+size", "+depth", "+endian"], memoryview(a).cast("B"))
+
+
+def _thumbnail_from_array(g, img, icc_bytes, tmp_dir, name, extra_is_alpha=True):
+    """The Explorer thumbnail (JPEG bytes) of pixels the script already
+    holds — the encoder's TIFF page, before cjxl — in the profile
+    `icc_bytes` (None: taken as sRGB) — instead of a decode of the finished
+    file (Fable's sweep V2, approved 2026-11-22: djxl decoded the whole new
+    master again only to make 768 px). `extra_is_alpha`: False for a 2nd/4th
+    channel that is not alpha (a scanner's IR, #700). None (logged) when it
+    cannot be made: the caller makes it from the file, as before."""
+    tmp_dir = Path(tmp_dir)
+    icc = tmp_dir / "thumb_page.icc"
+    try:
+        if shutil.which("magick") is None:
+            raise RuntimeError("needs ImageMagick (magick) on PATH")
+        raw = _array_raw_input(img)
+        if raw is None:
+            raise RuntimeError(f"no raw form for an array {getattr(img, 'shape', '?')} "
+                               f"{getattr(img, 'dtype', '?')}")
+        channels = 1 if img.ndim == 2 else img.shape[2]
+        if icc_bytes:
+            icc.write_bytes(bytes(icc_bytes))
+        return _thumbnail_jpeg(g, raw[0], raw[1], icc if icc_bytes else None,
+                               channels in (2, 4) and not extra_is_alpha, tmp_dir)
+    except Exception as e:
+        g.logger.debug(f"  >Explorer thumbnail from the image in memory not made ({e}): "
+                       f"made from the file | {name}")
+        return None
+    finally:
+        try:
+            icc.unlink()
+        except OSError:
+            pass
+
+
+def _add_explorer_thumbnail(g, jxl_path, tmp_dir, jpeg=None) -> str:
     """Make the thumbnail of a finished output and put it in its box.
     Returns "written", "small" (not worth it: the image is no larger than the
     thumbnail, or the thumbnail would be more than EXPLORER_THUMBNAIL_MAX_SHARE
     of the file — such a file decodes fast anyway) or "failed" (warned).
-    The fingerprint is re-read afterwards: the box rewrite copies the
-    codestream byte for byte, and a thumbnail must never name the wrong
-    pixels."""
+    `jpeg`: the thumbnail already made from the image in memory (V2), else
+    it is made from the file. The fingerprint is re-read afterwards: the box
+    rewrite copies the codestream byte for byte, and a thumbnail must never
+    name the wrong pixels."""
     fp = g._codestream_fingerprint(jxl_path)
     if fp is None:
         g.logger.warning(f"  >Explorer thumbnail skipped (not a JPEG XL container) "
                        f"| {Path(jxl_path).name}")
         return "failed"
-    jpeg = g._make_explorer_thumbnail(jxl_path, tmp_dir)
+    if jpeg is None:
+        jpeg = g._make_explorer_thumbnail(jxl_path, tmp_dir)
     if jpeg is None:
         return "failed"
     import io
@@ -4505,7 +4726,7 @@ def _output_pipe():
     return msvcrt.open_osfhandle(r, os.O_RDONLY), msvcrt.open_osfhandle(w, os.O_WRONLY)
 
 
-def _exiftool_source(g, path, tmp_dir) -> str:
+def _exiftool_source(g, path, tmp_dir, ifd=0) -> str:
     """The path to give exiftool as a -tagsFromFile source.
 
     exiftool format-expands that argument ('%d', '%f', '%e', with modifiers):
@@ -4530,9 +4751,17 @@ def _exiftool_source(g, path, tmp_dir) -> str:
     # -exif:all# after it: the EXIF goes into the container with its VALUES,
     # not their printed form (#684: MaxApertureValue f/2.83 came out f/2.8 of
     # a '%' path even with the callers' own -exif:all#); measured 2026-11-21,
-    # nothing else in the container changes.
-    r = g._run_exiftool_argfile(["-o", mie, "-all:all", "-exif:all#", "-unsafe", p],
-                                timeout=g.EXIFTOOL_TIMEOUT)
+    # nothing else in the container changes. -ifd0:all# last (#696): a
+    # multi-page TIFF's later pages must not overwrite the first page's tags
+    # in the container either (the callers copy IFD0 last for the same reason).
+    # `ifd`: the TIFF page the caller copies (review N1). Page 0 is forced
+    # into the container's IFD0; for a later page the container keeps IFD0
+    # and IFD1 as they are (all a MIE container holds of a TIFF's IFDs), and
+    # the caller redirects its page's IFD — pages 0 and 1 come out right, a
+    # page after them takes page 1's values.
+    r = g._run_exiftool_argfile(["-o", mie, "-all:all", "-exif:all#"]
+                                + (["-ifd0:all#"] if not ifd else [])
+                                + ["-unsafe", p], timeout=g.EXIFTOOL_TIMEOUT)
     if os.path.exists(mie):
         return mie
     if "Nothing to write" in (r.stderr or "") + (r.stdout or ""):
@@ -5032,6 +5261,88 @@ def _verify_jxl_integrity(g, jxl_path: Path) -> bool:
 # === Disk-full abort ===
 
 
+# --- Ctrl+C (#702) ---------------------------------------------------------
+_CTRL_C_REASON = "interrupted (Ctrl+C)"
+
+
+@contextlib.contextmanager
+def _ctrl_c_finishes_the_run(g, armed=True):
+    """While a run converts, Ctrl+C latches the run's abort switch instead of
+    raising (#702): no queued file starts — each comes back untouched, "not
+    attempted", as after a full disk —, the files in progress finish, no
+    source is deleted after it (every delete gate reads _interrupted), and
+    the run prints its summary; main() then ends as an interrupt
+    (_end_if_interrupted: the script exits 130). The pool's `with` used to
+    wait for EVERY queued file and the run ended without a summary. Its
+    cjxl/djxl/ExifTool share the console and get the Ctrl+C too: a file whose
+    tool died is an error, its partial output removed, as always. A second
+    Ctrl+C stops at once — also after another abort was latched (a full
+    disk): the press is its own flag, g._ctrl_c_seen, not the abort reason.
+    Enter it after the run's _reset_abort, which clears that flag — or, to
+    cover a planning that resets the latch itself (the transcoder's commands),
+    enter it unarmed: until the run's _reset_abort arms it, a Ctrl+C stops at
+    once, as in the planning of the other scripts. No lock in the handler: it
+    runs in the main thread, which may hold _abort_lock. Only in the main
+    thread (where handlers live); elsewhere the old behaviour stays."""
+    import signal
+
+    def on_ctrl_c(signum, frame):
+        if g._ctrl_c_seen or not g._ctrl_c_armed:
+            raise KeyboardInterrupt
+        g._ctrl_c_seen = True
+        if g._abort_reason is None:
+            g._abort_reason = _CTRL_C_REASON
+        g.logger.error("Interrupted (Ctrl+C): no other file starts and no source is deleted; "
+                       "the files in progress finish, then the summary. Ctrl+C again stops "
+                       "at once.")
+    on_ctrl_c._jxlphoto_script = g._g     # _ctrl_c_handler_active
+
+    # A run starts with no press: a flag left by an earlier run in the same
+    # process (a test, a serve job) must not stop this one.
+    g._ctrl_c_seen = False
+    g._ctrl_c_armed = bool(armed)
+    installed, previous = False, None
+    try:
+        previous = signal.signal(signal.SIGINT, on_ctrl_c)
+        installed = True
+    except (ValueError, OSError):
+        pass
+    try:
+        yield
+    finally:
+        if installed:
+            try:
+                signal.signal(signal.SIGINT, previous)
+            except (ValueError, OSError):
+                pass
+
+
+def _ctrl_c_handler_active(g) -> bool:
+    """Is this script's Ctrl+C handler (_ctrl_c_finishes_the_run) the one in
+    place now? False off the main thread or when the signal cannot be read."""
+    import signal
+    try:
+        handler = signal.getsignal(signal.SIGINT)
+    except (ValueError, OSError, AttributeError):
+        return False
+    return getattr(handler, "_jxlphoto_script", None) is g._g
+
+
+def _interrupted(g) -> bool:
+    """Ctrl+C was pressed during this run (#702): the delete gates keep every
+    source they have not deleted yet."""
+    return bool(g._ctrl_c_seen)
+
+
+def _end_if_interrupted(g) -> None:
+    """After the summary of a run Ctrl+C stopped (#702): end it as the
+    interrupt it was — the script's __main__ exits 130; a --serve process
+    ends with 130 without answering that job (_serve_job re-raises it), as it
+    did before, when the interrupt came after the job's whole queue."""
+    if g._ctrl_c_seen:
+        raise KeyboardInterrupt
+
+
 def _signal_abort(g, reason):
     """Latch the FIRST reason and announce it once.
 
@@ -5061,8 +5372,20 @@ def _reset_abort(g):
     importing this module) inherited the first one's totals — so the summary
     reported deletions that this run never made.
     """
+    # A Ctrl+C already pressed while this script's handler is in place stays
+    # (#702, review M1): the transcoder enters the handler before its
+    # planning and resets after it — a press during the scan or at the
+    # confirmation used to be forgotten there, and the run converted (and
+    # deleted) everything. Anywhere else (a run's start, a serve job, a test
+    # calling a command directly) the reset clears it.
+    active = _ctrl_c_handler_active(g)
+    keep = bool(g._ctrl_c_seen) and active
     with g._abort_lock:
-        g._abort_reason = None
+        g._abort_reason = _CTRL_C_REASON if keep else None
+    if not keep:
+        g._ctrl_c_seen = False
+    if active:
+        g._ctrl_c_armed = True          # the run's work starts here
     for _k in g._delete_stats:
         g._delete_stats[_k] = 0
 
@@ -5895,6 +6218,10 @@ def _serve(g, main, argv) -> int:
     instead of main() when its command line has --serve. Returns the
     process's exit code: 0 after the end line, 2 for a refused command line,
     a lost channel or a job that raised, 130 for Ctrl+C."""
+    # A refusal below may name a folder in Japanese: stderr in UTF-8, as a
+    # single call's argparse error has it (on a pipe it came out as \uXXXX,
+    # the review of rc4). The answers go to their own ASCII channel.
+    _utf8_console()
     if list(argv).count("--serve") != 1:
         sys.stderr.write("--serve: give it once\n")
         return 2

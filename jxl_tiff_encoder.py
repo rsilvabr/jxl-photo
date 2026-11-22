@@ -29,7 +29,7 @@ from PIL import Image
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.31.0-rc4"
+TOOLKIT_VERSION = "2.31.0-rc5"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 
@@ -108,6 +108,7 @@ def _warn_if_libjxl_too_old(exe: str) -> None:
 
 
 _is_relative_to = _common._is_relative_to
+ERROR_SUFFIX = _common.ERROR_SUFFIX
 
 
 _replace_suffix_token = _common._replace_suffix_token
@@ -127,6 +128,8 @@ _replace_suffix_token = _common._replace_suffix_token
 _MIN_FREE_BYTES = 64 * 1024 * 1024
 _abort_lock = threading.Lock()
 _abort_reason = None
+_ctrl_c_seen = False        # Ctrl+C pressed during this run (#702)
+_ctrl_c_armed = True        # False while a planning still stops at once
 
 
 # (size, mtime_ns) of every source as this run was about to READ it, keyed by
@@ -198,6 +201,9 @@ def _aborted(*a, **k): return _common._aborted(_G, *a, **k)
 
 
 def _signal_abort(*a, **k): return _common._signal_abort(_G, *a, **k)
+def _ctrl_c_finishes_the_run(*a, **k): return _common._ctrl_c_finishes_the_run(_G, *a, **k)
+def _end_if_interrupted(*a, **k): return _common._end_if_interrupted(_G, *a, **k)
+def _interrupted(*a, **k): return _common._interrupted(_G, *a, **k)
 
 
 def _abort_if_disk_full(*a, **k): return _common._abort_if_disk_full(_G, *a, **k)
@@ -318,6 +324,7 @@ _cjxl_cmd = None
 def _get_cjxl_cmd(*a, **k): return _common._get_cjxl_cmd(_G, *a, **k)
 
 _tool_version = _common._tool_version
+def _warn_if_version_unknown(*a, **k): return _common._warn_if_version_unknown(_G, *a, **k)
 
 _tool_at_least = _common._tool_at_least
 _keep_alpha_flags = _common._keep_alpha_flags
@@ -360,6 +367,12 @@ _cjxl_whole_image = _common._cjxl_whole_image
 
 
 _cjxl_bytes_per_pixel = _common._cjxl_bytes_per_pixel
+_cjxl_threads_for = _common._cjxl_threads_for
+# --num_threads of the run's encodes: set by process_group for the length of
+# its pool (_cjxl_threads_for), None otherwise (state, not a setting).
+_CJXL_THREADS = None
+def _cjxl_threads_flag(*a, **k): return _common._cjxl_threads_flag(_G, *a, **k)
+def _cjxl_threads_while(*a, **k): return _common._cjxl_threads_while(_G, *a, **k)
 
 
 _windows_memory_status = _common._windows_memory_status
@@ -2077,13 +2090,22 @@ _pam_array = _common._pam_array
 
 
 def _make_explorer_thumbnail(*a, **k): return _common._make_explorer_thumbnail(_G, *a, **k)
+def _thumbnail_from_array(*a, **k): return _common._thumbnail_from_array(_G, *a, **k)
 
 
 def _add_explorer_thumbnail(*a, **k): return _common._add_explorer_thumbnail(_G, *a, **k)
 
 
-def _cautious_test_icc_depth(icc_bytes: bytes, depth: int, distance=None) -> bool:
-    """Run one round-trip test at the given bit depth. Returns True if safe.
+def _cautious_test_icc_depth(icc_bytes: bytes, depth: int, distance=None):
+    """Run one round-trip test at the given bit depth: True if safe, False if
+    unsafe, None when the test could not RUN (cjxl killed or timed out, djxl
+    failing, anything raising). "Could not tell" is not "unsafe" (#693): a
+    probe that failed once, for a passing reason (memory, an antivirus, the
+    limit under load), used to be cached as "skip" for good, and every lossy
+    master of that profile came out without its ICC in the codestream. A cjxl
+    that REFUSES the profile (its own error exit, twice) is a verdict, False,
+    as before (review M2: read as "cannot tell", such a profile failed the
+    real encode on every run).
 
     distance: the distance THIS file is encoded at (None = CJXL_DISTANCE). A
     film scan under SCAN_DISTANCE is tested at its own distance (#573)."""
@@ -2117,17 +2139,26 @@ def _cautious_test_icc_depth(icc_bytes: bytes, depth: int, distance=None) -> boo
         if CJXL_MODULAR and distance > 0:
             cmd.append("--modular=1")
 
-        r = _run_captured(cmd, 120)
+        r = _run_captured(cmd, CJXL_TIMEOUT)
+        if r.returncode != 0 and 0 < r.returncode < 256:
+            # cjxl's own error exit (a killed or crashed process ends with a
+            # Windows status or a signal instead): once more, so a passing
+            # failure does not become the profile's verdict.
+            r = _run_captured(cmd, CJXL_TIMEOUT)
+            if r.returncode != 0 and 0 < r.returncode < 256:
+                logger.debug(f"Cautious ICC test: cjxl refuses this profile at {depth}-bit: "
+                             f"{_stderr_tail(r.stderr)}")
+                return False
         if r.returncode != 0:
             logger.debug(f"Cautious ICC test encode failed at {depth}-bit: {_stderr_tail(r.stderr)}")
-            return False
+            return None
 
         out_png = tmp / "out.png"
         icc_args, out_icc, orig_icc = _djxl_icc_args(tmp)
-        r = _run_captured(["djxl", str(jxl_path), str(out_png)] + icc_args, 120)
+        r = _run_captured(["djxl", str(jxl_path), str(out_png)] + icc_args, CJXL_TIMEOUT)
         if r.returncode != 0 or not out_png.exists():
             logger.debug(f"Cautious ICC test decode failed at {depth}-bit: {_stderr_tail(r.stderr)}")
-            return False
+            return None
 
         if distance > 0 and _decoded_in_original_space(out_icc, orig_icc) is False:
             # A table-curve profile (ROMM toe, eciRGB v2, scanner LUTs) has no
@@ -2150,7 +2181,7 @@ def _cautious_test_icc_depth(icc_bytes: bytes, depth: int, distance=None) -> boo
         return safe
     except Exception as e:
         logger.debug(f"Cautious ICC test failed at {depth}-bit: {e}")
-        return False
+        return None
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -2194,11 +2225,23 @@ def _cautious_should_embed_icc(icc_bytes: bytes, tiff_path: Path, distance=None)
         logger.warning("cautious ICC strategy requires cjxl and djxl; falling back to heuristic")
         return _should_embed_icc_heuristic(icc_bytes)
 
-    safe = True
+    safe, untold = True, False
     for depth in (8, 16):
-        if not _cautious_test_icc_depth(icc_bytes, depth, distance=distance):
+        verdict = _cautious_test_icc_depth(icc_bytes, depth, distance=distance)
+        if verdict is False:
             safe = False
             break
+        if verdict is None:
+            untold = True
+    if safe and untold:
+        # A test that could not run is not a verdict (#693): nothing is cached
+        # — the next file tests again — and this file goes the way that always
+        # encodes (review M2): without the ICC in its codestream, the profile
+        # in XMP, where the decoder takes it from.
+        logger.warning(f"Cautious ICC: the round-trip test could not run for "
+                       f"{tiff_path.name} (cjxl or djxl did not finish); this file "
+                       f"keeps its profile in XMP only, and nothing is cached")
+        return False
 
     with _icc_test_lock:
         # Re-read inside the lock: another thread may have finished the same
@@ -2729,7 +2772,7 @@ def read_existing_creator_tool(xmp_path):
         logger.debug(f"Failed to read CreatorTool: {e}")
     return ""
 
-def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_bytes, xmp_original, original_depth=16, strip_metadata=False, src_path_id=None, src_content_id=None, xmp_preloaded=False, distance=None):
+def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_bytes, xmp_original, original_depth=16, strip_metadata=False, src_path_id=None, src_content_id=None, xmp_preloaded=False, distance=None, page_idx=0):
     """Build exiftool arguments for metadata injection with proper XMP preservation.
 
     Strategy:
@@ -2787,11 +2830,20 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
     # (An earlier version stripped it to "prevent double-rotation", which
     # could not happen here and silently de-rotated scans/camera TIFFs.)
     args_lines.append("-tagsfromfile")
-    args_lines.append(_exiftool_source(tiff_path, tmp_dir))      # '%' names: #550
+    args_lines.append(_exiftool_source(tiff_path, tmp_dir)       # '%' names: #550
+                      if not page_idx else _exiftool_source(tiff_path, tmp_dir, ifd=page_idx))
     # The VALUES, not their printed form (#684): `-exif:all` copied
     # MaxApertureValue f/2.83 as f/2.8 and a FocalLength of 6.62 mm as 6.6 mm.
     # (A TIFF never gives -b -Exif a block, so this copy is the master's EXIF.)
     args_lines.append("-exif:all#")
+    # #696: IFD0 last, so the FIRST page's tags win. `-exif:all` reads every
+    # IFD of a multi-page TIFF, and the later pages' values overwrote page
+    # 0's (Artist, PageNumber; a camera TIFF's thumbnail page, SilverFast's
+    # CompressedBitsPerPixel) in the master and in the TIFF decoded from it.
+    # A later page takes ITS IFD (review N1: `-ifd0:all#` gave page N page 0's
+    # values; `-ifdN:all#` writes to IFDN of the master, so it is redirected).
+    args_lines.append("-ifd0:all#" if not page_idx
+                      else f"-IFD0:all<IFD{int(page_idx)}:all#")
     if not xmp_preloaded:
         args_lines.append("-xmp:all")
 
@@ -4126,6 +4178,29 @@ def _decode_jxl_for_verify(*a, **k): return _common._decode_jxl_for_verify(_G, *
 def _compare_stats(*a, **k): return _common._compare_stats(_G, *a, **k)
 
 
+# The details of a round-trip check that could not reach a verdict (#701,
+# review S2): a decode that failed or was killed (a Ctrl+C reaches djxl too),
+# a check that raised, a page the TIFF no longer has. The gate keeps the
+# source for them, as for a failure, but never renames the JXL: only a real
+# mismatch says it is a bad encode.
+_NO_VERDICT = ("could not verify", "the check itself failed", "source page ")
+
+
+def _stat_identity(path):
+    """(size, mtime_ns) of the file at `path` now, or None when it cannot be
+    read (gone)."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_size, st.st_mtime_ns)
+
+
+def _is_verdict(detail) -> bool:
+    """Did the round-trip check that gave `detail` compare the pixels?"""
+    return not str(detail).startswith(_NO_VERDICT)
+
+
 def _verify_roundtrip_page(tiff_path: Path, page_idx: int, jxl_path: Path,
                            distance: float):
     """Does `jxl_path` really hold page `page_idx` of `tiff_path`?
@@ -4326,6 +4401,10 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             #    Per-page: the page's own ICC tag (34675) wins; if absent, page N>0
             #    inherits IFD0's ICC for color interpretation, but we record that
             #    inheritance so the decoder can reproduce the original tag structure.
+            # #699 (review S8): the TIFF as THIS page reads it — the planning
+            # may have seen an older version, and a re-export while the file
+            # waited in the queue is the new version, read whole from here on.
+            _identity_at_read = _stat_identity(tiff_path)
             # 3. Extract original XMP for preservation analysis (NEW)
             xmp_original = extract_xmp_original(tiff_path, tmp_dir)
 
@@ -4528,10 +4607,20 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             invisible_flag = (["--keep_invisible=1"] + _keep_alpha_flags(_get_cjxl_cmd() or "cjxl")
                               if lossy and _channels in (2, 4) else [])
 
+            # V2: the Explorer thumbnail from this page, already in memory, in
+            # its own profile (the real one, even when the PNG goes out without
+            # it) — before cjxl, so the finished master is not decoded again
+            # for 768 px. None: made from the file below, as before.
+            _page_thumb = None
+            if not STRIP_METADATA and _explorer_thumbnail_wanted(_dist == 0):
+                _page_thumb = _thumbnail_from_array(
+                    img, icc_bytes, tmp_dir, tiff_path.name,
+                    extra_is_alpha=not (_channels in (2, 4) and 0 in _extrasamples))
+
             if USE_RAM_FOR_PNG:
                 png_input = make_png_bytes(img, png_icc_bytes)
                 del img
-                cjxl_cmd = [_get_cjxl_cmd() or "cjxl", "-", str(write_path), "-d", str(_dist), "--effort", str(CJXL_EFFORT)] + container_flag + modular_flag + invisible_flag + _cjxl_buffering_flag()
+                cjxl_cmd = [_get_cjxl_cmd() or "cjxl", "-", str(write_path), "-d", str(_dist), "--effort", str(CJXL_EFFORT)] + container_flag + modular_flag + invisible_flag + _cjxl_buffering_flag() + _cjxl_threads_flag()
                 output_dirty = True
                 r = _run_captured(cjxl_cmd, CJXL_TIMEOUT, input=png_input)
                 del png_input
@@ -4541,7 +4630,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 del img
                 png_path.write_bytes(png_bytes)
                 del png_bytes
-                cjxl_cmd = [_get_cjxl_cmd() or "cjxl", str(png_path), str(write_path), "-d", str(_dist), "--effort", str(CJXL_EFFORT)] + container_flag + modular_flag + invisible_flag + _cjxl_buffering_flag()
+                cjxl_cmd = [_get_cjxl_cmd() or "cjxl", str(png_path), str(write_path), "-d", str(_dist), "--effort", str(CJXL_EFFORT)] + container_flag + modular_flag + invisible_flag + _cjxl_buffering_flag() + _cjxl_threads_flag()
                 output_dirty = True
                 r = _run_captured(cjxl_cmd, CJXL_TIMEOUT)
 
@@ -4568,7 +4657,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 original_depth=original_depth,
                 strip_metadata=STRIP_METADATA,
                 src_path_id=_src_path_id, src_content_id=_src_content_id,
-                xmp_preloaded=_xmp_preloaded, distance=_dist
+                xmp_preloaded=_xmp_preloaded, distance=_dist, page_idx=page_idx
             )
             writes.append((Path(inject_args), "exiftool failed: ", 300))
 
@@ -4676,7 +4765,8 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                     _run_exiftool_writes(_stub_writes, EXIFTOOL_TIMEOUT)
                     if not STRIP_METADATA and _explorer_thumbnail_wanted(_dist == 0):
                         _thumb_jpeg, _thumb_fp = _thumbnail_for_assembly(
-                            write_path, tmp_dir, _assembled_size(write_path, _stub))
+                            write_path, tmp_dir, _assembled_size(write_path, _stub),
+                            marker_source=_stub, jpeg=_page_thumb)
                     _assemble_from_stub(write_path, _stub, _thumb_jpeg, _thumb_fp)
                     _assembled = True
                 except Exception as e:
@@ -4703,7 +4793,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 # file and put in its own box. Only the files that get one pay for
                 # it (lossless by default); a failure only warns.
                 if not STRIP_METADATA and _explorer_thumbnail_wanted(_dist == 0):
-                    _add_explorer_thumbnail(write_path, tmp_dir)
+                    _add_explorer_thumbnail(write_path, tmp_dir, jpeg=_page_thumb)
 
             # Validate EVERY successful output, not just mode-8 delete gates:
             # cjxl returning 0 does not guarantee a well-formed file (disk
@@ -4730,6 +4820,23 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                                        f"{page_idx}: {_page_detail}")
                 logger.debug(f"  >Round-trip verified page {page_idx} ({_page_detail}) "
                              f"| {tiff_path.name}")
+
+            # #699: the TIFF was re-exported (or rewritten) while this page
+            # was encoded. The JXL holds the OLD pixels and, finished after
+            # the new file's date, every --sync after it read it as up to date.
+            # It never takes the final name: an error, and the next run
+            # archives the new version (the delete gate asked this already).
+            _identity_now = _stat_identity(tiff_path)
+            if (_identity_at_read is not None and _identity_now is not None
+                    and _identity_now != _identity_at_read):
+                raise RuntimeError("the TIFF changed while it was being encoded "
+                                   "(re-exported or rewritten?): this JXL would hold "
+                                   "the old version — run again to archive the new one")
+            if _identity_at_read is not None and _identity_now is None:
+                # Gone meanwhile (moved, deleted by another program): this JXL
+                # may be its only copy now — kept, never thrown away (review N5).
+                logger.warning(f"  >The TIFF disappeared while its page was encoded; "
+                               f"its JXL is kept | {tiff_path.name}")
 
             if _promote_local:
                 # Atomic same-folder swap (see the _promote_local note above):
@@ -5573,7 +5680,9 @@ def process_group(group_items: list, workers: int, mode: int = 0):
                 for t in tasks)))
     for _t in tasks:
         _record_source_identity(_t[0])      # X2: before anything reads it
-    with ThreadPoolExecutor(max_workers=workers) as ex:
+    # V1: as many cjxl at once as workers, each with its share of the threads.
+    with _cjxl_threads_while(min(workers, len(tasks))), \
+            ThreadPoolExecutor(max_workers=workers) as ex:
         futures = {ex.submit(convert_one, t, w, f, p, th, sft, spl, g, gt):
                    (t, w, f, p, th, sft, spl, g, gt)
                    for t, w, f, p, th, sft, spl, g, gt in tasks}
@@ -5628,7 +5737,13 @@ def process_group(group_items: list, workers: int, mode: int = 0):
     # runs in every mode before the first byte is written — two sources mapping
     # to one output abort the run instead of costing two originals.
     if DELETE_SOURCE:
-        _delete_sources(results, tasks, moved_finals, use_staging, workers=workers)
+        _verify_errors = _delete_sources(results, tasks, moved_finals, use_staging,
+                                         workers=workers)
+        # #701: a page whose JXL failed its round-trip check in the gate is an
+        # error of the run (it was renamed *_jxlphoto-error, the source kept).
+        if _verify_errors:
+            results = [(r[0], "error", _verify_errors[r[0]], None)
+                       if r[0] in _verify_errors else r for r in results]
 
     return results
 
@@ -5670,12 +5785,14 @@ def _delete_sources(results, tasks, moved_finals, use_staging, workers=1):
             for tk, page, final in todo:
                 checks[(tk, page, final)] = check_pool.submit(
                     _verify_roundtrip_page, Path(tk), page, Path(final), _distance_for(tk))
+    verify_errors = {}
     try:
         _delete_checked_sources(results_by_tiff, tasks, moved_finals, use_staging, checks,
-                                skip_proof=skip_proof)
+                                skip_proof=skip_proof, verify_errors=verify_errors)
     finally:
         if check_pool is not None:
             check_pool.shutdown(wait=True, cancel_futures=True)
+    return verify_errors
 
 
 def _skipped_archive_proof_of(results_by_tiff) -> dict:
@@ -5716,11 +5833,15 @@ def _check_worth_starting(tiff_key, tiff_results, skip_proof) -> bool:
 
 
 def _delete_checked_sources(results_by_tiff, tasks, moved_finals, use_staging, checks,
-                            skip_proof=None):
+                            skip_proof=None, verify_errors=None):
     """The gate's loop (_delete_sources): `checks` holds the pixel checks
     already started, by (source, page, output); `skip_proof` the provenance
     of the skipped outputs (_skipped_archive_proof_of, read here when not
-    given)."""
+    given). `verify_errors` (a dict, filled here) gets each page THIS run
+    wrote whose round-trip check failed: (source, page) -> the reason
+    (#701)."""
+    if verify_errors is None:
+        verify_errors = {}
     deleted = 0
     deleted_skipped = 0
 
@@ -5736,6 +5857,12 @@ def _delete_checked_sources(results_by_tiff, tasks, moved_finals, use_staging, c
                    else _skipped_archive_proof_of(results_by_tiff))
 
     for tiff_key, tiff_results in results_by_tiff.items():
+        if _interrupted():
+            # #702 (review S2): no source is deleted after a Ctrl+C — the run
+            # was asked to stop, so every source it has not deleted yet stays.
+            _delete_stats["kept"] += 1
+            logger.warning(f"  KEEP source (interrupted with Ctrl+C) | {Path(tiff_key).name}")
+            continue
         # Every page must have freshly succeeded — or, with DELETE_SKIPPED,
         # have been skipped because its output was already there. A skip
         # carries NO proof of its own (see the DELETE_SKIPPED note): it is
@@ -5852,7 +5979,7 @@ def _delete_checked_sources(results_by_tiff, tasks, moved_finals, use_staging, c
         # back. Failure is a hard KEEP: the whole point is that the source
         # is about to stop existing.
         if VERIFY_ROUNDTRIP:
-            verify_failed = None
+            failed_pages = []
             for r in tiff_results:
                 _page = r[0][1]
                 _check = checks.get((tiff_key, _page, r[2]))
@@ -5869,11 +5996,49 @@ def _delete_checked_sources(results_by_tiff, tasks, moved_finals, use_staging, c
                     # checks running at once (Fable's review, S3).
                     ok_v, detail = False, f"the check itself failed ({type(e).__name__}: {e})"
                 if not ok_v:
-                    verify_failed = (_page, detail)
-                    break
+                    # Every page is read (their checks are already running):
+                    # #701 renames each bad page, not the first only (the
+                    # second review of rc5, S3).
+                    failed_pages.append((r, _page, detail))
+                    continue
                 logger.debug(f"  verify page{_page} OK ({detail}) | {Path(tiff_key).name}")
+            verify_failed = failed_pages[0] if failed_pages else None
+            if verify_failed is not None and _source_changed_since_read(Path(tiff_key)):
+                # The TIFF changed after this run read it: the check compared
+                # the JXL with a version it was never made from. Not the JXL's
+                # fault (#701 must not rename it); the source is kept for the
+                # reason the check below gives.
+                _delete_stats["kept"] += 1
+                logger.warning(f"  KEEP source (source changed since this run read it "
+                               f"(re-exported or rewritten during the run?) — its current "
+                               f"version was never archived) | {Path(tiff_key).name}")
+                continue
+            _bad_pages = [f for f in failed_pages
+                          if f[0][1] != "skipped" and _is_verdict(f[2])]
+            if _bad_pages:
+                # #701 (the owner's call, 2026-11-22): a JXL THIS run wrote that
+                # fails its pixel check is an ERROR of the run, never a master
+                # under its final name — the next --sync took it as up to date.
+                # It is kept for a look as <name>_jxlphoto-error.jxl; the
+                # source stays, and the next run encodes the page again.
+                _delete_stats["kept"] += 1
+                for _r, _page, detail in _bad_pages:
+                    _bad = Path(_r[2])
+                    _renamed = _bad.with_name(_bad.stem + ERROR_SUFFIX + _bad.suffix)
+                    try:
+                        os.replace(_bad, _renamed)
+                        _where = f"its JXL was renamed {_renamed.name}"
+                    except OSError as e:
+                        _where = (f"its JXL could not be renamed ({e}): the file under "
+                                  f"its final name is the one that failed")
+                    _why = (f"round-trip verification FAILED on page {_page}: {detail} — "
+                            f"the source is kept, {_where}, and the next run encodes it "
+                            f"again")
+                    logger.error(f"  ERROR | {Path(tiff_key).name} | {_why}")
+                    verify_errors[_r[0]] = _why
+                continue
             if verify_failed is not None:
-                _page, detail = verify_failed
+                _r, _page, detail = verify_failed
                 _delete_stats["kept"] += 1
                 # An output this run did NOT write is the likeliest thing to
                 # fail here, and for a reason that has nothing to do with a
@@ -5901,6 +6066,12 @@ def _delete_checked_sources(results_by_tiff, tasks, moved_finals, use_staging, c
             _delete_stats["kept"] += 1
             logger.warning(f"  KEEP source (output could not be flushed to disk) | "
                            f"{src_tiff.name}")
+            continue
+        if _interrupted():
+            # A Ctrl+C during this source's own checks (#702, the second
+            # review of rc5, N1): read again right before the delete.
+            _delete_stats["kept"] += 1
+            logger.warning(f"  KEEP source (interrupted with Ctrl+C) | {src_tiff.name}")
             continue
         try:
             src_tiff.unlink()
@@ -6603,6 +6774,7 @@ def _configure_run(parser, args):
         sys.exit(1)
     if not args.dry_run:
         _warn_if_libjxl_too_old(_get_cjxl_cmd() or "cjxl")
+        _warn_if_version_unknown(_get_cjxl_cmd() or "cjxl")     # #694
 
     if args.embed_thumbnail:
         logger.warning("--embed-thumbnail is ignored since v2.12.0; "
@@ -7431,7 +7603,8 @@ def main():
     # a big library ran at a fraction of the requested concurrency. The staging
     # move is still per-folder and still in bulk; it now fires when that folder's
     # last file lands (see process_group).
-    results = process_group(all_items, args.workers, args.mode)
+    with _ctrl_c_finishes_the_run():        # #702
+        results = process_group(all_items, args.workers, args.mode)
 
     # What this run wrote, for the film-scan and thumbnail lines of the summary.
     _written = [r for r in results if r[1] in ("ok", "overwrite")]
@@ -7594,6 +7767,8 @@ def main():
     # Exit 2 = aborted, and it outranks exit 1: a run that gave up early is not
     # the same event as a run that finished with some bad files, and automation
     # has to be able to tell them apart (the aborted one is worth retrying).
+    # A Ctrl+C ends as the interrupt it was, after this summary (#702).
+    _end_if_interrupted()
     if _aborted():
         sys.exit(2)
 
@@ -7604,4 +7779,7 @@ def main():
 if __name__ == "__main__":
     if "--serve" in sys.argv[1:]:
         sys.exit(_common._serve(_G, main, sys.argv[1:]))
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:       # after the summary of an interrupted run (#702)
+        sys.exit(130)

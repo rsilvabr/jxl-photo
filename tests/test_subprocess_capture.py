@@ -158,9 +158,13 @@ def test_a_real_run_starts_no_reader_thread(tmp_path, monkeypatch):
     img16[..., 2] = 30000
     tifffile.imwrite(enc_dir / "a.tif", img16, photometric="rgb")
     thumbs = []
-    real_thumb = enc._make_explorer_thumbnail
-    monkeypatch.setattr(enc, "_make_explorer_thumbnail",
-                        lambda *a, **k: thumbs.append(real_thumb(*a, **k)) or thumbs[-1])
+    # V2: the encoder makes it from the page in memory (magick reading raw
+    # samples on stdin), the finished file decoded only when that fails.
+    for _name in ("_make_explorer_thumbnail", "_thumbnail_from_array"):
+        def _spy(*a, _real=getattr(enc, _name), **k):
+            thumbs.append(_real(*a, **k))
+            return thumbs[-1]
+        monkeypatch.setattr(enc, _name, _spy)
     run_main(enc, [enc_dir, "--mode", "1", "--distance", "1", "--effort", "1",
                    "--workers", "2", "--no-preflight", "--ram",
                    "--explorer-thumbnail", "on"])

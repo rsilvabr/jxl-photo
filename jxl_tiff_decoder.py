@@ -38,7 +38,7 @@ import tifffile
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.31.0-rc4"
+TOOLKIT_VERSION = "2.31.0-rc5"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 
@@ -119,6 +119,8 @@ _replace_suffix_token = _common._replace_suffix_token
 _MIN_FREE_BYTES = 64 * 1024 * 1024
 _abort_lock = threading.Lock()
 _abort_reason = None
+_ctrl_c_seen = False        # Ctrl+C pressed during this run (#702)
+_ctrl_c_armed = True        # False while a planning still stops at once
 
 
 # (size, mtime_ns) of every source as this run was about to READ it, keyed by
@@ -180,6 +182,9 @@ def _aborted(*a, **k): return _common._aborted(_G, *a, **k)
 
 
 def _signal_abort(*a, **k): return _common._signal_abort(_G, *a, **k)
+def _ctrl_c_finishes_the_run(*a, **k): return _common._ctrl_c_finishes_the_run(_G, *a, **k)
+def _end_if_interrupted(*a, **k): return _common._end_if_interrupted(_G, *a, **k)
+def _interrupted(*a, **k): return _common._interrupted(_G, *a, **k)
 
 
 def _abort_if_disk_full(*a, **k): return _common._abort_if_disk_full(_G, *a, **k)
@@ -323,7 +328,8 @@ _EXIFTOOL_POOL = _common._ExiftoolPool()
 # facts about the tools a serve process keeps on purpose; this script's
 # options a serve process refuses (none beyond the common ones).
 _SERVE_LOG = None
-_SERVE_FILE_CACHES = ("_content_id_cache", "_JXLINFO_CACHE")
+_SERVE_FILE_CACHES = ("_content_id_cache", "_JXLINFO_CACHE",
+                      "_JXLINFO_NOTES")     # its notes once per JOB, as a call (#711)
 _SERVE_TOOL_FACTS = ("_EXIFTOOL_BATCH",)
 _SERVE_REFUSED = ()
 
@@ -514,8 +520,8 @@ def _verify_tiff_integrity(tiff_path: Path) -> bool:
             # gate — asarray() on the last page alone never touched it. Each
             # asarray() decodes a WHOLE page (measure ~187 MB and a full decode
             # for a 93 MP scan page); the extra cost is accepted on purpose —
-            # the check runs once per output, serially, after the worker pool
-            # is done.
+            # the check runs once per output, inside the worker that wrote it
+            # (and again in the delete gate before an irreversible delete).
             for _page in tif.pages:
                 _ = _page.asarray().flat[-1]
 
@@ -2096,7 +2102,9 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir,
             #    the next (stop_at_failure=False), as when each was a call of
             #    its own.
             cmds = []
+            _restored = _restored_tag_names(jxl_path, tiff_path)           # #698
             write = (["-overwrite_original", "-tagsfromfile", _src, "-exif:all#"]
+                     + _restored_tag_exclusions(_restored)
                      + [a for a in _orient if not a.startswith("-XMP")])
             i_edit = None
             if block is not None:
@@ -2110,6 +2118,11 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir,
             write.append(str(tiff_path))
             i_write = len(cmds)
             cmds.append(write)
+            _exif_back = _restored_tag_exif_copy(_restored, _src, tiff_path)
+            i_exif_back = None
+            if _exif_back is not None:
+                i_exif_back = len(cmds)
+                cmds.append(_exif_back)
             if direct_block:
                 # A command that writes the block ignores the XMP edits it
                 # also makes: they follow in a command of their own.
@@ -2127,6 +2140,10 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir,
             res2 = _exiftool_commands(cmds, EXIFTOOL_TIMEOUT, stop_at_failure=False)
             r_write = res2[i_write]
             _note_minor_metadata(r_write, tiff_path)
+            if i_exif_back is not None and res2[i_exif_back].returncode != 0:
+                logger.warning(f"  >EXIF tags sharing a name with the restored private "
+                               f"tags were not copied ({_restored}) | {tiff_path.name} | "
+                               f"{_stderr_tail(res2[i_exif_back].stderr)}")
             _said = f"{r_write.stderr or ''}\n{r_write.stdout or ''}"
             if r_write.returncode != 0:
                 copied = False
@@ -2248,6 +2265,10 @@ def cleanup_xmp_icc(tiff_path):
 
 # Rows converted to 8 bits at a time for the preview (#570).
 _PREVIEW_BLOCK_ROWS = 256
+# The preview's 16 -> 8 bits as a table of every 16-bit value: the byte
+# np.rint(v / 257) gives for each, without the float division over the page
+# (0.43 -> 0.24 s per 45 MP page, Fable's sweep V3, 2026-11-22).
+_U16_TO_U8 = np.rint(np.arange(65536) / 257).astype(np.uint8)
 
 
 def _jpeg_preview_array(img_data, icc_data):
@@ -2308,7 +2329,7 @@ def _jpeg_preview_array(img_data, icc_data):
         img_8bit = np.empty(img_data.shape, dtype=np.uint8)
         if img_data.dtype == np.uint16:
             def _to8(block):
-                return np.rint(block / 257).astype(np.uint8)
+                return _U16_TO_U8[block]
         else:
             mx = img_data.max()
             # Handle NaN, Inf, or zero max values safely
@@ -2854,6 +2875,30 @@ def _not_ours_why(tiff_path: Path) -> str:
             "--overwrite to replace it anyway.")
 
 
+def _fewer_pages_than_group(tiff_path: Path, page_entries) -> bool:
+    """Does the existing TIFF hold fewer full pages than the group's JXLs
+    (#703)? A split decoded while a page was missing writes a valid, shorter
+    TIFF; when the page comes back with its old date, the TIFF is still the
+    newest file of the group, and the sync called it up to date for good.
+    Full pages only (NewSubfileType bit 0 clear): the JPEG preview and the
+    thumbnail pages are reduced ones. Read only for a group of more than one
+    full page (a few KB of IFDs). A TIFF that cannot be read is not up to
+    date either."""
+    # A thumbnail entry is written with SubfileType 1 whatever was recorded
+    # (a SubIFD thumbnail, an archive without the marker): counted by its
+    # flag too, or that TIFF looked short on every sync (review N2).
+    want = sum(1 for e in page_entries if not e[2] and not (int(e[4] or 0) & 1))
+    if want <= 1:
+        return False
+    try:
+        with tifffile.TiffFile(str(tiff_path)) as tif:
+            have = sum(1 for p in tif.pages
+                       if not (int(getattr(p, "subfiletype", 0) or 0) & 1))
+    except Exception:
+        return True
+    return have < want
+
+
 def _would_skip_group(page_entries, final_path: Path) -> bool:
     """Would convert_multipage_jxl_group report SKIP for this group?
 
@@ -2871,7 +2916,8 @@ def _would_skip_group(page_entries, final_path: Path) -> bool:
     if OVERWRITE == "smart":
         try:
             newest = max(j.stat().st_mtime for j, _, _, _, _, _, _ in page_entries)
-            if newest <= final_path.stat().st_mtime:
+            if (newest <= final_path.stat().st_mtime
+                    and not _fewer_pages_than_group(final_path, page_entries)):
                 # The mtime says "up to date" — but the real run admits the
                 # skip ONLY on the marker: a marker-less TIFF is an original
                 # master, reported "refused" (never "skipped"), and a refusal
@@ -2927,7 +2973,11 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
                 # A file vanished mid-run (TOCTOU): treat as stale and attempt
                 # the conversion instead of crashing the whole batch.
                 newest_jxl_mtime, final_mtime = 1, 0
-            if newest_jxl_mtime <= final_mtime:
+            # #703: a TIFF shorter than its group is never up to date: it was
+            # decoded while a page was missing, and that page came back.
+            _short_tiff = (newest_jxl_mtime <= final_mtime
+                           and _fewer_pages_than_group(final_path, page_entries))
+            if newest_jxl_mtime <= final_mtime and not _short_tiff:
                 # The mtime says "up to date" — but only a jxlphoto-src marker
                 # says the TIFF is actually THIS decoder's output. An original
                 # master (scanner/camera/lightroom export) that was re-saved,
@@ -2982,7 +3032,10 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
                                f"with --overwrite to replace it anyway) | "
                                f"{main_jxl.name}")
                 return str(main_jxl), "refused", str(final_path)
-            logger.info(f" >SYNC: JXL newer than TIFF, reconverting | {main_jxl.name}")
+            logger.info(" >SYNC: "
+                        + ("the TIFF holds fewer pages than its JXLs"
+                           if _short_tiff else "JXL newer than TIFF")
+                        + f", reconverting | {main_jxl.name}")
 
     overwritten = already_exists
     # What was just judged safe to replace; the swap replaces only that (#560).
@@ -3197,12 +3250,21 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
                 # the tifffile-injected Software/ImageDescription tags ONLY if
                 # they still hold tifffile defaults — a legitimate value copied
                 # from the source JXL must survive.
+                _restored = _restored_tag_names(main_jxl, write_path)      # #698
+                _exif_src = _exiftool_source(main_jxl, tmp_dir)          # '%' names: #550
                 r_exif = _run_exiftool_argfile(
-                    ["-overwrite_original", "-tagsfromfile",
-                     _exiftool_source(main_jxl, tmp_dir),         # '%' names: #550
-                     "-exif:all#"] + _orientation_reset_args(main_jxl)    # #623, #684
+                    ["-overwrite_original", "-tagsfromfile", _exif_src,
+                     "-exif:all#"] + _restored_tag_exclusions(_restored)
+                    + _orientation_reset_args(main_jxl)                   # #623, #684
                     + [str(write_path)], timeout=EXIFTOOL_TIMEOUT
                 )
+                _exif_back = _restored_tag_exif_copy(_restored, _exif_src, write_path)
+                if r_exif.returncode == 0 and _exif_back is not None:
+                    _rb = _run_exiftool_argfile(_exif_back, timeout=EXIFTOOL_TIMEOUT)
+                    if _rb.returncode != 0:
+                        logger.warning(f"  >EXIF tags sharing a name with the restored "
+                                       f"private tags were not copied ({_restored}) | "
+                                       f"{write_path.name}")
                 if r_exif.returncode != 0:
                     # Same rule as copy_metadata: a failed metadata copy is a
                     # per-file ERROR, so the delete gate keeps the source that
@@ -3503,6 +3565,13 @@ def _delete_decoded_sources(results, tasks, moved_finals, use_staging):
                    if _skip_finals else {})
     for task in tasks:
         status = status_by_main.get(str(task["main_jxl"]), "error")
+        if _interrupted() and (status in ("ok", "overwrite")
+                               or (DELETE_SKIPPED and status == "skipped")):
+            # #702 (review S2): no source is deleted after a Ctrl+C.
+            _delete_stats["kept"] += (len(task["entries"])
+                                      + len(task.get("ignored_thumbs", [])))
+            logger.warning(f" KEEP (interrupted with Ctrl+C) | {task['main_jxl'].name}")
+            continue
         # A skip is admitted only with DELETE_SKIPPED, and only so the
         # checks below can judge it on the FILE — never on the timestamp
         # that produced the skip (see the DELETE_SKIPPED note).
@@ -3725,6 +3794,12 @@ def _delete_decoded_sources(results, tasks, moved_finals, use_staging):
                 f"{', '.join(p.name for p in _changed)}: source changed since this run read it (re-exported or rewritten during the run?) — its current version was never archived")
             continue
         _tag = " (already archived)" if was_skipped else ""
+        if _interrupted():
+            # Read again right before the delete (#702, review N1).
+            _delete_stats["kept"] += (len(task["entries"])
+                                      + len(task.get("ignored_thumbs", [])))
+            logger.warning(f" KEEP (interrupted with Ctrl+C) | {task['main_jxl'].name}")
+            continue
         for jxl_path, _, _, _, _, _, _ in task["entries"]:
             try:
                 jxl_path.unlink()
@@ -4087,6 +4162,51 @@ def _tifftag_extratags(jxl_path) -> list:
     """tifffile `extratags` restoring the page's private tags."""
     return [(code, dtype, len(raw), raw, True)
             for code, dtype, raw in _tifftags_by_jxl.get(os.path.normcase(str(jxl_path)), ())]
+
+
+def _restored_tag_names(jxl_path, tiff_path) -> list:
+    """ExifTool's names of the private tags this page restored raw (its
+    jxlphoto-tifftag markers, written by tifffile) that it knows by a name
+    (#698): Adobe Camera Raw's 65000+ tags (65000 OwnerName, 65102
+    WhiteBalance...). One read of the TIFF's IFD0, only for a page that has
+    such markers; a failed read names nothing (as before)."""
+    codes = {code for code, _t, _r in
+             _tifftags_by_jxl.get(os.path.normcase(str(jxl_path)), ())}
+    if not codes:
+        return []
+    try:
+        r = _run_exiftool_argfile(["-s", "-D", "-IFD0:all", str(tiff_path)],
+                                  timeout=EXIFTOOL_TIMEOUT)
+    except Exception:
+        return []
+    names = []
+    for line in (r.stdout or "").splitlines():
+        parts = line.split(None, 2)          # "65000 OwnerName : abc"
+        if (len(parts) >= 2 and parts[0].isdigit() and int(parts[0]) in codes
+                and parts[1] != ":"):
+            names.append(parts[1])
+    return names
+
+
+def _restored_tag_exclusions(names) -> list:
+    """`--<name>` for the EXIF copy (#698): writing a tag of that name moved
+    or deleted the raw one tifffile had put back in IFD0. It leaves out the
+    camera's ExifIFD tag of the same name too (review S4: WhiteBalance,
+    Contrast, OwnerName, SerialNumber...) — _restored_tag_exif_copy puts
+    those back."""
+    return ["--" + n for n in names]
+
+
+def _restored_tag_exif_copy(names, source, tiff_path):
+    """The command that copies the ExifIFD tags _restored_tag_exclusions left
+    out, or None: `-wm cg` creates them and touches no existing tag, so the
+    raw IFD0 ones stay (a group-qualified exclusion kept the ExifIFD tags but
+    deleted the raw ones: ExifTool writes a name in one IFD by removing it
+    from the others). Its own command: -wm is global to a command."""
+    if not names:
+        return None
+    return (["-overwrite_original", "-wm", "cg", "-tagsfromfile", source]
+            + [f"-ExifIFD:{n}#" for n in names] + [str(tiff_path)])
 
 
 def _extrasamples_kwarg(jxl_path):
@@ -5573,8 +5693,9 @@ def main():
     # shoot, so a big library ran at a fraction of the requested concurrency.
     # The staging move is still per-folder and still in bulk; it now fires when
     # that folder's last task lands (see process_group).
-    results = process_group(tasks, args.workers,
-                            target_icc=args.target_icc)
+    with _ctrl_c_finishes_the_run():        # #702
+        results = process_group(tasks, args.workers,
+                                target_icc=args.target_icc)
 
     for result in results:
         status = result[1]
@@ -5670,6 +5791,8 @@ def main():
     # Exit 2 = aborted, and it outranks exit 1: a run that gave up early is not
     # the same event as a run that finished with some bad files, and automation
     # has to be able to tell them apart (the aborted one is worth retrying).
+    # A Ctrl+C ends as the interrupt it was, after this summary (#702).
+    _end_if_interrupted()
     if _aborted():
         sys.exit(2)
 
@@ -5680,4 +5803,7 @@ def main():
 if __name__ == "__main__":
     if "--serve" in sys.argv[1:]:
         sys.exit(_common._serve(_G, main, sys.argv[1:]))
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:       # after the summary of an interrupted run (#702)
+        sys.exit(130)

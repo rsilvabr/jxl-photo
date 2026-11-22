@@ -149,7 +149,10 @@ def test_a_distance_off_the_list_is_the_custom_default(menu, cfg):
 # ─────────────────────────────────────────────
 
 def test_custom_defaults_to_last_used_distance(menu, cfg):
-    cfg.config.last_distance = 0.03
+    # The last distance of THIS task (#704-#709): the last job of another
+    # task (copies at d=1) is not a master's distance.
+    cfg.config.last_distance = 1.0
+    cfg.config.task_memory = {'archive_tiff': {'last_distance': 0.03}}
     cfg.config.default_distance = 0.05
     workflow = _select_destination(menu, ["7", "", ""])   # accept the default
     assert workflow['distance'] == 0.03
@@ -158,7 +161,7 @@ def test_custom_defaults_to_last_used_distance(menu, cfg):
 def test_custom_default_survives_a_zero_last_distance(menu, cfg):
     """0.0 is falsy: an `or`-based default would silently convert it to 0.1
     and turn a lossless habit into a lossy run."""
-    cfg.config.last_distance = 0.0
+    cfg.config.task_memory = {'archive_tiff': {'last_distance': 0.0}}
     workflow = _select_destination(menu, ["7", "", ""])
     assert workflow['distance'] == 0.0
 

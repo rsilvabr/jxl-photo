@@ -39,7 +39,7 @@ import numpy as np
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.31.0-rc4"
+TOOLKIT_VERSION = "2.31.0-rc5"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 
@@ -132,6 +132,8 @@ def _apply_rename(name: str, rename_from: str, rename_to: str) -> str:
 _MIN_FREE_BYTES = 64 * 1024 * 1024
 _abort_lock = threading.Lock()
 _abort_reason = None
+_ctrl_c_seen = False        # Ctrl+C pressed during this run (#702)
+_ctrl_c_armed = True        # False while a planning still stops at once
 
 
 # (size, mtime_ns) of every source as this run was about to READ it, keyed by
@@ -236,6 +238,9 @@ def _aborted(*a, **k): return _common._aborted(_G, *a, **k)
 
 
 def _signal_abort(*a, **k): return _common._signal_abort(_G, *a, **k)
+def _ctrl_c_finishes_the_run(*a, **k): return _common._ctrl_c_finishes_the_run(_G, *a, **k)
+def _end_if_interrupted(*a, **k): return _common._end_if_interrupted(_G, *a, **k)
+def _interrupted(*a, **k): return _common._interrupted(_G, *a, **k)
 
 
 def _abort_if_disk_full(*a, **k): return _common._abort_if_disk_full(_G, *a, **k)
@@ -369,6 +374,7 @@ _cjxl_cmd = None
 def _get_cjxl_cmd(*a, **k): return _common._get_cjxl_cmd(_G, *a, **k)
 
 _tool_version = _common._tool_version
+def _warn_if_version_unknown(*a, **k): return _common._warn_if_version_unknown(_G, *a, **k)
 
 _tool_at_least = _common._tool_at_least
 _keep_alpha_flags = _common._keep_alpha_flags
@@ -1063,6 +1069,12 @@ _cjxl_whole_image = _common._cjxl_whole_image
 
 
 _cjxl_bytes_per_pixel = _common._cjxl_bytes_per_pixel
+_cjxl_threads_for = _common._cjxl_threads_for
+# --num_threads of the run's full-size encodes: set by main() with the cjxl
+# slots for the length of the pool (_cjxl_threads_for), None otherwise.
+_CJXL_THREADS = None
+def _cjxl_threads_flag(*a, **k): return _common._cjxl_threads_flag(_G, *a, **k)
+def _cjxl_threads_while(*a, **k): return _common._cjxl_threads_while(_G, *a, **k)
 
 
 _windows_memory_status = _common._windows_memory_status
@@ -1561,14 +1573,18 @@ def _read_encode_params_batch(paths: list) -> dict:
 
     `gen` is the reconciled generation count (max of the stored gen= token
     and the lossy chain length), read from the field that carries the record.
-    Files exiftool cannot read come back with empty strings and params None,
-    which classifies as 'unknown' — the ON_UNKNOWN policy decides.
+    A file exiftool gave no answer for — its batch failed, stalled, or
+    returned no entry for it — comes back `unread: True` (#563: "cannot
+    tell" is not "no record"): main() leaves it as it is and counts it as an
+    error (#690). Before, it read as a file with no record ('unknown', the
+    ON_UNKNOWN policy, convert by default), and a lossless film scan was
+    re-encoded lossy in place past every guard (Fable's sweep, 2026-11-22).
     'pixels' is width*height (0 = unknown), read in the same exiftool call for the worker memory cap.
     """
     info = {str(p): {"desc": "", "software": "", "history": "", "comment": "",
                      "params": None, "gen": 0,
                      "pixels": 0, "width": 0, "height": 0, "origin": None,
-                     "scan": None, "thumb": False}
+                     "scan": None, "thumb": False, "unread": True}
             for p in paths}
     index = {os.path.normcase(str(p)): str(p) for p in paths}
     # Quiet while it is fast (a warm cache); then a line per batch, at the
@@ -1579,7 +1595,7 @@ def _read_encode_params_batch(paths: list) -> dict:
     def on_no_output(chunk, r):
         logger.warning(f"Encode-tag read failed for a batch of "
                        f"{len(chunk)} file(s) (rc={r.returncode}) — "
-                       f"treating them as unknown origin")
+                       f"they are left as they are (cannot tell what they hold)")
 
     def on_data(chunk, r, data):
         for entry in data:
@@ -1649,11 +1665,12 @@ def _read_encode_params_batch(paths: list) -> dict:
                                 "thumb": (any(str(t).strip() == THUMB_FLAG
                                               for t in rel_values)
                                           or _is_camera_thumbnail_page(
-                                              rel_values, width, height))}
+                                              rel_values, width, height)),
+                                "unread": False}
 
     def on_error(chunk, e):
         logger.warning(f"Encode-tag batch failed ({e}); {len(chunk)} file(s) "
-                       f"treated as unknown origin")
+                       f"left as they are (cannot tell what they hold)")
 
     def on_done(chunk):
         pace["done"] += len(chunk)
@@ -2198,23 +2215,36 @@ def resolve_output(jxl_path: Path, mode: int, input_root: Path,
 
 JXL_EXTS = frozenset({".jxl"})
 
+# The SHIPPED names of this tool's output folders: always skipped too (a run
+# with the defaults left such folders before the settings changed).
 _RECOMPRESSOR_OUTPUT_FOLDERS = frozenset(
     {"recompressed_jxl", "jxl_recompressed", "jxl_small", "16b_jxl_small"})
 
 
+def _own_output_folder_names() -> frozenset:
+    """This tool's output folder names, lowercased: the shipped ones plus the
+    settings as this run has them — CONVERTED_JXL_FOLDER, JXL_FOLDER_NAME,
+    JXL_SUFFIX_REPLACE and EXPORT_JXL_FOLDER, which the overlay may change.
+    Only the shipped literals used to be read (with EXPORT_JXL_FOLDER): with
+    JXL_FOLDER_NAME = "JXL_web" a second run took the first run's outputs as
+    new sources (#710, "settings are never hardcoded")."""
+    return _RECOMPRESSOR_OUTPUT_FOLDERS | {
+        str(n).lower() for n in (CONVERTED_JXL_FOLDER, JXL_FOLDER_NAME,
+                                 JXL_SUFFIX_REPLACE, EXPORT_JXL_FOLDER) if n}
+
+
 def _is_own_output_path(parts_lower) -> bool:
-    """True if any directory part is one of this tool's output folder names,
-    the configured EXPORT_JXL_FOLDER (modes 6/7 — a custom name would otherwise
-    be re-processed as a source by the next run), or carries this tool's output
-    suffix: mode 4's fallback renames a folder without the token to
-    <name>_JXL_small (an exact-name set never matches those), and a recursive
-    re-run used to re-encode its own output there.
+    """True if any directory part is one of this tool's output folder names
+    (_own_output_folder_names: the shipped ones and the settings of this run —
+    a custom name would otherwise be re-processed as a source by the next
+    run), or carries this tool's output suffix: mode 4's fallback renames a
+    folder without the token to <name>_JXL_small (an exact-name set never
+    matches those), and a recursive re-run used to re-encode its own output
+    there.
     Callers pass only the parts BELOW the input root, so pointing a run AT
     such a folder to compress it again stays legitimate."""
-    own = EXPORT_JXL_FOLDER.lower()
-    return any(p in _RECOMPRESSOR_OUTPUT_FOLDERS
-               or p == own
-               or p.endswith("_" + JXL_SUFFIX_REPLACE.lower())
+    own = _own_output_folder_names()
+    return any(p in own or p.endswith("_" + JXL_SUFFIX_REPLACE.lower())
                for p in parts_lower)
 
 
@@ -2245,7 +2275,7 @@ def find_jxls_recursive(input_path: Path):
         # names below, and a user seeing only those names would not recognise
         # their folder in the message.
         logger.info(f"Ignored {skipped} JXL(s) inside recompressor output folders "
-                    f"({', '.join(sorted(_RECOMPRESSOR_OUTPUT_FOLDERS | {EXPORT_JXL_FOLDER.lower()}))}, "
+                    f"({', '.join(sorted(_own_output_folder_names()))}, "
                     f"or any folder ending in _{JXL_SUFFIX_REPLACE}) — "
                     f"those are this tool's own outputs")
     return filtered
@@ -3095,6 +3125,11 @@ def _read_origin_inputs(*a, **k): return _common._read_origin_inputs(_G, *a, **k
 
 
 _origin_for_output = _common._origin_for_output
+_extrasamples_not_alpha = _common._extrasamples_not_alpha
+def _thumbnail_from_array(*a, **k): return _common._thumbnail_from_array(_G, *a, **k)
+# V2: the Explorer thumbnail the Python colour conversion made of its own
+# pixels, (source path, JPEG bytes), for this thread's convert_one; state.
+_MEMORY_THUMB = threading.local()
 
 
 def _fast_colour_png(jxl_path: Path, mem, src_icc: bytes):
@@ -3116,6 +3151,12 @@ def _fast_colour_png(jxl_path: Path, mem, src_icc: bytes):
         native = (CJXL_DISTANCE <= 0
                   or _icc_has_native_form(_OUTPUT_ICC_BYTES, False))
         img = _convert_matrix_shaper(pixels, w, h, channels, transform)
+        if _explorer_thumbnail_wanted(CJXL_DISTANCE == 0):
+            # V2: from the converted image, in the target profile — the
+            # finished copy is not decoded again for its 768 px.
+            with tempfile.TemporaryDirectory(prefix="jxlrec_thumb_", dir=TEMP_DIR) as _t:
+                _MEMORY_THUMB.jpeg = (str(jxl_path), _thumbnail_from_array(
+                    img, _OUTPUT_ICC_BYTES, _t, jxl_path.name))
         png = make_png_bytes(img, _OUTPUT_ICC_BYTES if native else None)
     except Exception as e:
         logger.warning(f"  >Colour conversion in Python failed ({e}): using "
@@ -3184,14 +3225,25 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
         # route is only taken for RGB pixels in the file's own space.)
         blob = mem is None and _decoded_in_original_space(out_icc, orig_icc) is False
         grey = mem is None and _png_is_grayscale(dec_png)
+        # #695: an extra channel that is NOT alpha — a scanner's IR, which JPEG
+        # XL stores as alpha (its jxlphoto-extrasamples marker says so) — is
+        # left out of the derivative: Lanczos weighted the colour by it and the
+        # copy came out RGBA, the IR read as transparency.
+        # _derivative_metadata_args drops the marker on the same rule.
+        if mem is not None:
+            _has_alpha = len(mem[1]) // (mem[2][0] * mem[2][1] * 2) == 4
+        else:
+            _has_alpha = not blob and _png_has_alpha(dec_png)
+        _ir = bool(_has_alpha) and _extrasamples_not_alpha(
+            _read_creator_and_relation(jxl_path)[1])
         converted = False
         size = None
         fast = None
-        if grey and not blob and not (RESIZE_MODE or SHARPEN != "none"):
+        if grey and not blob and not _ir and not (RESIZE_MODE or SHARPEN != "none"):
             logger.info(f"  >Grayscale image: encoded without colour conversion | {jxl_path.name}")
             enc_in = dec_png
         else:
-            args = []
+            args = ["-alpha", "off"] if _ir else []
             src_icc = None
             out_profile = None
             magick_in = dec_png
@@ -3307,7 +3359,8 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
                 # profile; re-assign the one that describes the pixels now.
                 args += ["-profile", str(out_profile)]
             if (FAST_COLOR_CONVERSION and mem is not None and converted and src_icc
-                    and not blob and not grey and not RESIZE_MODE and SHARPEN == "none"):
+                    and not blob and not grey and not _ir and not RESIZE_MODE
+                    and SHARPEN == "none"):
                 fast = _fast_colour_png(jxl_path, mem, src_icc)
             if fast is not None:
                 mem = None          # the converted image is in the PNG now
@@ -3363,7 +3416,7 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
                      "-" if stdin_png is not None else str(enc_in), str(write_path),
                      "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT),
                      "--container=1", "-x", "strip=exif", "-x", "strip=xmp"]
-                    + _keep_invisible_flag() + _cjxl_buffering_flag())
+                    + _keep_invisible_flag() + _cjxl_buffering_flag() + _cjxl_threads_flag())
         r = _run_cjxl_full(cjxl_cmd, input=stdin_png)
         used_python = fast is not None
         stdin_png = fast = None         # release the PNG
@@ -3405,6 +3458,9 @@ def _derivative_metadata_args(jxl_path: Path, converted: bool = True,
     drop = (SRC_PREFIX, SRCSUM_PREFIX, DERIVED_XMP_PREFIX)
     if converted:
         drop = drop + (ICC_PROFILE_PREFIX,)
+    if _extrasamples_not_alpha(tokens):
+        # #695: _derive_pixels left that channel (a scanner's IR) out.
+        drop = drop + (_common._EXTRASAMPLES_TOKEN,)
     keep = [t for t in tokens
             if t and not t.startswith(drop) and t != ICC_INHERITED_XMP_FLAG]
     lines = ["-XMP-dc:Relation="]
@@ -3485,6 +3541,7 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
     # input (and the REPLACE FAILED paths clean it up).
     output_dirty = False
     _pre_identity = _capture_output_identity(write_path, final_path)
+    _MEMORY_THUMB.jpeg = None           # V2: never an earlier file's
     try:
         if _aborted():
             return (str(jxl_path), "aborted", str(final_path))
@@ -3667,8 +3724,11 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
         # it. The source's never reaches it: the metadata copy above does not
         # carry the box (a verbatim copy keeps the source's, still valid).
         if status == "ok" and _explorer_thumbnail_wanted(CJXL_DISTANCE == 0):
+            _mt = getattr(_MEMORY_THUMB, "jpeg", None)
+            _MEMORY_THUMB.jpeg = None
+            _jpeg = _mt[1] if _mt and _mt[0] == str(jxl_path) else None
             with tempfile.TemporaryDirectory(prefix="jxlrec_thumb_", dir=TEMP_DIR) as _ttmp:
-                if (_add_explorer_thumbnail(write_path, _ttmp) == "written"
+                if (_add_explorer_thumbnail(write_path, _ttmp, jpeg=_jpeg) == "written"
                         and not _verify_jxl_integrity(write_path)):
                     raise RuntimeError("output failed the JXL integrity check after "
                                        "the Explorer thumbnail was added")
@@ -4475,6 +4535,10 @@ def _delete_gate(items, results, promoted):
     for it, status, final_path, ok, reason, settled in decisions:
         if not settled:
             continue
+        if ok and _interrupted():
+            # #702 (review S2): no source is deleted after a Ctrl+C (the
+            # recompressor used to run its gate after one, as in rc4).
+            ok, reason = False, "interrupted with Ctrl+C"
         if ok and str(it["src"]) in _short_reason:
             _k, _n = _short_reason[str(it["src"])]
             ok, reason = False, (
@@ -5429,6 +5493,8 @@ def main():
         parser.error(_why)
 
     log_file, _floor, _der_what = _configure_run(parser, args)
+    if not args.dry_run:
+        _warn_if_version_unknown("cjxl")     # #694
 
     logger.info(f"Input: {args.input}")
     logger.info(f"Mode: {args.mode} | distance: {CJXL_DISTANCE} | effort: {CJXL_EFFORT} | "
@@ -5685,6 +5751,14 @@ def main():
         if DERIVATIVE and it["thumb"]:
             it["action"] = "skip_thumbnail"
             it["reason"] = "thumbnail page of a split TIFF: no derivative is made of it"
+        # Its record could not be read (the batch failed, stalled, or gave no
+        # entry): every guard above read it as "no record". Nothing is
+        # written from it and the file counts as an error (#690).
+        if info.get("unread"):
+            it["action"] = "skip_unread"
+            it["reason"] = ("its encode record could not be read (exiftool failed or "
+                            "stalled on it): left as it is — run again when the disk "
+                            "is less busy")
 
     asks = [it for it in items if it["action"] == "ask"]
     if args.dry_run:
@@ -5898,12 +5972,16 @@ def main():
                         and not _plan_item_would_skip(it))
         n_copy = sum(1 for it in _plan if it["action"] == "copy"
                      and not _plan_item_would_skip(it))
-        n_skip = len(_plan) - n_convert - n_copy
+        # An unread encode record is an ERROR of the real run (#690): the
+        # preview counts it as one, not as a skip (review N3).
+        n_unread = sum(1 for it in _plan if it["action"] == "skip_unread")
+        n_skip = len(_plan) - n_convert - n_copy - n_unread
         for it in _plan:
             if _plan_item_would_skip(it):
                 logger.info(f" DRY | SKIP (exists) | {it['src'].name}")
                 continue
-            tag = {"convert": "RECOMPRESS", "copy": "COPY"}.get(it["action"], "SKIP")
+            tag = {"convert": "RECOMPRESS", "copy": "COPY",
+                   "skip_unread": "ERROR"}.get(it["action"], "SKIP")
             if DERIVATIVE and it["action"] == "convert":
                 tag = f"DERIVE ({_DERIVED_LABEL})"
             extra = f" ({it['reason']})" if it["action"] != "convert" else ""
@@ -5920,7 +5998,7 @@ def main():
             logger.info(f" DRY | {whose} would delete {n_del} source(s) "
                         f"after verification; in-place items replace themselves")
         emit_summary_json(args.summary_json, ok=n_convert + n_copy, overwritten=0,
-                          skipped=n_skip, errors=len(failures), log_file=log_file,
+                          skipped=n_skip, errors=len(failures) + n_unread, log_file=log_file,
                           extras={"recompressed": n_convert, "copied": n_copy},
                           failures=failures, dry_run=True)
         # A simulation exits 0 even with predicted failures (the refusals above):
@@ -5991,6 +6069,10 @@ def main():
             n_thumb_skip += 1
             logger.debug(f" SKIP (thumbnail page) | {it['src'].name}")
             continue
+        if it["action"] == "skip_unread":
+            logger.error(f" ERROR | {it['src'].name} | {it['reason']}")
+            failures.append((str(it["src"]), it["reason"]))
+            continue
         if it["action"] == "skip":
             n_policy_skip += 1
             logger.info(f" SKIP (policy) | {it['src'].name} | {it['reason']}")
@@ -6047,7 +6129,13 @@ def main():
             # The semaphore only matters when some workers must wait for a slot.
             _set_cjxl_slots(_slots if _slots is not None and _slots < workers
                             else None)
-            results, promoted = process_group(work_items, workers)
+            # #702: the first Ctrl+C stops the queue (no file starts after
+            # it) and lets the files in progress finish; a second one raises.
+            # V1: each of the cjxl running at once gets its share of the threads.
+            with _ctrl_c_finishes_the_run(), _cjxl_threads_while(min(
+                    _slots if _slots is not None and _slots < workers else workers,
+                    max(1, len(_to_encode)))):
+                results, promoted = process_group(work_items, workers)
     except KeyboardInterrupt:
         interrupted = True
         logger.error("Interrupted (Ctrl+C) — finishing the summary with what is done.")
@@ -6124,7 +6212,7 @@ def main():
                       extras=extras, failures=failures)
     _report_staging_leftovers(TEMP2_DIR)
 
-    if interrupted:
+    if interrupted or _interrupted():
         sys.exit(130)
     if _aborted():
         sys.exit(2)
@@ -6132,4 +6220,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:       # #702
+        sys.exit(130)

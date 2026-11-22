@@ -83,6 +83,31 @@ def test_transcode_a_damaged_output_keeps_the_source(tmp_path, monkeypatch):
     assert tr._delete_stats["deleted"] == 0 and tr._delete_stats["kept"] == 1
 
 
+
+def test_transcode_an_output_that_never_left_staging_keeps_the_source(
+        tmp_path, monkeypatch, caplog):
+    """The staging move failed (the output is not in moved_finals): the file
+    at the final path is not this run's. A guard no test pinned (Fable's
+    mutation M10, 2026-11-22)."""
+    src, out, args = _transcode(tmp_path, monkeypatch)
+    results, tasks, _moved, _staging, decode = args
+    tr._delete_transcoded_sources(results, tasks, set(), True, decode)
+    assert (src / "DSC_0001 (2).jpg").exists()
+    assert tr._delete_stats["deleted"] == 0 and tr._delete_stats["kept"] == 1
+    assert "KEEP (output never left staging)" in caplog.text
+
+
+def test_transcode_an_output_without_its_checksum_line_keeps_the_source(
+        tmp_path, monkeypatch, caplog):
+    """DELETE_SOURCE_REQUIRE_MD5: no checksums.md5 line for the fresh output,
+    no delete. A guard no test pinned (Fable's mutation M18, 2026-11-22)."""
+    src, out, args = _transcode(tmp_path, monkeypatch)
+    (out / "checksums.md5").unlink()
+    tr._delete_transcoded_sources(*args)
+    assert (src / "DSC_0001 (2).jpg").exists()
+    assert tr._delete_stats["deleted"] == 0 and tr._delete_stats["kept"] == 1
+    assert "KEEP (MD5 not confirmed)" in caplog.text
+
 # --- the lossy gate (PNG -> JXL) -------------------------------------------------
 
 def _convert(tmp_path, monkeypatch):

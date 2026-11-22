@@ -48,7 +48,7 @@ from typing import Optional
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.31.0-rc4"
+TOOLKIT_VERSION = "2.31.0-rc5"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 
@@ -349,6 +349,7 @@ def _verify_file_integrity(file_path: Path) -> bool:
 
 
 _is_relative_to = _common._is_relative_to
+_is_error_output = _common._is_error_output
 
 
 _replace_suffix_token = _common._replace_suffix_token
@@ -368,6 +369,8 @@ _replace_suffix_token = _common._replace_suffix_token
 _MIN_FREE_BYTES = 64 * 1024 * 1024
 _abort_lock = threading.Lock()
 _abort_reason = None
+_ctrl_c_seen = False        # Ctrl+C pressed during this run (#702)
+_ctrl_c_armed = True        # False while a planning still stops at once
 
 
 # (size, mtime_ns) of every source as this run was about to READ it, keyed by
@@ -420,6 +423,9 @@ def _aborted(*a, **k): return _common._aborted(_G, *a, **k)
 
 
 def _signal_abort(*a, **k): return _common._signal_abort(_G, *a, **k)
+def _ctrl_c_finishes_the_run(*a, **k): return _common._ctrl_c_finishes_the_run(_G, *a, **k)
+def _end_if_interrupted(*a, **k): return _common._end_if_interrupted(_G, *a, **k)
+def _interrupted(*a, **k): return _common._interrupted(_G, *a, **k)
 
 
 def _abort_if_disk_full(*a, **k): return _common._abort_if_disk_full(_G, *a, **k)
@@ -718,6 +724,7 @@ _marker_anchor_index = _common._marker_anchor_index
 def _get_exiftool_cmd(*a, **k): return _common._get_exiftool_cmd(_G, *a, **k)
 
 _tool_version = _common._tool_version
+def _warn_if_version_unknown(*a, **k): return _common._warn_if_version_unknown(_G, *a, **k)
 
 _tool_at_least = _common._tool_at_least
 _keep_alpha_flags = _common._keep_alpha_flags
@@ -823,7 +830,7 @@ _EXIFTOOL_POOL = _common._ExiftoolPool()
 # process refuses (maintenance modes).
 _SERVE_LOG = None
 _SERVE_FILE_CACHES = ("_content_id_cache", "_JXLINFO_CACHE", "_SOURCE_TAGS_CACHE",
-                      "_planned_outputs")
+                      "_planned_outputs", "_JXLINFO_NOTES")     # notes once per JOB (#711)
 _SERVE_TOOL_FACTS = ("_EXIFTOOL_BATCH",)
 _SERVE_REFUSED = ("repair_jbrd",)
 
@@ -1318,6 +1325,9 @@ LABEL_QUALITY = None         # JPEG quality in the label (/q<N>): JPEG derivativ
 SHARPEN_SIGMA = None         # expert overrides (deliberately OUTSIDE the label)
 SHARPEN_GAIN = None
 SHARPEN_THRESHOLD = None
+# --icc-profile/--to-srgb asked for (a colour conversion of the JXL decode):
+# its outputs are derivatives too (_derivative_output, #691).
+_COLOUR_DERIVATIVE = False
 # Written into dc:Relation on every resized/sharpened output: it marks the file
 # as a DERIVATIVE — never an archive of its source.
 DERIVED_XMP_PREFIX = "jxlphoto-derived:"
@@ -1635,6 +1645,9 @@ def _iter_by_ext(paths, exts, root=None, skip_tool_output=False):
     for f in paths:
         _scan_tick(_scan, len(files))
         if f.suffix.lower() not in exts:
+            continue
+        # A JXL renamed after a failed round-trip check is never a source (#701).
+        if f.suffix.lower() in JXL_EXTS and _is_error_output(f):
             continue
         try:
             st = os.lstat(f)
@@ -3156,6 +3169,11 @@ def _delete_transcoded_sources(results, tasks, moved_finals, use_staging, decode
         was_skipped = status == "skipped"
         if status not in ("ok", "reconvert") and not (DELETE_SKIPPED and was_skipped):
             continue
+        if _interrupted():
+            # #702 (review S2): no source is deleted after a Ctrl+C.
+            _delete_stats["kept"] += 1
+            logger.warning(f" KEEP (interrupted with Ctrl+C) | {Path(result[0]).name}")
+            continue
         src_path, final_file = src_map.get(result[0], (None, None))
         if src_path is None or not final_file.exists():
             # Every other refusal in this gate logs KEEP(reason) and counts;
@@ -3320,6 +3338,11 @@ def _delete_transcoded_sources(results, tasks, moved_finals, use_staging, decode
         if _source_changed_since_read(src_path):
             _delete_stats["kept"] += 1
             logger.warning(f" KEEP (source changed since this run read it (re-exported or rewritten during the run?) — its current version was never archived) | {src_path.name}")
+            continue
+        if _interrupted():
+            # Read again right before the delete (#702, review N1).
+            _delete_stats["kept"] += 1
+            logger.warning(f" KEEP (interrupted with Ctrl+C) | {src_path.name}")
             continue
         try:
             src_path.unlink()
@@ -3486,7 +3509,7 @@ def _foreign_overwrite_filter(pairs, decode_lossless, would_write, dry_run=False
             else:
                 logger.warning(f"  OVERWRITE (overwrite guard off) | {out.name}: "
                                f"its provenance markers could not be read")
-        elif (not explicit_overwrite and not _is_derivative()
+        elif (not explicit_overwrite and not _derivative_output()
               and src.suffix.lower() in JXL_EXTS
               and out.suffix.lower() in (".jpg", ".jpeg", ".png")):
             # #616: every JPEG/PNG this decode writes carries jxlphoto-src, so
@@ -4034,6 +4057,8 @@ def cmd_transcode(args, auto_decode: bool = False):
 
     log_file = setup_logger()
     _apply_staging_args(args)
+    if not args.dry_run and not decode:
+        _warn_if_version_unknown("cjxl")     # #694: only a run that encodes
 
     # A stale staging checksums.md5 from a crashed previous run would leak
     # wrong entries into this run's destination folders — start clean. Skipped
@@ -5410,6 +5435,19 @@ def _lossy_decode_keep_reason(src_path: Path, final_file: Path):
     (jbrd) goes through the transcode path and is not judged here."""
     if src_path.suffix.lower() not in JXL_EXTS:
         return None
+    # has_jbrd_box answers False for a file it cannot read: a JXL this gate
+    # cannot open is not judged "no archive" (review N4) — it is kept.
+    try:
+        with open(src_path, "rb") as _f:
+            _f.read(12)
+    except OSError as e:
+        return f"KEEP (the JXL could not be read: {e})"
+    # #692: a JPEG archive (jbrd) decoded by its PIXELS is not the archive:
+    # the JPEG's own bytes — and an HDR gain map after it — live only in the
+    # JXL. Only the bit-exact recovery (--force-transcode) may replace it.
+    if has_jbrd_box(src_path):
+        return ("KEEP (a JPEG archive: a decode of its pixels leaves out the original "
+                "JPEG's bytes — only the bit-exact recovery, --force-transcode, deletes it)")
     ext = final_file.suffix.lower()
     if ext in JPEG_EXTS:
         return ("KEEP (a JPEG decoded from a JXL is lossy, not a copy of it — only "
@@ -5425,6 +5463,20 @@ def _lossy_decode_keep_reason(src_path: Path, final_file: Path):
         if _red:
             return (f"KEEP (the JXL holds {_red}: a 16-bit PNG is not a full copy "
                     f"of it)")
+        # #691, the PNGs written before it: a colour-converted PNG
+        # (--to-srgb, --icc-profile) carried the master's provenance marks, so
+        # a later --delete-skipped run took it for a copy. A faithful decode
+        # embeds exactly the master's own profile (measured: lossless and
+        # lossy masters); a PNG with another one is not a copy of it.
+        try:
+            _master_icc = _carried_icc(*_read_creator_and_relation(src_path))
+            _png_icc = _png_iccp(final_file)
+        except Exception as e:
+            # Review S3: a read that fails keeps this source; the gate goes on.
+            return f"KEEP (the colour profiles could not be compared: {e})"
+        if _master_icc and _png_icc and bytes(_png_icc) != bytes(_master_icc):
+            return ("KEEP (the PNG's colour profile is not the JXL's own: a colour-converted "
+                    "copy, not a copy of it)")
     return None
 
 
@@ -5541,6 +5593,18 @@ def _is_derivative() -> bool:
     return bool(RESIZE_MODE or SHARPEN != "none")
 
 
+def _derivative_output() -> bool:
+    """A JXL decode of this run writes a DERIVATIVE: resized, sharpened, or
+    colour-converted (--icc-profile/--to-srgb). Since #691 a colour-converted
+    copy carries jxlphoto-derived and never the master's jxlphoto-src/srcsum:
+    an sRGB 16-bit PNG of a ProPhoto master used to carry them, and a later
+    `--decode --format png --delete-source --delete-skipped` run took it for
+    the master's copy and deleted the master (Fable's sweep). The
+    recompressor's --output-icc has always been one. Pixels are not touched:
+    the decode pipeline still reads _is_derivative() (resize/sharpening)."""
+    return _is_derivative() or _COLOUR_DERIVATIVE
+
+
 def _output_icc_label(output_icc):
     """The label of an --icc-profile target: sRGB, icc-<md5[:12]>, or None.
 
@@ -5598,16 +5662,34 @@ def _check_derivative_targets(pairs, output_icc, dry_run=False):
     prove the master is archived. Returns refused as [(src, out, why)] like
     _provenance_filter.
     """
-    if not _is_derivative():
+    if not (_is_derivative() or output_icc):
         return pairs, []
     existing = [(s, o) for s, o in pairs if o.exists()]
     if not existing:
         return pairs, []
     labels = _read_derived_markers_batch([o for _s, o in existing])
     wanted = _current_derived_label(output_icc)
+    # Review S7: a colour-only run (no resize, no sharpening) over an existing
+    # output with no derived label whose marks name THIS source — what an
+    # older version wrote with the same command, but also a faithful export of
+    # this master and the user's retouch of it, which nothing tells apart. It
+    # used to be refused on every re-run; it is left to the skip logic, as
+    # before #691 (second review M1: forced, it overwrote such files without
+    # --overwrite): SKIP, and --overwrite or --sync remake it.
+    colour_only = bool(output_icc) and not _is_derivative()
+    # None = read, no label (False = could not be read: refused as before).
+    _unlabelled = [o for _s, o in existing if labels.get(str(o), False) is None]
+    marks = (_read_source_markers_batch(_unlabelled)
+             if colour_only and _unlabelled else {})
     refused, refused_keys = [], set()
     for s, o in existing:
         lab = labels.get(str(o), False)
+        info = marks.get(str(o))
+        if (lab is None and info and not info.get("unread")
+                and _provenance_ok(info, s, PROVENANCE_CHECK)):
+            logger.debug(f" an earlier export of this source without the derivative "
+                         f"mark (#691): left to the skip logic | {s.name}")
+            continue
         if lab is False or lab is None:
             why = (f"an existing file at the destination is not a derivative of "
                    f"this run (wanted jxlphoto-derived:{wanted}) — refusing to "
@@ -5841,6 +5923,10 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
         _magick_out = ("png:" if is_png else "jpg:") + _magick_out_path(actual_out)
 
         derivative = _is_derivative()
+        # The output's MARKS: a colour-converted copy is a derivative too
+        # (#691) — jxlphoto-derived, never the master's src/srcsum. The
+        # pixel pipeline below keeps reading `derivative` (resize/sharpen).
+        marks_derivative = derivative or bool(output_icc)
         if output_icc and not MAGICK_AVAILABLE:
             # Fail loudly: silently keeping the embedded ICC would deliver
             # files in the wrong color space while the log says "converting".
@@ -6039,7 +6125,7 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
             # #637: the copied InteropIndex names the SOURCE's DCF colour
             # space; a converted output is in another one.
             _orient += ["-InteropIFD:InteropIndex=", "-InteropIFD:InteropVersion="]
-        if derivative:
+        if marks_derivative:
             _dlabel = _current_derived_label(output_icc)
             # Separate CLEAR invocation (see _derivative_metadata_args): the
             # copied jxlphoto-src must not survive `=` + `+=` in one call.
@@ -6078,7 +6164,7 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
             _swap_into_place(actual_out, final_path)
 
         n, total = next_count()
-        if derivative:
+        if marks_derivative:
             label = f"DERIVE ({_current_derived_label(output_icc)})"
         else:
             label = "RECONVERT" if overwritten else "OK"
@@ -6368,6 +6454,8 @@ def cmd_convert(args, from_jxl: bool = True):
 
     # Collect files (ICC label, op_type, and mode_str are set after this)
     files, output_root, direction = _convert_sources(args, direction)
+    if not args.dry_run and direction == "to_jxl":
+        _warn_if_version_unknown("cjxl")     # #694: only a run that encodes
 
     if not files:
         logger.warning("No input files found.")
@@ -6462,9 +6550,10 @@ def cmd_convert(args, from_jxl: bool = True):
         would_write=lambda s, o: (os.path.normcase(str(o)) in _FORCE_REDERIVE
                                   or should_process(s, o, smart_mode, reconvert_explicit)),
         dry_run=args.dry_run, explicit_overwrite=reconvert_explicit)
-    if _is_derivative():
-        # A resize/sharpened output is a derivative: never overwrite a file
-        # that is not one of ours, re-derive when the recipe changed.
+    if _is_derivative() or (direction == "from_jxl" and _COLOUR_DERIVATIVE):
+        # A resized, sharpened or colour-converted output is a derivative
+        # (#691): never overwrite a file that is not one of ours, re-derive
+        # when the recipe changed.
         pairs, _der_refused = _check_derivative_targets(
             pairs, args.icc_profile, dry_run=args.dry_run)
         if _der_refused:
@@ -6480,7 +6569,9 @@ def cmd_convert(args, from_jxl: bool = True):
                                 or should_process(f, out, smart_mode, reconvert_explicit)))
                       for f, out in pairs]
         _n_skip = sum(1 for _f, _o, _go in _dry_pairs if not _go)
-        _dlabel = _current_derived_label(args.icc_profile) if _is_derivative() else None
+        _dlabel = (_current_derived_label(args.icc_profile)
+                   if (_is_derivative() or (direction == "from_jxl" and _COLOUR_DERIVATIVE))
+                   else None)
         for f, out, _go in _dry_pairs:
             if not _go:
                 _lbl = "SKIP (up to date)" if smart_mode else "SKIP (exists)"
@@ -6623,6 +6714,11 @@ def _delete_converted_sources(results, pairs, moved_finals):
         if (status not in ("ok", "reconvert")
                 and not (DELETE_SKIPPED and was_skipped)):
             continue
+        if _interrupted():
+            # #702 (review S2): no source is deleted after a Ctrl+C.
+            _delete_stats["kept"] += 1
+            logger.warning(f" KEEP (interrupted with Ctrl+C) | {Path(result[0]).name}")
+            continue
         src_path, final_file = src_map.get(result[0], (None, None))
         if src_path is None:
             # Logged and counted like every other refusal of this gate, as
@@ -6641,8 +6737,14 @@ def _delete_converted_sources(results, pairs, moved_finals):
             _delete_stats["kept"] += 1
             logger.warning(f" KEEP (output never left staging) | {src_path.name}")
             continue
-        _why_keep = (_lossy_decode_keep_reason(src_path, final_file)
-                     or _gain_map_keep_reason(src_path, final_file))
+        try:
+            _why_keep = (_lossy_decode_keep_reason(src_path, final_file)
+                         or _gain_map_keep_reason(src_path, final_file))
+        except Exception as e:
+            # A check that raises keeps its own source and the gate goes on
+            # judging the others (review S3: it ended the run in a traceback,
+            # the sources after it never judged).
+            _why_keep = f"KEEP (the check itself failed: {type(e).__name__}: {e})"
         if _why_keep:
             _delete_stats["kept"] += 1
             logger.warning(f" {_why_keep} | {src_path.name}")
@@ -6688,6 +6790,11 @@ def _delete_converted_sources(results, pairs, moved_finals):
         if _source_changed_since_read(src_path):
             _delete_stats["kept"] += 1
             logger.warning(f" KEEP (source changed since this run read it (re-exported or rewritten during the run?) — its current version was never archived) | {src_path.name}")
+            continue
+        if _interrupted():
+            # Read again right before the delete (#702, review N1).
+            _delete_stats["kept"] += 1
+            logger.warning(f" KEEP (interrupted with Ctrl+C) | {src_path.name}")
             continue
         try:
             src_path.unlink()
@@ -6814,6 +6921,8 @@ def cmd_auto(args):
     # Collect JPEG files (encode direction), PNG files (convert encode direction)
     # and JXL files (decode/convert direction). Modes 0 and 1 are flat.
     jpeg_files, png_files, jxl_files = _auto_sources(args)
+    if not args.dry_run and (jpeg_files or png_files):
+        _warn_if_version_unknown("cjxl")     # #694: only a run that encodes
 
     if not jpeg_files and not png_files and not jxl_files:
         logger.warning("No JPEG, PNG or JXL files found.")
@@ -7082,9 +7191,11 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
         output_arg=args.output, source_root=_prov_src_root(args),
         would_write=lambda s, o: should_process(s, o, args.sync, args.overwrite),
         dry_run=args.dry_run, explicit_overwrite=args.overwrite)
-    if _is_derivative():
-        # A resize/sharpened output is a derivative: never overwrite a file
-        # that is not one of ours, re-derive when the recipe changed.
+    if _is_derivative() or (not use_transcode and direction == "from_jxl"
+                            and _COLOUR_DERIVATIVE):
+        # A resized, sharpened or colour-converted output is a derivative
+        # (#691): never overwrite a file that is not one of ours, re-derive
+        # when the recipe changed.
         pairs, _der_refused = _check_derivative_targets(
             pairs, args.icc_profile, dry_run=args.dry_run)
         if _der_refused:
@@ -7114,7 +7225,10 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
                                 or should_process(f, out, args.sync, args.overwrite)))
                       for f, out in pairs]
         _n_skip = sum(1 for _f, _o, _go in _dry_pairs if not _go)
-        _dlabel = _current_derived_label(args.icc_profile) if _is_derivative() else None
+        _dlabel = (_current_derived_label(args.icc_profile)
+                   if (_is_derivative() or (not use_transcode and direction == "from_jxl"
+                                            and _COLOUR_DERIVATIVE))
+                   else None)
         for f, out, _go in _dry_pairs:
             if not _go:
                 _lbl = "SKIP (up to date)" if args.sync else "SKIP (exists)"
@@ -7473,6 +7587,7 @@ def _configure_run(parser, args):
     run is (transcode, convert, auto) and the tool checks. setup_logger runs in
     each cmd_*."""
     global ALLOW_UPSCALE, LABEL_QUALITY, RESIZE_MODE, RESIZE_VALUE, SHARPEN, SHARPEN_GAIN, SHARPEN_SIGMA, SHARPEN_THRESHOLD
+    global _COLOUR_DERIVATIVE
     if args.resize_long is not None:
         if args.resize_long <= 0:
             parser.error("--resize-long must be a positive number of pixels")
@@ -7500,6 +7615,9 @@ def _configure_run(parser, args):
     SHARPEN_SIGMA = args.sharpen_sigma
     SHARPEN_GAIN = args.sharpen_gain
     SHARPEN_THRESHOLD = args.sharpen_threshold
+    # --to-srgb becomes icc_profile 'sRGB' only later in main(): read both
+    # (review S1 — with --to-srgb alone, a --sync re-run refused its own copy).
+    _COLOUR_DERIVATIVE = bool(args.icc_profile or getattr(args, "to_srgb", False))
     if SHARPEN == "none" and any(v is not None for v in
                                  (args.sharpen_sigma, args.sharpen_gain,
                                   args.sharpen_threshold)):
@@ -7864,11 +7982,13 @@ def main():
 
     global RESIZE_MODE, RESIZE_VALUE, ALLOW_UPSCALE
     global SHARPEN, SHARPEN_SIGMA, SHARPEN_GAIN, SHARPEN_THRESHOLD, LABEL_QUALITY
+    global _COLOUR_DERIVATIVE
     RESIZE_MODE = None
     RESIZE_VALUE = None
     ALLOW_UPSCALE = False
     SHARPEN = "none"
     LABEL_QUALITY = None
+    _COLOUR_DERIVATIVE = False
     SHARPEN_SIGMA = None
     SHARPEN_GAIN = None
     SHARPEN_THRESHOLD = None
@@ -7892,17 +8012,21 @@ def main():
     # lossless recovery — JXL-only, jbrd-gated (non-jbrd files error out per
     # file instead of being silently lossy-converted).
     route, flag = _route(cmd, auto_decode, args)
-    if route == "transcode":
-        errors, cancelled = cmd_transcode(args, flag)
-    elif route == "convert":
-        errors, cancelled = cmd_convert(args, from_jxl=flag)
-    elif route == "auto":
-        # Auto-detect per-file for directories.
-        errors, cancelled = cmd_auto(args)
-    else:
-        # Fallback - should not reach here
-        print(f"ERROR: Unknown command state: {cmd}")
-        sys.exit(1)
+    # #702: in place before the commands' planning, armed by their own
+    # _reset_abort once the work starts — a Ctrl+C during the planning stops
+    # at once (the second review of rc5, N3), one after it finishes the run.
+    with _ctrl_c_finishes_the_run(armed=False):
+        if route == "transcode":
+            errors, cancelled = cmd_transcode(args, flag)
+        elif route == "convert":
+            errors, cancelled = cmd_convert(args, from_jxl=flag)
+        elif route == "auto":
+            # Auto-detect per-file for directories.
+            errors, cancelled = cmd_auto(args)
+        else:
+            # Fallback - should not reach here
+            print(f"ERROR: Unknown command state: {cmd}")
+            sys.exit(1)
 
     _planned_outputs.clear()        # run-scoped (#615)
 
@@ -7924,6 +8048,8 @@ def main():
     # Exit 2 = aborted, and it outranks exit 1: a run that gave up early is not
     # the same event as a run that finished with some bad files, and automation
     # has to be able to tell them apart (the aborted one is worth retrying).
+    # A Ctrl+C ends as the interrupt it was, after this summary (#702).
+    _end_if_interrupted()
     if _aborted():
         sys.exit(2)
 
@@ -7933,4 +8059,7 @@ def main():
 if __name__ == "__main__":
     if "--serve" in sys.argv[1:]:
         sys.exit(_common._serve(_G, main, sys.argv[1:]))
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:       # after the summary of an interrupted run (#702)
+        sys.exit(130)

@@ -28,7 +28,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.31.0-rc4"
+TOOLKIT_VERSION = "2.31.0-rc5"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 
@@ -739,6 +739,8 @@ def _recompress_entry_in_place(source, dest_path, mode) -> bool:
     """
     if mode == 8:
         return True
+    if mode == 2:
+        return _recompressor_replaces_file(source, dest_path, mode)
     if mode != 0:
         return False
     if not dest_path:
@@ -758,6 +760,37 @@ def _recompress_entry_in_place(source, dest_path, mode) -> bool:
                 == os.path.normcase(os.path.abspath(str(src_dir))))
     except (OSError, ValueError):
         return True     # cannot tell -> treat as destructive (fail closed)
+
+
+def _recompressor_replaces_file(source, dest_path, mode) -> bool:
+    """Mode 2 writes flat into the Destination: does the recompressor's OWN
+    plan (_planned_output) put a FILE Source's output on that file (#708: a
+    row with its folder as Destination replaced it in place — the child's
+    in-place path — without the wrapper's confirmation)? A folder Source:
+    False (the recompressor refuses an output equal to its input in mode 2,
+    exit 2). Cannot tell: True, the confirmation is asked (fail closed)."""
+    try:
+        src = Path(source)
+        if not src.is_file():
+            return False
+        rec = importlib.import_module('jxl_recompressor')
+        argv = [str(src)] + ([str(dest_path)] if dest_path else []) + ['--mode', str(mode)]
+        with redirect_stderr(io.StringIO()):
+            ns = rec.build_parser().parse_args(argv)
+        out = rec._planned_output(src, ns)
+    except SystemExit:
+        return True
+    except Exception:
+        return True
+    if out is None:
+        return False
+    try:
+        if os.path.samefile(str(out), str(src)):
+            return True
+    except OSError:
+        pass
+    return (os.path.normcase(os.path.abspath(str(out)))
+            == os.path.normcase(os.path.abspath(str(src))))
 
 
 _run_collapses_structure = _common._run_collapses_structure
@@ -975,6 +1008,12 @@ class ToolConfig:
     # several recurring jobs can coexist instead of fighting over the single
     # "last workflow" slot. See ConfigManager.session_snapshot().
     presets: Dict[str, Dict] = field(default_factory=dict)
+    # What a NEW job of each task starts from ({task id: {last_*: value}},
+    # _task_memory_entry): the last run of THAT task (#704-#709). The last_*
+    # fields above stay the last job of any task — what "Repeat last job"
+    # replays and older copies read. Not a last_* name, so no preset and no
+    # session snapshot carries it; an older copy drops it when it saves.
+    task_memory: Dict[str, Dict] = field(default_factory=dict)
 
     dependencies_checked: bool = False
     available_features: Dict[str, bool] = field(default_factory=dict)
@@ -4190,6 +4229,109 @@ def _task_of(origin: Optional[str], dest: Optional[str], conv: Optional[str]) ->
     return "custom"
 
 
+# --- What a new job of a task starts from (#704-#709) ------------------------
+# A new job started from the last job of ANY task: after an 8-bit PNG export
+# "Restore TIFFs" asked the decoder for 8-bit TIFFs (#704), after copies made
+# in sRGB_JXL the next masters went there (#705). Each task now remembers its
+# own last run (ToolConfig.task_memory, _task_memory_entry), read through
+# InteractiveMenu._task_memory.
+
+# The answers one job may set and the next must not inherit: each save clears
+# them, then writes what THIS run staged — a "Repeat last job" replayed the
+# --provenance adopt / --no-overwrite-guard of an earlier job (#706, #707; a
+# delete with the guard off is refused by every script, after the HHMM).
+_RUN_SCOPED_SESSION_FIELDS = ('last_verify_roundtrip', 'last_delete_skipped',
+                              'last_provenance', 'last_adopt_scan',
+                              'last_overwrite_guard')
+# The [D] answers. In a task's memory they come from its last run WITH a
+# delete (a sync in between keeps them), the guard's from its last run
+# without one (a delete never offers the guard).
+_DELETE_ANSWER_FIELDS = ('last_verify_roundtrip', 'last_delete_skipped',
+                         'last_provenance', 'last_adopt_scan')
+
+
+def _script_own_fields(origin: Optional[str], dest: Optional[str]):
+    """(last_* field, child module, _child_default option, inverted) of the
+    values a new job of this direction takes from the script when its task
+    has no answer of its own. A remembered value EQUAL to the script's
+    setting is kept as None, "the script's own", so a later change of that
+    setting (menu S, the overlay) reaches the next job (#709: the last job's
+    value went on every command line after it, and "script default" lasted
+    one run)."""
+    rows = [('last_overwrite_guard', _child_module(origin, dest), 'overwrite_guard', False)]
+    if (origin, dest) == ('tiff', 'jxl'):
+        rows += [('last_multipage_mode', 'jxl_tiff_encoder', 'multipage_mode', False),
+                 ('last_thumbnail_mode', 'jxl_tiff_encoder', 'thumbnail_mode', False),
+                 ('last_thumbnail_suffix', 'jxl_tiff_encoder', 'thumbnail_suffix', False),
+                 ('last_use_ram', 'jxl_tiff_encoder', 'use_ram', False)]
+    elif (origin, dest) == ('jxl', 'tiff'):
+        rows += [('last_thumbnail_handling', 'jxl_tiff_decoder', 'thumbnail_handling', False),
+                 ('last_thumbnail_suffix', 'jxl_tiff_decoder', 'thumbnail_suffix', False),
+                 ('last_depth_policy', 'jxl_tiff_decoder', 'depth_policy', False),
+                 ('last_no_reconstruct_multipage', 'jxl_tiff_decoder',
+                  'reconstruct_multipage', True),
+                 ('last_compression', 'jxl_tiff_decoder', 'compression', False),
+                 ('last_add_preview', 'jxl_tiff_decoder', 'add_preview', False),
+                 ('last_bit_depth', 'jxl_tiff_decoder', 'bit_depth', False)]
+    elif dest == 'png':
+        rows.append(('last_bit_depth', 'jxl_jpeg_transcoder', 'bit_depth', False))
+    return rows
+
+
+def _task_memory_entry(snapshot: Dict, workflow: Dict, previous: Optional[Dict]) -> Dict:
+    """What a run leaves for the next new job of its task: the session
+    snapshot save_last_session just wrote, with the run's OWN value for the
+    options a None does not clear there ("script default" chosen on [a]), the
+    [D] answers of a run without a delete carried over from the task's last
+    one (and the guard's of a run with one), and every value equal to the
+    script's setting kept as None (_script_own_fields)."""
+    entry = dict(snapshot)
+    previous = previous if isinstance(previous, dict) else {}
+    origin, dest = workflow.get('origin_format'), workflow.get('dest_format')
+    adv = workflow.get('advanced_options') or {}
+    if (origin, dest) == ('tiff', 'jxl'):
+        for key in ('multipage_mode', 'thumbnail_mode', 'thumbnail_suffix'):
+            entry['last_' + key] = adv.get(key)
+    elif (origin, dest) == ('jxl', 'tiff'):
+        for key in ('thumbnail_handling', 'thumbnail_suffix', 'depth_policy',
+                    'no_reconstruct_multipage'):
+            entry['last_' + key] = adv.get(key)
+    if dest in ('tiff', 'png'):
+        entry['last_bit_depth'] = workflow.get('bit_depth')
+    if adv.get('delete_source'):
+        entry['last_overwrite_guard'] = previous.get('last_overwrite_guard')
+        for f in _DELETE_ANSWER_FIELDS:       # a question this run did not ask
+            if entry.get(f) is None:
+                entry[f] = previous.get(f)
+    else:
+        for f in _DELETE_ANSWER_FIELDS:
+            entry[f] = previous.get(f)
+    for f, module, option, inverted in _script_own_fields(origin, dest):
+        value = entry.get(f)
+        if value is None:
+            continue
+        own = _child_default(module, option)
+        if (not own if inverted else own) == value:
+            entry[f] = None
+    return entry
+
+
+class _TaskMemory:
+    """The config as a new job of one task sees it: every last_* field is
+    that task's own (None when the task never ran since #704-#709), every
+    other field (the Settings) is the config's."""
+    __slots__ = ('_config', '_entry')
+
+    def __init__(self, config, entry: Optional[Dict]):
+        self._config = config
+        self._entry = entry if isinstance(entry, dict) else {}
+
+    def __getattr__(self, name):
+        if name.startswith('last_'):
+            return self._entry.get(name)
+        return getattr(self._config, name)
+
+
 @dataclass
 class Job:
     task: str
@@ -5352,14 +5494,26 @@ class InteractiveMenu:
         # merely opening the screen and pressing Enter must not overwrite what
         # the last run used.
         cfg = self.config.config
+        _changed = []
         if cfg.default_workers != was_workers:
             cfg.last_workers = cfg.default_workers
+            _changed.append('last_workers')
         if cfg.default_quality != was_quality:
             cfg.last_quality = cfg.default_quality
+            _changed.append('last_quality')
         if cfg.default_effort != was_effort:
             cfg.last_effort = cfg.default_effort
+            _changed.append('last_effort')
         if _sane_distance(cfg.default_distance) != was_distance:
             cfg.last_distance = _sane_distance(cfg.default_distance)
+            _changed.append('last_distance')
+        # The tasks' own memories (#704) hold that value too: a changed
+        # default is the next job's value for every task (review S6).
+        if _changed and isinstance(cfg.task_memory, dict):
+            for _entry in cfg.task_memory.values():
+                if isinstance(_entry, dict):
+                    for _field in _changed:
+                        _entry.pop(_field, None)
 
         self.config.save_config()
         self._print_success("Settings saved!")
@@ -5382,15 +5536,39 @@ class InteractiveMenu:
         missing = [n for n in need if not status.get(n)]
         return ", ".join(missing) if missing else None
 
-    def _new_workflow(self) -> Dict[str, Any]:
-        """A run's starting state: the last job's values, else the wrapper's
-        settings, else the children's (the old wizard's defaults)."""
+    def _task_memory(self, task):
+        """What a new job of `task` (a TASKS id, or a workflow with one in
+        '_task') starts from: the last run of THAT task (_TaskMemory,
+        #704-#709). No task (a path that is not a new job) sees the config
+        itself, as before."""
+        if isinstance(task, dict):
+            task = task.get('_task')
         c = self.config.config
-        last_staging = c.last_staging if c.last_staging is not None else c.staging_dir
+        if not task or task not in _TASK_BY_ID:
+            return c
+        memory = c.task_memory if isinstance(c.task_memory, dict) else {}
+        entry = memory.get(task)
+        if (not isinstance(entry, dict) and _task_of(
+                c.last_origin_format, c.last_dest_format, c.last_conversion_type) == task):
+            # A config saved before task_memory existed, whose last job WAS
+            # this task: its values, as before (only another task's are not).
+            return c
+        return _TaskMemory(c, entry)
+
+    def _new_workflow(self, task: Optional[str] = None) -> Dict[str, Any]:
+        """A run's starting state: the last values of the same task (#704;
+        with a config saved before then, the last job's when it was this task,
+        else none), else the wrapper's settings, else the children's (the old
+        wizard's defaults). The staging
+        folder and the number of workers are the last job's, whatever its task:
+        properties of the PC."""
+        c = self._task_memory(task)
+        _cfg = self.config.config
+        last_staging = _cfg.last_staging if _cfg.last_staging is not None else c.staging_dir
         wf = {
             'input_dir': None, 'origin_format': None, 'dest_format': None,
             'conversion_type': None, 'mode': None,
-            'workers': c.last_workers or c.default_workers,
+            'workers': _cfg.last_workers or c.default_workers,
             'quality': c.last_quality or c.default_quality,
             'effort': c.last_effort or c.default_effort,
             'staging': last_staging, 'icc_profile': None,
@@ -5404,10 +5582,10 @@ class InteractiveMenu:
             'mode_config': {}, 'auto_mode_used': False,
         }
         wf['_from'] = {
-            'workers': 'last job' if c.last_workers else 'settings',
+            'workers': 'last job' if _cfg.last_workers else 'settings',
             'effort': 'last job' if c.last_effort else 'settings',
             'quality': 'last job' if c.last_quality else 'settings',
-            'staging': 'last job' if c.last_staging is not None else 'settings',
+            'staging': 'last job' if _cfg.last_staging is not None else 'settings',
             'use_ram': 'last job' if c.last_use_ram is not None else 'script',
             'compression': 'last job' if c.last_compression else 'script',
             'bit_depth': 'last job' if c.last_bit_depth else 'script',
@@ -5510,7 +5688,7 @@ class InteractiveMenu:
                 workflow['distance'] = _DISTANCE_CHOICES[int(key) - 1][0]
             else:
                 self._show_size_table(masters=True)
-                last = self.config.config.last_distance
+                last = self._task_memory(workflow).last_distance
                 start = _sane_distance(last, fallback=preferred) if last is not None else preferred
                 workflow['distance'] = self._ask_number("job.distance", "Distance (0-25, lower = better)",
                                                         start, 0.0, _MAX_DISTANCE)
@@ -5622,7 +5800,7 @@ class InteractiveMenu:
         workflow['overwrite_mode'] = '2'
         if not delete_on:
             _og_child = _child_default(_child_module(origin, dest), 'overwrite_guard')
-            _og_last = self.config.config.last_overwrite_guard
+            _og_last = self._task_memory(workflow).last_overwrite_guard
             _og = _og_child if _og_last is None else bool(_og_last)
             workflow['overwrite_guard'] = bool(_og)
             workflow.setdefault('_pending_session_fields', {})['last_overwrite_guard'] = bool(_og)
@@ -5638,7 +5816,7 @@ class InteractiveMenu:
         and derivative recipe are carried across (losing them drops the child
         back to `ask`, a SILENT SKIP on the wrapper's pipe)."""
         origin, dest = workflow['origin_format'], workflow['dest_format']
-        c = self.config.config
+        c = self._task_memory(workflow)         # the same task's last run (#709)
         _prev_adv = workflow.get('advanced_options') or {}
         advanced_options: Dict[str, Any] = {}
         if workflow.get('overwrite_mode', '2') == "1":
@@ -6193,7 +6371,14 @@ class InteractiveMenu:
         else:
             saved_quality = config.config.default_quality
             saved_distance = None
-        for _field, _value in (workflow.pop('_pending_session_fields', None) or {}).items():
+        # The answers of an earlier job never ride along: the last job is THIS
+        # run, so "Repeat last job" and a preset replay what it ran (#706, #707).
+        # Read, not popped: the review saves at [s], [d] AND [r], and each save
+        # is the same job — with the clearing above, a popped dict left the
+        # [r] after a [d] without its [D] answers.
+        for _field in _RUN_SCOPED_SESSION_FIELDS:
+            setattr(config.config, _field, None)
+        for _field, _value in (workflow.get('_pending_session_fields') or {}).items():
             setattr(config.config, _field, _value)
         adv = workflow.get('advanced_options', {}) or {}
         config.save_last_session(
@@ -6220,6 +6405,15 @@ class InteractiveMenu:
                              and 'exclude_folders' in workflow
                              else config._STAGING_UNSET),
         )
+        # What the next new job of this task starts from (#704-#709).
+        _tid = workflow.get('_task') or _task_of(origin, dest, conv)
+        if _tid in _TASK_BY_ID:
+            memory = (dict(config.config.task_memory)
+                      if isinstance(config.config.task_memory, dict) else {})
+            memory[_tid] = _task_memory_entry(config.session_snapshot(), workflow,
+                                              memory.get(_tid))
+            config.config.task_memory = memory
+            config.save_config()
 
     def new_job_flow(self, status: Dict[str, bool], manifest: bool = False) -> bool:
         """Menu 1 (and 4 with manifest=True): the task, the folder (or the
@@ -6232,7 +6426,7 @@ class InteractiveMenu:
         if not tid:
             return False
         _tid, _label, origin, dest, convs = _TASK_BY_ID[tid]
-        workflow = self._new_workflow()
+        workflow = self._new_workflow(tid)
         workflow.update(origin_format=origin, dest_format=dest,
                         conversion_type=convs[0], _task=tid)
         if manifest:
@@ -7430,7 +7624,7 @@ class InteractiveMenu:
             verify = True
             workflow['verify_roundtrip'] = True
         elif (origin == 'tiff' and dest == 'jxl') or workflow.get('conversion_type') == 'jxl_recompress':
-            vr_default = bool(self.config.config.last_verify_roundtrip)
+            vr_default = bool(self._task_memory(workflow).last_verify_roundtrip)
             explain = ("Decode each JXL and compare it with the source before deleting. "
                        "Lossless: the pixels must match exactly. Lossy: a brightness and "
                        "PSNR sanity check that catches a black or scrambled encode (not "
@@ -7475,7 +7669,7 @@ class InteractiveMenu:
                           "same-named file from anywhere else keeps the original. Nothing "
                           "compares the image contents.")
 
-        ds_default = bool(self.config.config.last_delete_skipped)
+        ds_default = bool(self._task_memory(workflow).last_delete_skipped)
         ds_explain = (
             "Sources whose output already exists are reported as SKIP and are normally "
             "KEPT — which means a run interrupted between the conversion and the delete "
@@ -7514,7 +7708,7 @@ class InteractiveMenu:
             _adopt_ok = _supports_provenance_adopt(origin, dest)
             _pv_choices = ["path", "content"] + (["adopt"] if _adopt_ok else [])
             pv_child = _child_default(_child_module(origin, dest), 'provenance')
-            pv_default = self.config.config.last_provenance or pv_child
+            pv_default = self._task_memory(workflow).last_provenance or pv_child
             if pv_default not in _pv_choices:
                 # e.g. a remembered `adopt` on a direction without it: the
                 # child's own setting, or the strict check if that is not
@@ -7785,7 +7979,7 @@ class InteractiveMenu:
                 # from this workflow's config (auto-mode detection) first,
                 # then the last saved session.
                 last_sub = mode_config.get('export_subfolder') or \
-                    (self.config.config.last_mode_config or {}).get('export_subfolder', '')
+                    (self._task_memory(workflow).last_mode_config or {}).get('export_subfolder', '')
                 sub = self.ui.ask_line(
                     "mode.cfg.subfolder",
                     "Subfolder inside export marker to process (empty = all, same as mode 6)",
@@ -7812,8 +8006,11 @@ class InteractiveMenu:
             # message the wrapper shows.
             if _export_folder_settable(origin, dest):
                 _script_default = _export_folder_name(origin, dest)
+                # The same task's last folder (#705: copies made in sRGB_JXL
+                # sent the next masters there).
                 _folder_default = (mode_config.get('export_jxl_folder')
-                                   or (self.config.config.last_mode_config or {}).get('export_jxl_folder')
+                                   or (self._task_memory(workflow).last_mode_config
+                                       or {}).get('export_jxl_folder')
                                    or _script_default)
                 _hint = (" (e.g. JPG_web — the script's own name is the recovery's)"
                          if origin == 'jxl' and dest in ('jpeg', 'png')
@@ -8469,13 +8666,16 @@ class InteractiveMenu:
         # only inside its own Source tree, so another entry's Source sitting
         # there would already be a Source overlap, which the gate refuses to
         # declare safe.
-        # Each entry's marker comes from its own row (its ExportMarker column,
-        # or the run's), and the check reasons per row too: disjoint trees under
-        # markers that cannot nest stay skippable, while nested marker dirs
-        # force the scan.
+        # Each entry's marker is the one its run parses (its ExportMarker
+        # column, the run's, or --export-marker in the expert flags: #708, the
+        # columns alone said "cannot collide" and two rows wrote one file), and
+        # the check reasons per row too: disjoint trees under markers that
+        # cannot nest stay skippable, while nested marker dirs force the scan.
+        _plan_markers = self._row_plan_markers(origin, dest, resolved_entries, _row_effs)
         _can_skip = not self._manifest_needs_collision_scan(
             resolved_entries, _marker,
-            row_markers=[_m for _m, _s, _j in _row_export])
+            row_markers=[_pm or _m for _pm, (_m, _s, _j)
+                         in zip(_plan_markers, _row_export)])
         if _can_skip:
             _skip_msg = ("Collision check: skipped (no two entries can share an "
                          "output folder).")
@@ -8799,6 +8999,34 @@ class InteractiveMenu:
         if idx is None:
             return None
         return str(Path(*parts[:idx + 1]))
+
+    def _row_plan_markers(self, origin, dest, resolved_entries, row_effs) -> List[Optional[str]]:
+        """The export marker each manifest row's run parses: the child's own
+        parse (_child_plan_args) of the argv build_child_cmd gives that row,
+        as the collision walk reads it (_child_plan_globals) — the expert
+        flags included (#708). None where the child cannot be imported or
+        refuses the command line: the row's columns decide, as before. No
+        file is read."""
+        try:
+            child = importlib.import_module(_child_module(origin, dest))
+        except Exception:
+            return [None] * len(resolved_entries)
+        markers: List[Optional[str]] = []
+        for i, (source, dest_path, mode) in enumerate(resolved_entries):
+            marker = None
+            if mode is not None and row_effs is not None and i < len(row_effs):
+                wf_row, adv_row = row_effs[i]
+                try:
+                    ns = _child_plan_args(child, self.build_child_cmd(
+                        str(SCRIPT_DIR / f"{child.__name__}.py"), origin, dest,
+                        str(source), dest_path, mode, 1, wf_row, adv_row,
+                        manifest=True, quiet=True))
+                except Exception:
+                    ns = None
+                if ns is not None:
+                    marker = _child_plan_globals(ns, _direction(origin, dest))[0]
+            markers.append(marker)
+        return markers
 
     def _manifest_needs_collision_scan(self, manifest_entries: List,
                                        export_marker: str,
@@ -10190,7 +10418,7 @@ class InteractiveMenu:
             _last_adv = session.get('last_advanced_options') or {}
             if _last_adv.get('delete_source'):
                 settings.append(["Delete source", "ON"])
-            if session.get('last_overwrite_guard') is False:
+            elif session.get('last_overwrite_guard') is False:     # #707
                 settings.append(["Overwrite guard", "off"])
             if session.get('last_expert_flags'):
                 settings.append(["Expert flags", session.get('last_expert_flags')])
@@ -10224,7 +10452,7 @@ class InteractiveMenu:
             _last_adv = session.get('last_advanced_options') or {}
             if _last_adv.get('delete_source'):
                 print("  Delete source: ON")
-            if session.get('last_overwrite_guard') is False:
+            elif session.get('last_overwrite_guard') is False:     # #707
                 print("  Overwrite guard: off")
             if session.get('last_expert_flags'):
                 print(f"  Expert flags: {session.get('last_expert_flags')}")
@@ -10431,7 +10659,16 @@ class InteractiveMenu:
         if session.get('last_provenance'):
             workflow['advanced_options']['provenance'] = session['last_provenance']
         if session.get('last_overwrite_guard') is False:
-            workflow['advanced_options']['overwrite_guard'] = False
+            if workflow['advanced_options'].get('delete_source'):
+                # No job that deletes ran with the guard off: every script
+                # refuses the pair (exit 2, after the HHMM). A session saved
+                # before #707 can carry an older job's "off": not this job's.
+                # On the screen: the wrapper's logger shows WARNING and up only
+                # (the second review of rc5, N2: an INFO line never showed).
+                self.ui.warn("The overwrite guard stays on for this replay: an earlier "
+                             "job's 'off' does not apply to a run that deletes sources.")
+            else:
+                workflow['advanced_options']['overwrite_guard'] = False
         if session.get('last_adopt_scan') is False:
             workflow['advanced_options']['adopt_scan'] = False
         workflow['expert_flags'] = session.get('last_expert_flags') or ''

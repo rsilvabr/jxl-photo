@@ -82,18 +82,28 @@ def test_db_preview_input_identical(tmp_path, monkeypatch):
 
 
 def test_db_no_full_image_float(tmp_path, monkeypatch):
+    """#570: the preview's 8 bits are made block by block. Since rc5 (V3) a
+    16-bit page goes through a table (_U16_TO_U8), with no float at all; the
+    spy watches the table and np.rint alike."""
     img = _image(1000, 1500)
     sizes = []
     real_rint = np.rint
+    real_table = dec._U16_TO_U8
 
     def rint(x, *a, **k):
         sizes.append(getattr(x, "size", 0))
         return real_rint(x, *a, **k)
+
+    class Table:
+        def __getitem__(self, block):
+            sizes.append(getattr(block, "size", 0))
+            return real_table[block]
     monkeypatch.setattr(np, "rint", rint)
+    monkeypatch.setattr(dec, "_U16_TO_U8", Table())
     _preview(tmp_path, monkeypatch, img)
     assert sizes, "the 8-bit conversion never ran"
     assert max(sizes) <= 256 * 1500 * 3, (
-        f"a float of {max(sizes)} samples: the whole image ({img.size})")
+        f"a block of {max(sizes)} samples: the whole image ({img.size})")
 
 
 # ===========================================================================

@@ -308,14 +308,23 @@ def test_one_decode_per_page_for_the_thumbnail_and_the_check(tmp_path, monkeypat
         return checked[-1]
 
     monkeypatch.setattr(enc, "_verify_roundtrip_page", check)
+    routes = []
+    for _name in ("_thumbnail_from_array", "_make_explorer_thumbnail"):
+        def _spy(*a, _real=getattr(enc, _name), _n=_name, **k):
+            routes.append((_n, _real(*a, **k)))
+            return routes[-1][1]
+        monkeypatch.setattr(enc, _name, _spy)
     out = tmp_path / HOSTILE / "16B_JXL"
     _run(enc, [src.parent, out, "--mode", "0", "--distance", distance, "--effort", "3",
                "--workers", "1", "--no-preflight", "--verify-roundtrip",
                "--explorer-thumbnail", "on"])
     assert (out / "DSC_0001 (2).jxl").exists()
     assert checked and all(ok for ok, _d in checked), checked
+    # One decode per page: the check's. Since V2 (rc5) the thumbnail is made
+    # from the page in memory, so the decode it kept for the check is gone too.
     assert len(decodes) == 1, decodes
-    assert any(a.startswith("--orig_icc_out=") for a in decodes[0]), decodes
+    assert [n for n, _j in routes] == ["_thumbnail_from_array"], routes
+    assert routes[0][1][:2] == bytes([0xFF, 0xD8]), "the thumbnail from memory is not a JPEG"
 
 
 @needs_tools

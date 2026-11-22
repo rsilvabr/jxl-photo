@@ -185,6 +185,14 @@ def _isolate_run_globals():
                 values = dict(getattr(mod, "_RUN_DEFAULTS", None) or {})
             for gname, value in values.items():
                 setattr(mod, gname, value)
+            # The abort latch and the Ctrl+C state (#702): a test that ended in
+            # an interrupt left them set, and later delete-gate tests in the
+            # same worker kept every source (the second review of rc5, S1).
+            if hasattr(mod, "_abort_reason"):
+                mod._abort_reason = None
+            for gname, value in (("_ctrl_c_seen", False), ("_ctrl_c_armed", True)):
+                if hasattr(mod, gname):
+                    setattr(mod, gname, value)
         # The decoder restores its globals at the next main() entry from a delta
         # record; a stale record would replay over the values restored above.
         decoder = sys.modules.get("jxl_tiff_decoder")
