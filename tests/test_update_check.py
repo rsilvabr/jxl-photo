@@ -55,6 +55,8 @@ def asked(monkeypatch):
     ("v2.22.0-exe1", (2, 22, 0, 1)), ("v2.22.0-exe3", (2, 22, 0, 1)),
     # The test releases since v2.30.1: -rcN, also inside the exe's tag.
     ("2.30.1-rc2", (2, 30, 1, 0)), ("v2.30.1-rc1-exe1", (2, 30, 1, 0)),
+    # A development version (tagged, never published) since 2.31.1-dev1.
+    ("2.31.1-dev1", (2, 31, 1, 0)), ("2.31.1-dev", None),
     ("2.30.1-1", None), ("2.30.1-rc", None),
     ("nonsense", None), (None, None), ("v2.22", None)])
 def test_version_key(text, key):
@@ -70,6 +72,8 @@ def test_version_key(text, key):
     ("2.30.1-rc2", "v2.30.1", True), ("2.30.1-rc1", "v2.30.1-exe1", True),
     ("2.30.1-rc1", "v2.30.0", False), ("2.30.1-rc1", "v2.30.0-exe1", False),
     ("2.30.1-rc1", "v2.31.0", True),
+    # A development version hears of its release, not of the one before it.
+    ("2.31.1-dev1", "v2.31.0", False), ("2.31.1-dev1", "v2.31.1", True),
     ("2.22.0", "v2.22.0-exe2", False),          # a new package of the same release
     ("2.22.0", "garbage", False)])
 def test_what_counts_as_news(cfg, asked, monkeypatch, mine, latest, news):

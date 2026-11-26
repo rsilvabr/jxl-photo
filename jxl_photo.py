@@ -28,7 +28,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.31.0"
+TOOLKIT_VERSION = "2.31.1-dev1"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 
@@ -11444,11 +11444,13 @@ def _update_repo() -> str:
 def _version_key(text: Optional[str]):
     """(major, minor, patch, final) of "v2.22.0", "2.30.1-rc1" (a test
     release of 2.30.1), "2.22.0_beta1" (the test releases' name until
-    v2.30.0) or "v2.22.0-exe1" (the exe's package revision is ignored: exe2
-    of the same release is not news here), or None. A test release sorts
+    v2.30.0), "2.31.1-dev1" (a development version: commits run from the
+    repo or a local copy before 2.31.1, tagged but never published) or
+    "v2.22.0-exe1" (the exe's package revision is ignored: exe2 of the same
+    release is not news here), or None. A test or development version sorts
     before its release: a copy running 2.30.1-rc2 is told when 2.30.1 is out
     (GitHub's "latest" never names a test release itself)."""
-    m = re.match(r"^v?(\d+)\.(\d+)\.(\d+)(_beta\d+|-rc\d+)?(?:-exe\d+)?$",
+    m = re.match(r"^v?(\d+)\.(\d+)\.(\d+)(_beta\d+|-rc\d+|-dev\d+)?(?:-exe\d+)?$",
                  (text or "").strip())
     if not m:
         return None

@@ -32,8 +32,8 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
-| [Round-97 — Python 3.13's thread for a child's input](#round-97--python-313s-thread-for-a-childs-input-2026-11-27) | 2026-11-27 | not released yet | #766 (1) |
-| [Round-96 — the recompressor's counts in the manifest table](#round-96--the-recompressors-counts-in-the-manifest-table-2026-11-26) | 2026-11-26 | not released yet | #765 (1) |
+| [Round-97 — Python 3.13's thread for a child's input](#round-97--python-313s-thread-for-a-childs-input-2026-11-27) | 2026-11-27 | v2.31.1-dev1 (not published) | #766 (1) |
+| [Round-96 — the recompressor's counts in the manifest table](#round-96--the-recompressors-counts-in-the-manifest-table-2026-11-26) | 2026-11-26 | v2.31.1-dev1 (not published) | #765 (1) |
 | [Round-95 — the sibling-rule sweep of rc7](#round-95--the-sibling-rule-sweep-of-rc7-2026-11-23) | 2026-11-23 | v2.31.0-rc8 | #746–#764 (19) |
 | [Round-94 — the targeted review, after rc6](#round-94--the-targeted-review-after-rc6-2026-11-22) | 2026-11-22 | v2.31.0-rc7 | #729–#745 (17) |
 | [Round-93 — the second sweep, after rc5](#round-93--the-second-sweep-after-rc5-2026-11-22) | 2026-11-22 | v2.31.0-rc6 | #712–#728 (17) |

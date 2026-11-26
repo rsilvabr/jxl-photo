@@ -1631,6 +1631,15 @@ must-fix / should-fix items and a commit verdict.
   in its history, so `vX.Y.Z` stays for the final and each edited test
   release takes the next `-rcN`. The older `vX.Y.Z_betaN` tags stay as they
   are; the wizard's update check (`_version_key`) reads both.
+- **Development versions `vX.Y.Z-devN` (since 2.31.1-dev1, the owner's call,
+  2026-11-27):** commits that run from this repo (photo-backup's backups do)
+  and from `jxl-photo_LOCAL` between releases. A git tag only — no GitHub
+  release, no exe, no release notes, the README keeps the published version;
+  `docs/version_history.md` gets a short "not published" section (the version
+  test needs it). Any change to what a conversion runs — even one meant to
+  write the same bytes — takes the next `-devN` before it runs anywhere; only
+  screen, log, count and install changes keep the number. `-rcN` stays for a
+  published test release.
 - **Tone of release notes and the README's "What's new": calm and short.**
   Most fixes close rare edge cases (an unusual combination, an interrupted
   run, a scanner profile): say that — "closes edge cases", "hardening" — and

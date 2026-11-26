@@ -57,10 +57,11 @@ def test_v1b_the_common_module_has_the_same_version():
 
 
 def test_v2_the_version_is_a_release_version():
-    """X.Y.Z, or X.Y.Z-rcN for a test release (since v2.30.1; the _betaN of
-    the older test releases went into every file they wrote)."""
+    """X.Y.Z, X.Y.Z-rcN for a test release (since v2.30.1; the _betaN of
+    the older test releases went into every file they wrote) or X.Y.Z-devN
+    for a development version (tagged, never published; since 2.31.1-dev1)."""
     version = _value("TOOLKIT_VERSION", "jxl_photo.py")
-    assert re.fullmatch(r"\d+\.\d+\.\d+(-rc\d+)?", version), version
+    assert re.fullmatch(r"\d+\.\d+\.\d+(-rc\d+|-dev\d+)?", version), version
     assert jxl_photo._version_key(version), (
         "the wizard's update check must read its own version")
 

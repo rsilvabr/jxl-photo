@@ -16,6 +16,7 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
+| [v2.31.1-dev1](#v2311-dev1) | 2026-11-27 | Development version, not published (tag only). The manifest table's OK and ovw counted like the other scripts; `jxl_photo.py setup`; on Python 3.13+ a codec's input written without a thread (#765, #766) |
 | **[v2.31.0](#v2310)** | 2026-11-23 | Faster with the same files: archiving, decoding and deleting 18–22 %, sRGB copies 8–38 %, recompression 15 %; deletes hardened in many edge cases (colour-converted exports, JPEG archives, Motion Photos, multi-page documents, Ctrl+C); film scans (VueScan RGB + infrared, grey profiles); exact EXIF values; `--serve` and `--verify-roundtrip` for programs; a temp folder with `%` or a TMP of 261+ characters refused; everything in the eight test releases (#684–#764) |
 | [v2.31.0-rc8](#v2310-rc8) | 2026-11-23 | Pre-release. The fixes of a sweep of rc7 by sibling rules (#746–#764): a delete keeps the source in more cases — a profile that could not be read, an export the run did not write, a Motion Photo, a copy out of staging that changed, more channels than one alpha; multi-page groups stay whole after a Ctrl+C or a page held open; long output paths, another program's bare JXL and three wizard paths no longer stop a run; everything in v2.31.0-rc7 |
 | [v2.31.0-rc7](#v2310-rc7) | 2026-11-22 | Pre-release. The fixes of a targeted review of the parts the sweeps had not read in full (#729–#745): VueScan's RGB+IR scans no longer have their infrared taken for transparency, a grey profile is really tested, no copy of a scan's infrared page; `--provenance adopt` no longer stamps another photo's archive; the JPEG recovery deletes an archive only on its checksum, neither a 16-bit PNG nor a decode to TIFF replaces a master or a JPEG archive they cannot hold whole, JPEG exports are not archived; auto mode's `--sync` resume and "convert to sRGB" work on JPEG archives; everything in v2.31.0-rc6 |
@@ -118,6 +119,30 @@ GitHub release notes before v1.8.2:
 [v1.7.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.1) ·
 [v1.7.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.0).
 Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refactoring.md).
+
+---
+
+## v2.31.1-dev1
+
+**Not published: a development version** (2026-11-27), tagged in git with
+no GitHub release and no exe. It is the code that runs from the repository
+and the owner's local copy until the next release, and every file it writes
+records `2.31.1-dev1` in its `xmpMM:History`, so that file can be told apart
+from one written by v2.31.0. Since v2.31.0:
+
+- The wizard's manifest table counts OK and ovw for the JPEG XL recompressor
+  as it does for the other scripts: ovw is the part of OK written over an
+  existing file (#765; a `--overwrite` run showed `OK 0`).
+- `python jxl_photo.py setup`: checks that cjxl, djxl, ExifTool and
+  ImageMagick are found on PATH and the Python packages are installed, and
+  offers to fix what is missing (`--check` only reads).
+- On Python 3.13 and newer, each cjxl call of the encoder no longer starts
+  a thread to hand over the image (#766): the toolkit writes the input
+  itself, as Python did up to 3.12. Under exhausted memory such a thread
+  could hang the run. The files written are the same, byte for byte
+  (compared with v2.31.0's code on real photos).
+- The wizard's update check reads a development version (`-devN`) as coming
+  before its release.
 
 ---
 
