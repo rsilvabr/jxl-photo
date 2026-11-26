@@ -142,9 +142,17 @@ A master is never redone because a setting changed: it is the archive, and a wro
 ## How the ICC profile is preserved
 
 ```
-Plain cjxl/djxl:   TIFF (ProPhoto, Kodak TRC) → JXL (native primaries) → TIFF with a generic profile
-With this toolkit: TIFF (ProPhoto, Kodak TRC) → JXL (+ the original ICC in XMP) → TIFF with the ORIGINAL profile
+Plain cjxl/djxl, lossy:    TIFF (ProPhoto, Kodak TRC) → JXL (native primaries) → TIFF with a generic profile
+Plain cjxl/djxl, lossless: TIFF (ProPhoto, Kodak TRC) → JXL (the ICC itself)   → TIFF with the ORIGINAL profile
+With this toolkit, both:   TIFF (ProPhoto, Kodak TRC) → JXL (+ the original ICC in XMP) → TIFF with the ORIGINAL profile
 ```
+
+A lossless JXL keeps the whole profile in its codestream, and plain djxl
+gives it back byte for byte (measured with libjxl 0.13.0 on Capture One
+ProPhoto and SilverFast profiles, 2026-11-27). A lossy JXL keeps only the
+primaries and a standard curve, or — for a profile with a table curve — the
+profile but pixels djxl returns in linear sRGB
+([details](jxl_color_internals.md#lossy-jxl-with-an-icc-blob-what-djxl-returns-measured-2026-09-25)).
 
 The encoder stores the original ICC profile, base64-encoded, in the JXL's XMP (a `jxlphoto-iccprofile` item in `dc:Relation`; `xmp:CreatorTool` up to v2.18.x), and the decoder's Roundtrip mode puts it back byte for byte. To check a round trip:
 

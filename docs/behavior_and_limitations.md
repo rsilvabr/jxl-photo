@@ -30,7 +30,7 @@ The same goes for a decode you **edited** after decoding it (Photoshop keeps the
 
 The default is **near-lossless, not lossless**. At `d=0.1` a 45 MP file drops to roughly a tenth of the TIFF size, and a difference blend in Photoshop *will* show small deviations — that is the compression working as configured, not a bug. For a bit-exact archive use `--distance 0` (still ~40% smaller than an uncompressed TIFF). Note that `--mode` (0–8) only decides *where* output files go; quality is `--distance` alone.
 
-### The distance floor depends on your cjxl: 0.05 on libjxl 0.12, 0.01 on 0.11
+### The distance floor depends on your cjxl: 0.05 from libjxl 0.12 on, 0.01 on 0.11
 
 **cjxl 0.12 and 0.13 clamp every lossy distance at or below 0.05 to the same value.** On two real 16-bit photos, `--distance 0.005` through `0.05` produced a **byte-identical** file. The menu and the CLI accept anything from 0 to 25, so setting `0.02` looks like it buys you something, but on 0.12 it does not: either stay at `0.05`, or go to `--distance 0` for true lossless. The floor was added in libjxl 0.12 ([PR #4238](https://github.com/libjxl/libjxl/pull/4238)): below it the DC coefficients leave the `int16` range, so the file no longer conforms to Level 5 of the JPEG XL spec. libjxl itself still decodes such files, but a decoder built for Level 5 may not.
 

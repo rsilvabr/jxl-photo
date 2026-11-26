@@ -36,7 +36,7 @@ Typical sizes in MB of ProPhoto exports from Capture One (median of 10–20 phot
 
 ## Features
 
-- **The original ICC profile comes back.** Plain cjxl/djxl give back a TIFF with a generic profile; the encoder stores the original profile in the JXL and the decoder puts it back byte for byte, even from a lossy file ([how](docs/commands_and_settings.md#how-the-icc-profile-is-preserved)).
+- **The original ICC profile comes back, lossy too.** Plain cjxl/djxl keep it only in a lossless file; a lossy one comes back with a generic profile. The encoder stores the original profile in the JXL and the decoder puts it back byte for byte, even from a lossy file ([how](docs/commands_and_settings.md#how-the-icc-profile-is-preserved)).
 - **TIFF → JXL masters**: 16-bit, lossless or near-lossless, EXIF/XMP visible in IrfanView and XnView MP; multi-page TIFFs and film scans (IR page included) split and rebuilt page for page.
 - **JXL → TIFF**: the TIFF back in its original profile, to edit again.
 - **JPEG ↔ JXL**: lossless, with the bit-exact JPEG back on demand.
@@ -164,7 +164,7 @@ py jxl_recompressor.py "F:\Photos\Archive" --mode 1 --distance 1.0 --dry-run   #
 One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior_and_limitations.md).
 
 - **Lossy is the default** (`--distance 0.1`, near-lossless, about a tenth of the TIFF); use `--distance 0` for a bit-exact archive. [More](docs/behavior_and_limitations.md#lossy-is-the-default---distance-01)
-- **cjxl 0.12 treats every distance up to 0.05 as 0.05**, so smaller values buy nothing there. [More](docs/behavior_and_limitations.md#the-distance-floor-depends-on-your-cjxl-005-on-libjxl-012-001-on-011)
+- **cjxl 0.12 and newer treat every distance up to 0.05 as 0.05**, so smaller values buy nothing there. [More](docs/behavior_and_limitations.md#the-distance-floor-depends-on-your-cjxl-005-from-libjxl-012-on-001-on-011)
 - **Every page of a multi-page TIFF is converted by default**, embedded previews included, except Capture One's. [More](docs/behavior_and_limitations.md#multi-page-tiffs-every-page-is-converted-by-default)
 - **The decoder never overwrites an original TIFF**, nor a decode you edited since. [More](docs/behavior_and_limitations.md#the-decoder-never-overwrites-an-original-tiff)
 - **Re-runs differ per script:** the TIFF encoder/decoder sync by date, the JPEG transcoder skips existing outputs; a changed distance redoes the copies but not the masters ([table](docs/commands_and_settings.md#what-a-re-run-redoes)). [More](docs/behavior_and_limitations.md#default-re-run-behavior-differs-per-script)
