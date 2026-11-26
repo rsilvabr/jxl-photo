@@ -3,6 +3,54 @@
 > Rather not install Python and the tools? A Windows program packages
 > everything: see [jxl-photo-exe](related_projects.md#jxl-photo-as-a-windows-program).
 
+## The easy way: `python jxl_photo.py setup`
+
+Install Python 3.9+ (from python.org, with "pip" and "Add to PATH" ticked), copy
+the release's files into one folder, then, from that folder:
+
+```powershell
+python jxl_photo.py setup
+```
+
+It shows what a program started now would run, and what is wrong with it:
+
+- **The tools** the scripts find on PATH — libjxl (`cjxl`, `djxl`, `jxlinfo`),
+  ExifTool and ImageMagick: which copy runs, its folder and version, and whether
+  it comes from the user PATH or the system PATH. It finds a tool that is
+  missing or does not run, a libjxl whose `cjxl`, `djxl` and `jxlinfo` come from
+  different folders or versions, an old or 8-bit (Q8) ImageMagick, several
+  copies of one tool, PATH entries whose folder is gone or that appear twice, and
+  an ExifTool in a folder whose name Windows' code page cannot hold (its launcher
+  fails there; the fix is the folder's short name).
+- **The Python packages** (numpy, tifffile, imagecodecs, Pillow, rich) and pip,
+  for the Python that runs the setup — run it with the same command you use for
+  the scripts (`python` or `py`); it says when `py` starts another Python.
+
+Then it offers the fixes: `[f]` fixes what it suggests; `[1]`, `[2]`, `[3]` open a
+tool, where `[p]` points it at another folder (also to switch to another version
+on purpose, when everything works), `[d]` downloads the tested version and `[r]`
+takes a copy off the PATH; `[p]` installs or upgrades the packages with pip
+(the command is shown first). Every change is shown and asked first.
+
+- It writes the **user PATH** only, putting the new folder first. A copy on the
+  **system PATH** wins over any user entry (Windows puts the system PATH first):
+  then the setup offers to remove that system entry, which needs one
+  administrator prompt; say no and nothing changes.
+- Every change is backed up first in `%LOCALAPPDATA%\jxl-photo\path-backups\`
+  (one file per change, plus `changes.log`); `[z]` undoes the last one.
+- `[d]` downloads the versions this release was tested with (the ones
+  jxl-photo-exe ships, below) into `%LOCALAPPDATA%\jxl-photo\tools\<tool>-<version>`
+  (`--tools-dir DIR` for another folder) and checks each file's SHA-256 before
+  anything is extracted or run. Older version folders stay, to go back to.
+- Programs already open keep their old PATH: open a new window afterwards (a
+  scheduled task may need you to sign out and in again).
+- `python jxl_photo.py setup --check` only reports: it asks nothing, writes
+  nothing, and exits 1 when something is an ERROR.
+
+The wizard's menu `D` (dependencies) offers the same setup after its check.
+
+## By hand
+
 ### 1. Python 3.9+ and packages
 
 ```powershell

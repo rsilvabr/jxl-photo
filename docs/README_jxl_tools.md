@@ -1043,6 +1043,10 @@ The top bar shows which tools and libraries are available:
 
 If `rich` is missing, the tool runs in plain-text mode with the same functionality.
 
+`D` in the main menu checks again, then asks **"Fix or change the tools on PATH
+and the Python packages (setup)?"** (default No): yes opens the setup below, and
+the bar is checked again when it ends.
+
 ### Explorer thumbnail tip (Windows)
 
 Windows Explorer shows no thumbnail for a JXL file unless a thumbnail handler
@@ -1090,6 +1094,37 @@ daily ask also looks up its latest release and compares it with the installed
 DLL's version (read from the file, without loading it): an older one adds a
 line (`jxl-thumb 0.2.1 is installed; 0.2.2 is out`) and `T` opens its releases
 page. The same settings turn it off.
+
+## Setup: the tools on PATH and the Python packages
+
+```powershell
+python jxl_photo.py setup            # report, then fix / switch / download
+python jxl_photo.py setup --check    # report only
+```
+
+The setup shows which copy of libjxl (`cjxl`, `djxl`, `jxlinfo`), ExifTool and
+ImageMagick a program started now would run (folder, version, user or system
+PATH), the Python packages and pip, and every problem it finds, with its fix:
+`[f]` fixes what it suggests; `[1]`–`[3]` open a tool (`[p]` another folder, also
+to switch versions on purpose; `[d]` the tested download; `[r]` take a copy off
+the PATH); `[p]` installs or upgrades the packages with pip; `[z]` undoes the last
+PATH change; `[r]` checks again. It writes the user PATH only (each change shown,
+asked and backed up in `%LOCALAPPDATA%\jxl-photo\path-backups\`); removing a
+system-PATH entry needs one administrator prompt. Details: [install.md](install.md).
+It is for the Python version: jxl-photo.exe carries its own tools and refuses it.
+
+| Flag | What it does |
+|------|--------------|
+| `--check` | Report only: asks nothing, writes nothing (no backup, no settings). Exit 0, or 1 when a finding is an ERROR. |
+| `--tools-dir DIR` | Where `[d]` puts the tested downloads (default `%LOCALAPPDATA%\jxl-photo\tools`). A folder whose name Windows' code page cannot hold is replaced by its short name, else `%SystemDrive%\jxl-photo-tools` (asked first): ExifTool's launcher cannot run from such a folder. |
+| `--apply-system-path FILE` | Internal: used by the setup's own elevated step (the administrator copy that writes the system PATH from a plan file). |
+| `--sha256 HEX` | Internal: used by the setup's own elevated step (the plan file's SHA-256, checked before anything is written). |
+
+`JXLPHOTO_SETUP_PATH_STORE` (an environment variable naming a JSON file) makes the
+setup read and write PATH values there instead of the registry: for tests and
+for trying it safely.
+
+* * *
 
 ## Logs
 

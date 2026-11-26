@@ -404,6 +404,8 @@ def test_d_respects_the_off_switch(cfg, asked):
 def test_d_in_the_main_loop_offers_u(tmp_path, monkeypatch, asked, capsys):
     monkeypatch.setattr(wp, "TOOLKIT_VERSION", "2.22.0")
     monkeypatch.setattr(wp, "_update_check_start", lambda c: (lambda wait=0.0: None))
+    # D then asks whether to open the setup (deps.setup): no.
+    monkeypatch.setattr("builtins.input", lambda *a: "n")
     menus = _main(tmp_path, monkeypatch, [], picks=("D", "0"))
     assert menus[0] is None                      # nothing known before D
     assert menus[1] and menus[1][0] == "v99.0.0"

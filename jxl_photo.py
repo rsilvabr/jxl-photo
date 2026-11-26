@@ -1546,7 +1546,10 @@ class DependencyChecker:
 
     def _test_tool_execution(self, path: str, args: List[str]) -> bool:
         try:
+            # stdin NUL, as the scripts run every tool: an exiftool(-k)
+            # waited for a key until the timeout and read as missing.
             result = subprocess.run([path] + args, capture_output=True,
+                                  stdin=subprocess.DEVNULL,
                                   text=True, encoding="utf-8", errors="replace",
                                   timeout=10, shell=False)
             return result.returncode == 0
@@ -11622,6 +11625,1886 @@ def _jxl_thumbnail_tip() -> Optional[str]:
             f"jxl-thumb adds them: {JXL_THUMB_URL} ([T] in the menu opens it)")
 
 
+# === SETUP (jxl_photo.py setup) ==============================================
+#
+# `python jxl_photo.py setup`: the external tools the scripts find on PATH
+# (libjxl, ExifTool, ImageMagick) and the Python packages: what a program
+# started NOW runs, what is wrong with it, and the fixes. PATH values are
+# written only through _write_path (compare-and-swap, a backup, the broadcast),
+# never setx; the system PATH only through the elevated --apply-system-path
+# plan. Tests and tools/ui_tour.py set JXLPHOTO_SETUP_PATH_STORE (a JSON copy
+# of the values): nothing of theirs ever reaches the registry.
+
+_REG_SZ = 1
+_REG_EXPAND_SZ = 2
+
+# The versions jxl-photo-exe's build.py ships (TOOLS, REQUIREMENTS) and
+# docs/install.md names: change the three together.
+_SETUP_TESTED_TOOLS = {
+    "libjxl": {
+        "version": "0.13.0",
+        "url": "https://github.com/libjxl/libjxl/releases/download/v0.13.0/"
+               "jxl-x64-windows-static.7z",
+        "sha256": "d97b753ffcd0f992db2ab3ef7e896a6ba425cafe8332e5e6df6376f70e2b9ada",
+        "archive": "jxl-x64-windows-static.7z",
+    },
+    "exiftool": {
+        "version": "13.59",
+        "url": "https://sourceforge.net/projects/exiftool/files/exiftool-13.59_64.zip/download",
+        "sha256": "44b512b25af500724ba579d0a53c8fc5851628b692dd5e5d94ae4a15c2cba9ec",
+        "archive": "exiftool-13.59_64.zip",
+    },
+    "magick": {
+        "version": "7.1.2-27",
+        "url": "https://github.com/ImageMagick/ImageMagick/releases/download/7.1.2-27/"
+               "ImageMagick-7.1.2-27-portable-Q16-HDRI-x64.7z",
+        "sha256": "c7d6f13b3021db5d2e23876d85f06d6039a9a345236f0d32cdb73886ddfe70ed",
+        "archive": "ImageMagick-7.1.2-27-portable-Q16-HDRI-x64.7z",
+    },
+}
+_SETUP_TESTED_PACKAGES = {"numpy": "2.5.1", "tifffile": "2026.6.1",
+                          "imagecodecs": "2026.6.26", "pillow": "12.3.0", "rich": "15.0.0"}
+
+# Below these a tool is refused (libjxl: the encoder's _warn_if_libjxl_too_old
+# number) or only warned about (ExifTool: one process per command below 12.15).
+_SETUP_MIN_LIBJXL = (0, 11, 2)
+_SETUP_MIN_EXIFTOOL = (12, 15)
+_SETUP_MIN_MAGICK_MAJOR = 7
+# The packages without which the encoder and the decoder do not run at all.
+_SETUP_PACKAGES_REQUIRED = ("numpy", "tifffile")
+_SETUP_MAX_DOWNLOAD = 400 * 1024 * 1024
+_SETUP_ELEVATED_WAIT = 180
+_SETUP_RESTART_NOTE = ("Programs already open keep their old PATH: open a new window. "
+                       "A scheduled task may need you to sign out and in again.")
+_SETUP_SEVERITY_ORDER = {"error": 0, "warning": 1, "info": 2}
+_SETUP_REG_WHERE = {
+    "user": ("HKEY_CURRENT_USER", r"Environment"),
+    "system": ("HKEY_LOCAL_MACHINE",
+               r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+}
+# Printed in a package's line of the probe below: (name, module, distribution).
+_SETUP_PACKAGE_MODULES = (("numpy", "numpy", "numpy"), ("tifffile", "tifffile", "tifffile"),
+                          ("imagecodecs", "imagecodecs", "imagecodecs"),
+                          ("pillow", "PIL", "pillow"), ("rich", "rich", "rich"))
+# Run by the interpreter in a process of its own: a package installed a moment
+# ago by this setup must show, and the setup itself never imports them.
+_SETUP_PACKAGE_PROBE = (
+    "import importlib, json\n"
+    "try:\n"
+    "    from importlib import metadata\n"
+    "except ImportError:\n"
+    "    metadata = None\n"
+    "out = {}\n"
+    "for name, mod, dist in %r:\n"
+    "    try:\n"
+    "        m = importlib.import_module(mod)\n"
+    "    except Exception:\n"
+    "        out[name] = None\n"
+    "        continue\n"
+    "    try:\n"
+    "        v = metadata.version(dist)\n"
+    "    except Exception:\n"
+    "        v = getattr(m, '__version__', None)\n"
+    "    out[name] = str(v) if v else '?'\n"
+    "print(json.dumps(out))\n" % (_SETUP_PACKAGE_MODULES,))
+
+
+class _PathStore:
+    """The PATH values in the registry (Windows): HKCU\\Environment for the
+    user, the Session Manager's Environment for the system. Only
+    _apply_system_path_plan writes the system one (as administrator)."""
+    elevation_needed = True
+    writable = True
+    where = {"user": r"HKEY_CURRENT_USER\Environment",
+             "system": r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Session Manager\Environment"}
+
+    @staticmethod
+    def _open(scope, access):
+        import winreg
+        root, sub = _SETUP_REG_WHERE[scope]
+        return winreg.OpenKey(getattr(winreg, root), sub, 0, access)
+
+    def read(self, scope):
+        import winreg
+        try:
+            with self._open(scope, winreg.KEY_READ) as key:
+                value, regtype = winreg.QueryValueEx(key, "Path")
+        except FileNotFoundError:
+            return None, None
+        if not isinstance(value, str):
+            # A REG_MULTI_SZ or binary Path: nothing this setup should edit.
+            raise OSError(f"the {scope} Path value is not text (registry type {regtype})")
+        return value, int(regtype)
+
+    def write(self, scope, value, regtype):
+        import winreg
+        with self._open(scope, winreg.KEY_SET_VALUE) as key:
+            winreg.SetValueEx(key, "Path", 0, int(regtype), value)
+
+    def broadcast(self) -> bool:
+        return _broadcast_environment()
+
+
+class _JsonPathStore:
+    """The same interface on a JSON file {"user": {"value", "type"},
+    "system": {...}} (JXLPHOTO_SETUP_PATH_STORE): the suite, ui_tour and a
+    by-hand try never reach the registry. A missing file = both empty."""
+    elevation_needed = False
+    writable = True
+
+    def __init__(self, file):
+        self.file = Path(file)
+        self.where = {"user": f"user PATH of {self.file}", "system": f"system PATH of {self.file}"}
+
+    def _load(self) -> Dict:
+        try:
+            data = json.loads(self.file.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def read(self, scope):
+        entry = self._load().get(scope) or {}
+        value, regtype = entry.get("value"), entry.get("type")
+        return (value if isinstance(value, str) else None,
+                regtype if isinstance(regtype, int) and not isinstance(regtype, bool) else None)
+
+    def write(self, scope, value, regtype):
+        data = self._load()
+        data[scope] = {"value": value, "type": int(regtype)}
+        self.file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.file.with_name(f"{self.file.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, self.file)
+
+    def broadcast(self) -> bool:
+        return True
+
+
+class _EnvPathStore:
+    """Linux / macOS: this shell's PATH, read only. Every PATH action prints
+    the line to add to the shell profile instead (A7 of the plan)."""
+    elevation_needed = False
+    writable = False
+    where = {"user": "this shell's PATH", "system": "(none)"}
+
+    def read(self, scope):
+        if scope != "user":
+            return None, None
+        value = os.environ.get("PATH")
+        if value is None:
+            return None, None
+        return (value.replace(os.pathsep, ";") if os.pathsep != ";" else value), None
+
+    def write(self, scope, value, regtype):
+        raise NotImplementedError("the PATH is set in the shell profile here")
+
+    def broadcast(self) -> bool:
+        return False
+
+
+def _path_store():
+    """Where the setup reads and writes PATH values."""
+    file = os.environ.get("JXLPHOTO_SETUP_PATH_STORE")
+    if file:
+        return _JsonPathStore(file)
+    if os.name == "nt":
+        return _PathStore()
+    return _EnvPathStore()
+
+
+def _broadcast_environment() -> bool:
+    """Tell running programs (Explorer first) that the environment changed:
+    WM_SETTINGCHANGE "Environment". A failure is a note, never an error."""
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.WinDLL("user32")
+        send = user32.SendMessageTimeoutW
+        send.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPCWSTR,
+                         wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t)]
+        send.restype = ctypes.c_ssize_t
+        result = ctypes.c_size_t(0)
+        return bool(send(0xFFFF, 0x001A, 0, "Environment", 0x0002, 5000, ctypes.byref(result)))
+    except Exception:
+        return False
+
+
+# --- PATH strings ------------------------------------------------------------
+
+def _path_entries(value) -> List[str]:
+    """The entries of a PATH value, each as written (only the whitespace
+    around it stripped); empty ones dropped."""
+    return [e.strip() for e in (value or "").split(";") if e.strip()]
+
+
+def _expand_env(text: str) -> str:
+    if os.name == "nt":
+        try:
+            import winreg
+            return winreg.ExpandEnvironmentStrings(text)
+        except Exception:
+            return text
+    return os.path.expandvars(text)
+
+
+def _expand_entry(entry: str) -> str:
+    """The folder a PATH entry names: quotes off, %VAR%s expanded."""
+    return _expand_env(entry.strip().strip('"'))
+
+
+def _path_key(entry: str) -> str:
+    """What two PATH entries are compared by: the expanded, normalised,
+    case-folded folder without a trailing separator (a drive root keeps it)."""
+    text = _expand_entry(entry)
+    if not text:
+        return ""
+    text = os.path.normcase(os.path.normpath(text))
+    if len(text) > 1 and text[-1] in "\\/" and not re.fullmatch(r"[A-Za-z]:[\\/]", text):
+        text = text.rstrip("\\/")
+    return text
+
+
+def _path_edit(value, *, remove=(), prepend=()) -> str:
+    """`value` without every entry that names a folder of `remove` or of
+    `prepend` (each occurrence), with `prepend` in front, in order. Every
+    other entry keeps its exact text (an unexpanded %VAR% included)."""
+    drop = {_path_key(r) for r in remove} | {_path_key(p) for p in prepend}
+    kept = [e for e in _path_entries(value) if _path_key(e) not in drop]
+    return ";".join(list(prepend) + kept)
+
+
+def _path_remove_later_duplicates(value, entry) -> str:
+    """`value` with the later occurrences of `entry`'s folder dropped (the
+    first one stays where it is)."""
+    key, seen, out = _path_key(entry), False, []
+    for e in _path_entries(value):
+        if _path_key(e) == key:
+            if seen:
+                continue
+            seen = True
+        out.append(e)
+    return ";".join(out)
+
+
+def _path_replace(value, old, new) -> str:
+    """`value` with each entry naming `old`'s folder replaced by `new`, at the
+    same position."""
+    key = _path_key(old)
+    return ";".join(new if _path_key(e) == key else e for e in _path_entries(value))
+
+
+def _new_process_path(store, values=None) -> List[Tuple[str, str]]:
+    """(folder, "system"|"user") in the order a program started now gets
+    them: Windows puts the system entries first, then the user's."""
+    values = values or {s: store.read(s) for s in ("system", "user")}
+    return [(_expand_entry(e), scope) for scope in ("system", "user")
+            for e in _path_entries(values[scope][0])]
+
+
+def _ansi_safe(text) -> bool:
+    """True when `text` survives the ANSI code page (always off Windows)."""
+    if os.name != "nt":
+        return True
+    try:
+        str(text).encode("mbcs", "strict")
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
+def _short_path(path) -> Optional[str]:
+    """The 8.3 short name of an existing path, or None (off Windows, or on a
+    volume without short names)."""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        buf = ctypes.create_unicode_buffer(32768)
+        n = ctypes.windll.kernel32.GetShortPathNameW(str(path), buf, len(buf))
+    except Exception:
+        return None
+    return buf.value if 0 < n < len(buf) else None
+
+
+# --- Tools on the PATH ------------------------------------------------------
+
+@dataclass(frozen=True)
+class _ToolUnit:
+    key: str
+    label: str
+    programs: Tuple[str, ...]
+    version_args: Tuple[str, ...]
+    required: bool
+
+
+_SETUP_UNITS = (
+    # One unit: the three from one folder and one version (D5, #669).
+    _ToolUnit("libjxl", "libjxl", ("cjxl", "djxl", "jxlinfo"), ("--version",), True),
+    # One program, three names, tried in this order by the scripts.
+    _ToolUnit("exiftool", "ExifTool", ("exiftool", "exiftool-k", "exiftool(-k)"), ("-ver",), True),
+    _ToolUnit("magick", "ImageMagick", ("magick",), ("--version",), False),
+)
+
+
+def _setup_unit(key: str) -> _ToolUnit:
+    return next(u for u in _SETUP_UNITS if u.key == key)
+
+
+def _program_args(unit: _ToolUnit, program: str) -> Tuple[str, ...]:
+    # jxlinfo has no --version: -h is its only option that exits 0 without a file.
+    return ("-h",) if program == "jxlinfo" else unit.version_args
+
+
+@dataclass
+class _Probe:
+    ok: bool
+    rc: Optional[int]
+    out: str
+    err: str
+    timed_out: bool = False
+    error: str = ""
+
+
+def _probe(path, args, timeout=20) -> _Probe:
+    """Run a tool the way the scripts do: stdin NUL (an exiftool(-k)'s pause
+    at its end returns at once), no shell."""
+    try:
+        r = subprocess.run([str(path), *args], stdin=subprocess.DEVNULL, capture_output=True,
+                           text=True, encoding="utf-8", errors="replace", timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return _Probe(False, None, "", "", True, f"no answer in {timeout} s")
+    except (OSError, ValueError) as e:
+        return _Probe(False, None, "", "", False, str(e))
+    return _Probe(r.returncode == 0, r.returncode, r.stdout or "", r.stderr or "", False,
+                  "" if r.returncode == 0 else f"exit code {r.returncode}")
+
+
+def _probe_error(p: _Probe) -> str:
+    said = _common._stderr_tail(p.err or p.out or "")
+    return f"{p.error}: {said}" if said and not p.timed_out else (p.error or said or "failed")
+
+
+def _pathext() -> List[str]:
+    return [e for e in (os.environ.get("PATHEXT") or ".COM;.EXE;.BAT;.CMD").split(";") if e]
+
+
+def _find_copies(name: str, dirs) -> List[Path]:
+    """Like `where`: in each folder, in order, `name` with each PATHEXT
+    extension (and `name` itself when it already ends in one); one entry per
+    real file."""
+    out, seen = [], set()
+    if os.name == "nt":
+        exts = _pathext()
+        names = [name + e for e in exts]
+        if any(name.lower().endswith(e.lower()) for e in exts):
+            names.insert(0, name)
+    else:
+        names = [name]
+    for d in dirs:
+        if not d:
+            continue
+        listing = None
+        for n in names:
+            p = os.path.join(d, n)
+            try:
+                if not os.path.isfile(p):
+                    continue
+                if os.name != "nt" and not os.access(p, os.X_OK):
+                    continue
+                key = os.path.normcase(os.path.realpath(p))
+                if os.name == "nt":
+                    # The name as the folder writes it (cjxl.exe, not PATHEXT's cjxl.EXE).
+                    if listing is None:
+                        listing = {x.lower(): x for x in os.listdir(d)}
+                    p = os.path.join(d, listing.get(n.lower(), n))
+            except (OSError, ValueError):
+                continue
+            if key not in seen:
+                seen.add(key)
+                out.append(Path(p))
+    return out
+
+
+def _parse_version(unit_key: str, program: str, p: _Probe):
+    """(version text, version tuple, quantum) from a probe; Nones when unknown."""
+    text = f"{p.out}\n{p.err}"
+    if unit_key == "libjxl":
+        if program == "jxlinfo":
+            return None, None, None
+        m = re.search(r"v?(\d+)\.(\d+)\.(\d+)", text)
+        return ((f"{m.group(1)}.{m.group(2)}.{m.group(3)}", tuple(int(x) for x in m.groups()), None)
+                if m else (None, None, None))
+    if unit_key == "exiftool":
+        m = re.search(r"(\d+)\.(\d+)", text)
+        return (m.group(0), tuple(int(x) for x in m.groups()), None) if m else (None, None, None)
+    m = re.search(r"ImageMagick\s+(\d+)\.(\d+)\.(\d+)(?:-(\d+))?\s+(Q\d+)", text)
+    if not m:
+        return None, None, None
+    nums = [int(x) for x in m.groups()[:3]] + [int(m.group(4) or 0)]
+    version = f"{m.group(1)}.{m.group(2)}.{m.group(3)}" + (f"-{m.group(4)}" if m.group(4) else "")
+    return version, tuple(nums), m.group(5)
+
+
+@dataclass
+class _Copy:
+    program: str
+    path: str
+    folder: str
+    scope: str
+    probe: Optional[_Probe] = None
+    version: Optional[str] = None
+    vtuple: Optional[tuple] = None
+    quantum: Optional[str] = None
+
+    @property
+    def ok(self) -> bool:
+        return bool(self.probe and self.probe.ok)
+
+    @property
+    def real(self) -> str:
+        return os.path.normcase(os.path.realpath(self.path))
+
+
+@dataclass
+class _UnitState:
+    unit: _ToolUnit
+    copies: Dict[str, List[_Copy]] = field(default_factory=dict)
+    winners: Dict[str, Optional[_Copy]] = field(default_factory=dict)
+
+    @property
+    def main(self) -> Optional[_Copy]:
+        """The copy whose version and folder the table shows."""
+        return self.winners.get(self.unit.programs[0])
+
+    def all_copies(self) -> List[_Copy]:
+        return [c for p in self.unit.programs for c in self.copies.get(p, [])]
+
+
+@dataclass
+class _Finding:
+    severity: str            # error | warning | info
+    code: str
+    unit: str
+    message: str
+    fix: Optional[Tuple] = None
+
+
+@dataclass
+class _SetupReport:
+    values: Dict[str, Tuple[Optional[str], Optional[int]]]
+    view: List[Tuple[str, str]]
+    units: Dict[str, _UnitState]
+    findings: List[_Finding]
+
+
+def _locate(program: str, view) -> List[Tuple[Path, str, str]]:
+    """Every copy of `program` on the new-process PATH: (file, folder, scope),
+    in PATH order, one per real file."""
+    out, seen = [], set()
+    for folder, scope in view:
+        for p in _find_copies(program, [folder]):
+            key = os.path.normcase(os.path.realpath(str(p)))
+            if key not in seen:
+                seen.add(key)
+                out.append((p, folder, scope))
+    return out
+
+
+def _setup_protected(folder: str, units: Dict[str, _UnitState]) -> Optional[str]:
+    """Why a folder's PATH entry is never offered for removal, or None: the
+    Windows folder (System32 and its kin hold everything) or a folder that
+    holds the copy another tool runs."""
+    key = _path_key(folder)
+    root = os.environ.get("SystemRoot") or os.environ.get("windir")
+    if root and (key == _path_key(root) or key.startswith(_path_key(root) + os.sep)):
+        return "it is a Windows folder"
+    for st in units.values():
+        for c in st.winners.values():
+            if c and _path_key(c.folder) == key:
+                return f"it holds the {c.program} that runs"
+    return None
+
+
+def _versions_text(copies: List[_Copy]) -> str:
+    return ", ".join(sorted({c.version or "?" for c in copies}))
+
+
+def _unit_findings(st: _UnitState, units: Dict[str, _UnitState]) -> List[_Finding]:
+    u, out = st.unit, []
+    tested = _SETUP_TESTED_TOOLS[u.key]["version"]
+
+    def add(sev, code, msg, fix=None):
+        out.append(_Finding(sev, code, u.key, msg, fix))
+
+    setf = ("set_folder", u.key)
+    if u.key == "libjxl":
+        missing = [p for p in u.programs if st.winners.get(p) is None]
+        present = [st.winners[p] for p in u.programs if st.winners.get(p)]
+        if missing:
+            add("error", "MISSING", f"{', '.join(missing)} not found on the PATH a new program "
+                f"gets.", setf)
+        for c in present:
+            if not c.ok:
+                add("error", "BROKEN", f"{c.path} does not run ({_probe_error(c.probe)}).", setf)
+        if len({_path_key(c.folder) for c in present}) > 1:
+            add("error", "LIBJXL_SPLIT", "cjxl, djxl and jxlinfo come from different folders ("
+                + "; ".join(f"{c.program}: {c.folder}" for c in present)
+                + "): they must be one libjxl, of one version (#669: a cjxl 0.13 archive "
+                  "rebuilt by a djxl 0.12 is another JPEG).", setf)
+        cj, dj = st.winners.get("cjxl"), st.winners.get("djxl")
+        if cj and dj and cj.vtuple and dj.vtuple and cj.vtuple != dj.vtuple:
+            add("error", "LIBJXL_VERSIONS", f"cjxl is {cj.version} ({cj.folder}) and djxl is "
+                f"{dj.version} ({dj.folder}): one libjxl, of one version, is needed (#669).", setf)
+        old = [c for c in (cj, dj) if c and c.ok and c.vtuple and c.vtuple < _SETUP_MIN_LIBJXL]
+        if old:
+            add("error", "TOO_OLD", f"{old[0].program} is libjxl {old[0].version}: the toolkit "
+                f"needs {'.'.join(map(str, _SETUP_MIN_LIBJXL))} or newer.", setf)
+        runs = all(st.winners.get(p) and st.winners[p].ok for p in u.programs)
+        if runs and not out and (cj.version != tested or dj.version != tested):
+            add("info", "UNTESTED", f"libjxl {cj.version or 'of unknown version'} runs; this "
+                f"release was tested with {tested}.",
+                ("download", u.key) if os.name == "nt" else None)
+    else:
+        w = st.main
+        if w is None:
+            if u.key == "exiftool":
+                add("error", "MISSING", "ExifTool (exiftool, exiftool-k or exiftool(-k)) not "
+                    "found on the PATH a new program gets.", setf)
+            else:
+                add("warning", "MISSING", "magick not found: ICC profile conversions are off "
+                    "(the wizard says 'ICC off').", setf)
+        elif not w.ok:
+            if u.key == "exiftool" and not _ansi_safe(w.folder):
+                short = _short_path(w.folder)
+                fix = (("short_path", w.folder) if short and _ansi_safe(short)
+                       else (("download", u.key) if os.name == "nt" else setf))
+                add("error", "EXIFTOOL_ANSI", f"{w.path} does not run ({_probe_error(w.probe)}): "
+                    f"its folder has characters outside the Windows code page, where ExifTool's "
+                    f"launcher cannot find its exiftool_files.", fix)
+            else:
+                add("error", "BROKEN", f"{w.path} does not run ({_probe_error(w.probe)}).", setf)
+        elif u.key == "exiftool":
+            if w.vtuple and w.vtuple < _SETUP_MIN_EXIFTOOL:
+                add("warning", "OLD", f"ExifTool {w.version} works, but below "
+                    f"{'.'.join(map(str, _SETUP_MIN_EXIFTOOL))} it runs one process per "
+                    f"command (slower).", setf)
+        else:
+            if w.vtuple and w.vtuple[0] < _SETUP_MIN_MAGICK_MAJOR:
+                add("warning", "OLD", f"ImageMagick {w.version}: the toolkit needs version "
+                    f"{_SETUP_MIN_MAGICK_MAJOR} (ICC off otherwise).", setf)
+            if w.quantum == "Q8":
+                add("error", "Q8", f"ImageMagick {w.version} is a Q8 build: 16-bit precision is "
+                    f"lost. Use a Q16 (Q16-HDRI) build.", setf)
+        if w is not None and w.ok and not out and w.version != tested:
+            add("info", "UNTESTED", f"{u.label} {w.version or 'of unknown version'} runs; this "
+                f"release was tested with {tested}.",
+                ("download", u.key) if os.name == "nt" else None)
+
+    # Copies that lose: to a system copy (only the administrator can fix
+    # that), or plain duplicates.
+    shadowed_folders, conflicts = {}, {}
+    names = (("exiftool",) if u.key == "exiftool" else u.programs)
+    for prog in names:
+        w = st.winners.get(prog)
+        if w is None:
+            continue
+        pool = st.all_copies() if u.key == "exiftool" else st.copies.get(prog, [])
+        for c in pool:
+            if c.real == w.real:
+                continue
+            if w.scope == "system" and c.scope == "user":
+                shadowed_folders.setdefault(w.folder, []).append((w, c))
+            else:
+                conflicts.setdefault(c.folder, []).append((w, c))
+    for folder, pairs in shadowed_folders.items():
+        why = _setup_protected_for_system(folder)
+        others = [] if why else _programs_besides(folder, u.key)
+        add("warning", "SHADOWED_BY_SYSTEM",
+            "; ".join(f"{c.path} ({c.version or '?'}, user PATH) loses to {w.path} "
+                      f"({w.version or '?'}, system PATH)" for w, c in pairs)
+            + ": Windows puts the system PATH first."
+            + (f" Its system entry is not offered for removal: {why}." if why else "")
+            + (f" Its folder also holds {_programs_listing(others)}: they would leave the "
+               f"PATH with it." if others else ""),
+            None if why else ("remove_entries", "system", [folder]))
+    for folder, pairs in conflicts.items():
+        same = all(c.version == w.version for w, c in pairs)
+        scope = pairs[0][1].scope
+        why = _setup_protected(folder, units)
+        if why is None and scope == "user":
+            # The losing copy does no harm; the folder's other programs would
+            # leave the PATH with it (a shims or tools folder): [r] only.
+            others = _programs_besides(folder, u.key)
+            if others:
+                why = (f"it also holds {_programs_listing(others)} ([r] in the tool's menu "
+                       f"removes it anyway)")
+        fix = (("remove_entries", "user", [folder]) if scope == "user" and not why else None)
+        add("info" if same else "warning", "CONFLICT",
+            "; ".join(f"{c.path} ({c.version or '?'}, {c.scope} PATH) is not used: {w.path} "
+                      f"({w.version or '?'}) comes first" for w, c in pairs)
+            + (f". Not offered for removal: {why}." if why and scope == "user" else "."), fix)
+    return out
+
+
+def _programs_besides(folder: str, unit_key: Optional[str] = None) -> List[str]:
+    """The programs in `folder` other than the unit's (every setup tool's
+    when no unit): what else leaves the PATH with the folder's entry."""
+    units = [u for u in _SETUP_UNITS if unit_key in (None, u.key)]
+    own = {p.lower() for u in units for p in u.programs}
+    try:
+        return sorted(p.name for p in Path(folder).iterdir()
+                      if p.is_file() and p.suffix.lower() in (".exe", ".com", ".cmd", ".bat")
+                      and p.stem.lower() not in own)
+    except OSError:
+        return []
+
+
+def _programs_listing(names: List[str]) -> str:
+    return ", ".join(names[:12]) + (" ..." if len(names) > 12 else "")
+
+
+def _setup_protected_for_system(folder: str) -> Optional[str]:
+    root = os.environ.get("SystemRoot") or os.environ.get("windir")
+    key = _path_key(folder)
+    if root and (key == _path_key(root) or key.startswith(_path_key(root) + os.sep)):
+        return "it is a Windows folder"
+    return None
+
+
+def _entry_findings(values, units) -> List[_Finding]:
+    out = []
+    for scope in ("user", "system"):
+        seen, repeated = set(), set()
+        for e in _path_entries(values[scope][0]):
+            key = _path_key(e)
+            if key in seen:
+                if key not in repeated:
+                    repeated.add(key)
+                    out.append(_Finding("info", "DUPLICATE_ENTRY", "path",
+                                        f"{e} is in the {scope} PATH more than once.",
+                                        ("remove_duplicates", scope, e)))
+                continue
+            seen.add(key)
+            folder = _expand_entry(e)
+            if re.search(r"%[A-Za-z_][A-Za-z0-9_()]*%", folder):
+                # A variable this process does not know (set since it
+                # started?): cannot tell. A folder named "100%off %d" is a
+                # name, not a variable, and is judged.
+                continue
+            try:
+                exists = os.path.isdir(folder)
+            except (OSError, ValueError):
+                exists = True
+            if not exists:
+                out.append(_Finding(
+                    "warning" if scope == "user" else "info", "STALE_ENTRY", "path",
+                    f"{e} ({scope} PATH): the folder does not exist (a drive that is not "
+                    f"connected looks the same: then keep it).",
+                    ("remove_entries", scope, [e])))
+    return out
+
+
+def _process_only_findings(units, view, process_path) -> List[_Finding]:
+    out = []
+    dirs = [d for d in (process_path or "").split(os.pathsep) if d.strip()]
+    for st in units.values():
+        names = st.unit.programs
+        if any(st.winners.get(p) for p in names):
+            continue
+        for prog in names:
+            found = _find_copies(prog, [_expand_entry(d) for d in dirs])
+            if found:
+                out.append(_Finding(
+                    "info", "PROCESS_ONLY", st.unit.key,
+                    f"{found[0]} is on this window's PATH only (a launcher or a script added "
+                    f"it): a program started from elsewhere, a scheduled task included, will "
+                    f"not find it.", None))
+                break
+    return out
+
+
+def _diagnose(store, probe=_probe, process_path=None) -> _SetupReport:
+    """What a program started now gets for each tool (system PATH, then the
+    user's), every copy found, and the findings."""
+    values = {s: store.read(s) for s in ("system", "user")}
+    view = _new_process_path(store, values)
+    cache: Dict[Tuple, _Probe] = {}
+    units: Dict[str, _UnitState] = {}
+    for unit in _SETUP_UNITS:
+        st = _UnitState(unit)
+        for prog in unit.programs:
+            copies = []
+            for path, folder, scope in _locate(prog, view):
+                args = _program_args(unit, prog)
+                key = (os.path.normcase(os.path.realpath(str(path))), args)
+                if key not in cache:
+                    cache[key] = probe(path, list(args))
+                c = _Copy(prog, str(path), folder, scope, cache[key])
+                c.version, c.vtuple, c.quantum = _parse_version(unit.key, prog, c.probe)
+                copies.append(c)
+            st.copies[prog] = copies
+        if unit.key == "exiftool":
+            # The scripts try the NAMES in order, each over the whole PATH.
+            st.winners["exiftool"] = next((st.copies[n][0] for n in unit.programs
+                                           if st.copies[n]), None)
+        else:
+            for prog in unit.programs:
+                st.winners[prog] = st.copies[prog][0] if st.copies[prog] else None
+        units[unit.key] = st
+    findings: List[_Finding] = []
+    for st in units.values():
+        findings += _unit_findings(st, units)
+    findings += _entry_findings(values, units)
+    findings += _process_only_findings(
+        units, view, os.environ.get("PATH", "") if process_path is None else process_path)
+    findings.sort(key=lambda f: _SETUP_SEVERITY_ORDER[f.severity])
+    return _SetupReport(values, view, units, findings)
+
+
+# --- Python ------------------------------------------------------------------
+
+def _python_report(run=None, which=None) -> Dict:
+    """The interpreter, pip and the five packages, asked in processes of their
+    own (never imported here)."""
+    run = run or subprocess.run
+    which = which or shutil.which
+    rep = {"executable": sys.executable, "version": sys.version.split()[0],
+           "venv": sys.prefix != sys.base_prefix, "prefix": sys.prefix,
+           "pip": None, "packages": {}, "error": None, "py_launcher": None}
+
+    def call(argv, timeout=120):
+        try:
+            return run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", timeout=timeout)
+        except (OSError, subprocess.SubprocessError) as e:
+            return e
+
+    r = call([sys.executable, "-m", "pip", "--version"])
+    if not isinstance(r, Exception) and r.returncode == 0:
+        words = (r.stdout or "").split()
+        rep["pip"] = words[1] if len(words) > 1 else "?"
+    r = call([sys.executable, "-c", _SETUP_PACKAGE_PROBE])
+    try:
+        if isinstance(r, Exception) or r.returncode != 0:
+            raise ValueError(_common._stderr_tail(getattr(r, "stderr", "") or str(r)) or "failed")
+        lines = (r.stdout or "").strip().splitlines()
+        rep["packages"] = {k: v for k, v in json.loads(lines[-1]).items()}
+    except (ValueError, IndexError, AttributeError) as e:
+        rep["error"] = str(e) or "no answer"
+    py = which("py")
+    if py:
+        r = call([py, "-c", "import sys; print(sys.executable)"], timeout=30)
+        exe = "" if isinstance(r, Exception) else (r.stdout or "").strip()
+        try:
+            differs = bool(exe) and (os.path.normcase(os.path.realpath(exe))
+                                     != os.path.normcase(os.path.realpath(sys.executable)))
+        except (OSError, ValueError):
+            differs = False
+        if differs:
+            rep["py_launcher"] = exe
+    return rep
+
+
+def _python_findings(py: Dict) -> List[_Finding]:
+    out = []
+    if py.get("error"):
+        out.append(_Finding("warning", "PACKAGES_UNREAD", "python",
+                            f"The package check did not answer ({py['error']}).", None))
+    else:
+        missing = [n for n in _SETUP_TESTED_PACKAGES if py["packages"].get(n) is None]
+        if missing:
+            sev = "error" if any(n in _SETUP_PACKAGES_REQUIRED for n in missing) else "warning"
+            out.append(_Finding(sev, "PACKAGES_MISSING", "python",
+                                f"Python packages missing: {', '.join(missing)}.", ("packages",)))
+    if not py.get("pip"):
+        out.append(_Finding("warning", "NO_PIP", "python",
+                            f"pip is not installed for {py['executable']}.", ("packages",)))
+    if py.get("py_launcher"):
+        out.append(_Finding(
+            "info", "PY_LAUNCHER_DIFFERS", "python",
+            f"`py` starts {py['py_launcher']}; packages installed here go to "
+            f"{py['executable']}. Run the setup with that one too if you use it: "
+            f"`py jxl_photo.py setup`.", None))
+    return out
+
+
+def _pip_command(kind: str, py: Dict) -> Optional[List[str]]:
+    """[i] the missing packages, [u] all five upgraded, [t] the tested pins."""
+    names = list(_SETUP_TESTED_PACKAGES)
+    base = [sys.executable, "-m", "pip", "install"]
+    if kind == "i":
+        missing = [n for n in names if (py.get("packages") or {}).get(n) is None]
+        return base + missing if missing else None
+    if kind == "u":
+        return base + ["--upgrade"] + names
+    if kind == "t":
+        return base + [f"{n}=={v}" for n, v in _SETUP_TESTED_PACKAGES.items()]
+    return None
+
+
+# --- The report --------------------------------------------------------------
+
+def _fix_text(f: _Finding) -> Optional[str]:
+    if not f.fix:
+        return None
+    kind = f.fix[0]
+    menu = {"libjxl": "1", "exiftool": "2", "magick": "3"}.get(f.unit, "")
+    if kind == "set_folder":
+        return (f"[{menu}] then [p] another folder"
+                + (", or [d] the tested download" if os.name == "nt" else ""))
+    if kind == "download":
+        return f"[{menu}] then [d] the tested download"
+    if kind == "remove_entries":
+        return (f"remove {'; '.join(f.fix[2])} from the {f.fix[1]} PATH"
+                + (" (administrator)" if f.fix[1] == "system" else ""))
+    if kind == "remove_duplicates":
+        return f"keep only the first {f.fix[2]} in the {f.fix[1]} PATH"
+    if kind == "short_path":
+        return f"put the folder's short name ({_short_path(f.fix[1])}) on the PATH instead"
+    if kind == "packages":
+        return "[p] Python packages"
+    return None
+
+
+def _unit_status(st: _UnitState, findings: List[_Finding]) -> str:
+    sev = {f.severity for f in findings if f.unit == st.unit.key}
+    return "ERROR" if "error" in sev else ("warning" if "warning" in sev else "OK")
+
+
+def _show_setup_report(ui, report: _SetupReport, py: Dict, findings: List[_Finding],
+                       store=None) -> None:
+    ui.section("Setup — tools and Python packages")
+    ui.line(f"Python {py['version']}: {py['executable']}"
+            + (f" (virtual environment: {py['prefix']})" if py["venv"] else ""))
+    if isinstance(store, _JsonPathStore):
+        ui.line(f"PATH values from {store.file} (JXLPHOTO_SETUP_PATH_STORE), not the registry.")
+    rows = []
+    for key in ("libjxl", "exiftool", "magick"):
+        st = report.units[key]
+        w = st.main
+        rows.append((st.unit.label, (w.version or "?") if w else "—", w.folder if w else "—",
+                     f"{w.scope} PATH" if w else "not found", _unit_status(st, findings)))
+    tested = ", ".join(f"{_setup_unit(k).label} {v['version']}" for k, v in _SETUP_TESTED_TOOLS.items())
+    ui.table("Tools", ["Tool", "Version", "Folder", "From", "Status"], rows,
+             notes=[f"Tested with: {tested}."])
+    prow = []
+    for name, tested_v in _SETUP_TESTED_PACKAGES.items():
+        v = None if py.get("error") else py["packages"].get(name)
+        status = ("?" if py.get("error") else "missing" if v is None
+                  else "OK" if v == tested_v else f"OK (tested: {tested_v})")
+        prow.append((name, v or "—", status))
+    ui.table("Python packages", ["Package", "Version", "Status"], prow,
+             notes=[f"pip {py['pip']}" if py.get("pip") else "pip: not installed"])
+    if not any(f.severity in ("error", "warning") for f in findings):
+        ui.line("Everything works.")
+    for i, f in enumerate(findings, 1):
+        ui.line(f"{i}. {f.severity.upper():7} {f.code} ({f.unit}): {f.message}")
+        fix = _fix_text(f)
+        if fix:
+            ui.line(f"   Fix: {fix}")
+
+
+def _setup_check(store, probe=_probe, python_report=None, process_path=None) -> int:
+    """--check: the report with plain print; nothing asked, nothing written."""
+    report = _diagnose(store, probe, process_path)
+    py = (python_report or _python_report)()
+    findings = report.findings + _python_findings(py)
+    _show_setup_report(PlainUI(), report, py, findings, store)
+    return 1 if any(f.severity == "error" for f in findings) else 0
+
+
+# --- Writing PATH values -----------------------------------------------------
+
+def _setup_backup_dir(create: bool = True) -> Path:
+    base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+    folder = Path(base) / "jxl-photo" / "path-backups"
+    if create:
+        folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def _store_id(store) -> str:
+    """What a backup was made against: the registry, or one JSON copy (a
+    by-hand try with JXLPHOTO_SETUP_PATH_STORE writes its backups to the
+    same folder; [z] on the registry must never restore one of those)."""
+    if isinstance(store, _JsonPathStore):
+        return "json:" + os.path.normcase(os.path.abspath(str(store.file)))
+    return "registry" if isinstance(store, _PathStore) else type(store).__name__
+
+
+def _write_backup(folder: Path, scope, regtype, before, after, reason,
+                  store_id: str = "registry") -> Path:
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    path, n = folder / f"{stamp}_{scope}.json", 2
+    while path.exists():
+        path, n = folder / f"{stamp}_{scope}_{n}.json", n + 1
+    data = {"scope": scope, "type": regtype, "before": before, "after": after,
+            "reason": reason, "toolkit_version": TOOLKIT_VERSION, "store": store_id}
+    with open(path, "x", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    return path
+
+
+def _log_change(folder: Path, text: str) -> None:
+    try:
+        with open(folder / "changes.log", "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {text}\n")
+    except OSError:
+        pass
+
+
+def _write_path(store, scope, new_value, *, expected_before, expected_type, reason,
+                say=print) -> bool:
+    """Every PATH write: read again, compare-and-swap against what the
+    diagnosis read, back up, write, broadcast, one line in changes.log. The
+    system PATH goes through the elevated plan (D7)."""
+    if scope == "system":
+        if getattr(store, "elevation_needed", False):
+            return _elevated_system_path_edit(store, new_value, expected_before, expected_type,
+                                              reason, say=say)
+        plan, sha = _write_system_plan(new_value, expected_before, expected_type, reason)
+        try:
+            code = _apply_system_path_plan(store, plan, sha)
+            return _report_plan_result(code, plan, say)
+        finally:
+            shutil.rmtree(plan.parent, ignore_errors=True)
+    try:
+        now = store.read(scope)
+    except OSError as e:
+        say(f"Could not read the {scope} PATH again ({e}): nothing was written.")
+        return False
+    if now != (expected_before, expected_type):
+        say(f"The {scope} PATH changed meanwhile (another program edited it): nothing was "
+            f"written. Checking again.")
+        return False
+    regtype = expected_type if expected_type in (_REG_SZ, _REG_EXPAND_SZ) else _REG_EXPAND_SZ
+    try:
+        folder = _setup_backup_dir()
+        backup = _write_backup(folder, scope, regtype, expected_before, new_value, reason,
+                               _store_id(store))
+    except OSError as e:
+        say(f"Could not write the backup ({e}): nothing was written.")
+        return False
+    try:
+        store.write(scope, new_value, regtype)
+    except (OSError, NotImplementedError) as e:
+        _log_change(folder, f"{scope} NOT written ({reason}): {e}")
+        say(f"Writing the {scope} PATH failed ({e}): nothing was changed.")
+        return False
+    if not store.broadcast():
+        say("Note: Windows could not be told about the change (the broadcast failed).")
+    _log_change(folder, f"{scope} written ({reason}); backup {backup.name}")
+    say(f"The {scope} PATH was written. Backup: {backup}")
+    return True
+
+
+def _write_system_plan(new_value, expected_before, expected_type, reason) -> Tuple[Path, str]:
+    """The plan file the elevated step reads, and the SHA-256 of its bytes."""
+    import hashlib
+    folder = Path(tempfile.mkdtemp(prefix="jxlphoto_setup_"))
+    plan = folder / "system_path_plan.json"
+    data = json.dumps({"scope": "system", "new_value": new_value,
+                       "expected_before": expected_before, "expected_type": expected_type,
+                       "reason": reason, "backup_dir": str(_setup_backup_dir())},
+                      indent=2, ensure_ascii=False).encode("utf-8")
+    plan.write_bytes(data)
+    # mkdtemp's folder lets in SYSTEM, Administrators and each file's OWNER
+    # only (Python 3.12.4+): a result file the elevated step created would
+    # belong to Administrators (or to another admin) and this user could not
+    # read it. Created here, it stays this user's; the elevated step writes
+    # into it.
+    Path(str(plan) + ".result.json").write_text("{}", encoding="utf-8")
+    return plan, hashlib.sha256(data).hexdigest()
+
+
+def _plan_result(plan: Path) -> Dict:
+    try:
+        return json.loads(Path(str(plan) + ".result.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _report_plan_result(code, plan: Path, say) -> bool:
+    message = _plan_result(plan).get("message") or ""
+    if code == 0:
+        say(f"The system PATH was written ({message}).")
+        return True
+    if code == 3:
+        say("The system PATH changed meanwhile: nothing was written. Checking again.")
+    else:
+        say(f"The system PATH was not changed (code {code}: {message or 'no answer'}).")
+    return False
+
+
+def _apply_system_path_plan(store, plan_file, sha256) -> int:
+    """The elevated side (D7): asks nothing. 0 written, 3 changed meanwhile,
+    4 SHA-256 mismatch or unreadable plan, 5 write failed; the answer also in
+    <plan>.result.json."""
+    import hashlib
+    plan_file = Path(plan_file)
+    result = Path(str(plan_file) + ".result.json")
+
+    def done(code, message):
+        try:
+            result.write_text(json.dumps({"code": code, "message": message}), encoding="utf-8")
+        except OSError:
+            pass
+        return code
+
+    try:
+        data = plan_file.read_bytes()
+    except OSError as e:
+        return done(4, f"the plan cannot be read ({e})")
+    if not sha256 or hashlib.sha256(data).hexdigest() != str(sha256).strip().lower():
+        return done(4, "the plan's SHA-256 does not match: nothing was written")
+    try:
+        plan = json.loads(data.decode("utf-8"))
+        new_value, before = plan["new_value"], plan["expected_before"]
+        btype, reason = plan["expected_type"], str(plan.get("reason") or "")
+        if (plan.get("scope") != "system" or not isinstance(new_value, str)
+                or not new_value.strip() or not (before is None or isinstance(before, str))
+                or not (btype is None or (isinstance(btype, int) and not isinstance(btype, bool)))):
+            raise ValueError("not a system PATH plan")
+    except (ValueError, KeyError, TypeError, AttributeError, UnicodeDecodeError):
+        return done(4, "the plan is not readable: nothing was written")
+    try:
+        now = store.read("system")
+    except OSError as e:
+        return done(5, f"the system PATH cannot be read ({e})")
+    if now != (before, btype):
+        return done(3, "the system PATH changed meanwhile: nothing was written")
+    regtype = btype if btype in (_REG_SZ, _REG_EXPAND_SZ) else _REG_EXPAND_SZ
+    try:
+        folder = Path(plan["backup_dir"]) if plan.get("backup_dir") else _setup_backup_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        backup = _write_backup(folder, "system", regtype, before, new_value, reason,
+                               _store_id(store))
+    except (OSError, TypeError) as e:
+        return done(5, f"the backup could not be written ({e}): nothing was written")
+    try:
+        store.write("system", new_value, regtype)
+    except OSError as e:
+        _log_change(folder, f"system NOT written ({reason}): {e}")
+        return done(5, f"writing failed ({e})")
+    store.broadcast()
+    _log_change(folder, f"system written ({reason}); backup {backup.name}")
+    return done(0, f"backup {backup}")
+
+
+def _run_elevated(argv: List[str], wait: int = _SETUP_ELEVATED_WAIT):
+    """Start argv as administrator (one UAC prompt) and wait for it:
+    ("exited", code), ("declined", None), ("timeout", None) or ("failed", why)."""
+    import ctypes
+    from ctypes import wintypes
+
+    class _SEI(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("fMask", ctypes.c_ulong),
+                    ("hwnd", wintypes.HWND), ("lpVerb", wintypes.LPCWSTR),
+                    ("lpFile", wintypes.LPCWSTR), ("lpParameters", wintypes.LPCWSTR),
+                    ("lpDirectory", wintypes.LPCWSTR), ("nShow", ctypes.c_int),
+                    ("hInstApp", wintypes.HINSTANCE), ("lpIDList", ctypes.c_void_p),
+                    ("lpClass", wintypes.LPCWSTR), ("hkeyClass", wintypes.HKEY),
+                    ("dwHotKey", wintypes.DWORD), ("hIconOrMonitor", wintypes.HANDLE),
+                    ("hProcess", wintypes.HANDLE)]
+
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    shell32.ShellExecuteExW.argtypes = [ctypes.POINTER(_SEI)]
+    shell32.ShellExecuteExW.restype = wintypes.BOOL
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    info = _SEI()
+    info.cbSize = ctypes.sizeof(_SEI)
+    info.fMask = 0x00000040 | 0x00008000      # SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NO_CONSOLE
+    info.lpVerb = "runas"
+    info.lpFile = argv[0]
+    info.lpParameters = subprocess.list2cmdline(argv[1:])
+    info.nShow = 0                            # SW_HIDE: it asks nothing
+    if not shell32.ShellExecuteExW(ctypes.byref(info)):
+        err = ctypes.get_last_error()
+        return ("declined", None) if err == 1223 else ("failed", f"Windows error {err}")
+    if not info.hProcess:
+        return ("failed", "no process handle")
+    try:
+        if kernel32.WaitForSingleObject(info.hProcess, int(wait * 1000)) != 0:
+            return ("timeout", None)
+        code = wintypes.DWORD(0)
+        if not kernel32.GetExitCodeProcess(info.hProcess, ctypes.byref(code)):
+            return ("failed", "no exit code")
+        return ("exited", int(code.value))
+    finally:
+        kernel32.CloseHandle(info.hProcess)
+
+
+def _elevated_system_path_edit(store, new_value, expected_before, expected_type, reason,
+                               say=print) -> bool:
+    """D7: the plan file, one elevated copy of this setup that applies it,
+    its answer."""
+    plan, sha = _write_system_plan(new_value, expected_before, expected_type, reason)
+    try:
+        how, code = _run_elevated([sys.executable, str(Path(__file__).resolve()), "setup",
+                                   "--apply-system-path", str(plan), "--sha256", sha])
+        if how == "declined":
+            say("Not changed: the administrator prompt was declined.")
+            return False
+        if how == "timeout":
+            say(f"Not confirmed: the administrator step did not end in "
+                f"{_SETUP_ELEVATED_WAIT} s. Check again with [r].")
+            return False
+        if how != "exited":
+            say(f"Not changed: the administrator step could not start ({code}).")
+            return False
+        return _report_plan_result(code, plan, say)
+    finally:
+        shutil.rmtree(plan.parent, ignore_errors=True)
+
+
+def _setup_after_write(ui) -> None:
+    """The wizard detects the tools again at its next start (--recheck)."""
+    try:
+        cfg = ConfigManager()
+        cfg.config.dependencies_checked = False
+        cfg.save_config()
+    except Exception as e:
+        ui.line(f"(The wizard's settings were not updated ({e}): start it with --recheck.)")
+    ui.line(_SETUP_RESTART_NOTE)
+
+
+def _show_path_diff(ui, store, scope, before, after) -> None:
+    from collections import Counter
+    b, a = _path_entries(before), _path_entries(after)
+    bk, ak = [_path_key(x) for x in b], [_path_key(x) for x in a]
+    cb, ca = Counter(bk), Counter(ak)
+    ui.line(f"The {scope} PATH ({store.where.get(scope, scope)}):")
+    changed = 0
+    for i, (x, k) in enumerate(zip(a, ak), 1):
+        if cb[k] == 0:
+            ui.line(f"  + {x}   (new, position {i})")
+            changed += 1
+    for x, k in zip(b, bk):
+        if ca[k] == 0:
+            ui.line(f"  - {x}")
+            changed += 1
+    for k in dict.fromkeys(bk):
+        if 0 < ca[k] < cb[k]:
+            ui.line(f"  - {b[bk.index(k)]}   (a repeated entry: the first one stays)")
+            changed += 1
+    kept_b = [k for k in dict.fromkeys(bk) if ca[k]]
+    kept_a = [k for k in dict.fromkeys(ak) if cb[k]]
+    moved = 0
+    for k in kept_a:
+        if kept_a.index(k) < kept_b.index(k):
+            ui.line(f"  ^ {a[ak.index(k)]}   (moved to position {ak.index(k) + 1})")
+            moved += 1
+    # The entries of the new value that are neither new nor moved (a removal
+    # leaves them alone).
+    ui.line(f"  {max(len(kept_a) - moved, 0)} other entries unchanged.")
+
+
+def _confirm_and_write(ui, store, scope, before, before_type, after, reason) -> bool:
+    """Show the change, ask, write through _write_path."""
+    if _path_entries(after) == _path_entries(before):
+        ui.line(f"The {scope} PATH already is that way: nothing to write.")
+        return False
+    if not getattr(store, "writable", True):
+        added = [x for x in _path_entries(after)
+                 if _path_key(x) not in {_path_key(y) for y in _path_entries(before)}]
+        removed = [x for x in _path_entries(before)
+                   if _path_key(x) not in {_path_key(y) for y in _path_entries(after)}]
+        ui.line("This setup does not edit the PATH here. In your shell profile "
+                "(~/.profile, ~/.bashrc or ~/.zshrc):")
+        for x in added:
+            ui.line(f'  export PATH="{x}:$PATH"')
+        for x in removed:
+            ui.line(f"  and remove {x} from the PATH set there.")
+        return False
+    _show_path_diff(ui, store, scope, before, after)
+    if scope == "system":
+        asked = ui.confirm("setup.elevate",
+                           "Change the SYSTEM PATH? Windows asks for administrator rights "
+                           "(one prompt)." if store.elevation_needed
+                           else "Change the system PATH?", default=False)
+    else:
+        asked = ui.confirm("setup.confirm", "Write this user PATH?", default=False)
+    if not asked:
+        ui.line("Nothing was changed.")
+        return False
+    ok = _write_path(store, scope, after, expected_before=before, expected_type=before_type,
+                     reason=reason, say=ui.line)
+    if ok:
+        _setup_after_write(ui)
+    return ok
+
+
+def _undo_last_change(store, ui) -> bool:
+    """[z]: the PATH as it was before the newest change this setup made."""
+    folder = _setup_backup_dir(create=False)
+    try:
+        backups = sorted((p for p in folder.glob("*.json") if p.is_file()),
+                         key=lambda p: (p.stat().st_mtime_ns, p.name))
+    except OSError:
+        backups = []
+    # The newest backup made against THIS store (the registry, or this JSON
+    # copy): one of another store is never restored here.
+    newest = data = None
+    for candidate in reversed(backups):
+        try:
+            got = json.loads(candidate.read_text(encoding="utf-8"))
+            if not isinstance(got, dict):
+                raise ValueError("not a backup")
+        except (OSError, ValueError) as e:
+            ui.warn(f"The newest backup ({candidate}) cannot be read ({e}): nothing was "
+                    f"changed.")
+            return False
+        if got.get("store", "registry") == _store_id(store):
+            newest, data = candidate, got
+            break
+    if newest is None:
+        ui.line("No PATH change made by this setup to undo.")
+        return False
+    try:
+        scope, before, after = data["scope"], data["before"], data["after"]
+        if scope not in ("user", "system"):
+            raise ValueError(scope)
+    except (ValueError, KeyError, TypeError) as e:
+        ui.warn(f"The newest backup ({newest}) cannot be read ({e}): nothing was changed.")
+        return False
+    if before is None:
+        ui.line(f"Before that change ({newest.name}) the {scope} PATH did not exist: remove "
+                f"its entries with [r] in a tool's menu instead.")
+        return False
+    now, now_type = store.read(scope)
+    _show_path_diff(ui, store, scope, now, before)
+    if now == after:
+        yes = ui.confirm("setup.undo", f"Restore the {scope} PATH as it was before "
+                         f"{data.get('reason') or newest.name}?", default=True)
+    else:
+        ui.line(f"The {scope} PATH changed since that backup ({newest.name}): restoring it "
+                f"also undoes those later changes.")
+        yes = ui.confirm("setup.undo", "Restore it anyway?", default=False)
+    if not yes:
+        ui.line("Nothing was changed.")
+        return False
+    ok = _write_path(store, scope, before, expected_before=now, expected_type=now_type,
+                     reason=f"undo of {newest.name}", say=ui.line)
+    if ok:
+        _setup_after_write(ui)
+    return ok
+
+
+# --- Actions -----------------------------------------------------------------
+
+def _folder_from_answer(text: str) -> Path:
+    path = Path(os.path.expanduser(_expand_env(text.strip().strip('"'))))
+    if path.is_file():
+        path = path.parent
+    return Path(os.path.abspath(str(path)))
+
+
+def _check_tool_folder(unit: _ToolUnit, folder: Path, probe=_probe):
+    """(problem or None, {"version", "untested"} or None, ansi_problem): may
+    this folder be the unit's?"""
+    if not folder.is_dir():
+        return f"{folder} is not a folder.", None, False
+    if ";" in str(folder) or _expand_env(str(folder)) != str(folder):
+        # Written into PATH, a ';' splits it in two entries, and %NAME% is
+        # read as a variable: neither names this folder any more.
+        return (f"{folder} cannot be a PATH entry (a ';' or a %NAME% in its path): move "
+                f"the tool to another folder.", None, False)
+    found = {}
+    if unit.key == "exiftool":
+        exe = next((c[0] for n in unit.programs for c in [_find_copies(n, [str(folder)])] if c),
+                   None)
+        if exe is None:
+            return (f"No ExifTool in {folder} (exiftool.exe, exiftool-k.exe or "
+                    f"exiftool(-k).exe).", None, False)
+        found["exiftool"] = exe
+    else:
+        missing = []
+        for p in unit.programs:
+            c = _find_copies(p, [str(folder)])
+            if c:
+                found[p] = c[0]
+            else:
+                missing.append(p)
+        if missing:
+            return (f"{', '.join(missing)} not in {folder}"
+                    + (" (cjxl, djxl and jxlinfo must be in one folder)."
+                       if unit.key == "libjxl" else "."), None, False)
+    versions = {}
+    for p, exe in found.items():
+        pr = probe(exe, list(_program_args(unit, p)))
+        if not pr.ok:
+            if unit.key == "exiftool" and not _ansi_safe(str(folder)):
+                return (f"{exe} does not run ({_probe_error(pr)}): its folder has characters "
+                        f"outside the Windows code page, where ExifTool's launcher cannot find "
+                        f"its exiftool_files.", None, True)
+            return f"{exe} does not run ({_probe_error(pr)}).", None, False
+        versions[p] = _parse_version(unit.key, p, pr)
+    main = unit.programs[0] if unit.key != "exiftool" else "exiftool"
+    version, vt, quantum = versions[main]
+    if vt is None:
+        return f"{found[main]} runs but gives no version.", None, False
+    if unit.key == "libjxl":
+        dv = versions["djxl"][1]
+        if dv != vt:
+            return (f"cjxl is {version} and djxl is {versions['djxl'][0]} there: one libjxl, of "
+                    f"one version, is needed (#669).", None, False)
+        if vt < _SETUP_MIN_LIBJXL:
+            return (f"libjxl {version} is too old: {'.'.join(map(str, _SETUP_MIN_LIBJXL))} or "
+                    f"newer is needed.", None, False)
+    elif unit.key == "exiftool":
+        if vt < _SETUP_MIN_EXIFTOOL:
+            return (f"ExifTool {version} is older than "
+                    f"{'.'.join(map(str, _SETUP_MIN_EXIFTOOL))}.", None, False)
+    else:
+        if vt[0] < _SETUP_MIN_MAGICK_MAJOR:
+            return f"ImageMagick {version}: version {_SETUP_MIN_MAGICK_MAJOR} is needed.", None, False
+        if quantum == "Q8":
+            return f"ImageMagick {version} is a Q8 build: a Q16 one is needed.", None, False
+    tested = _SETUP_TESTED_TOOLS[unit.key]["version"]
+    return None, {"version": version, "untested": version != tested}, False
+
+
+def _other_programs(folder: str, unit: _ToolUnit) -> List[str]:
+    own = {p.lower() for p in unit.programs}
+    try:
+        return sorted(p.name for p in Path(folder).iterdir()
+                      if p.is_file() and p.suffix.lower() in (".exe", ".cmd", ".bat")
+                      and p.stem.lower() not in own)
+    except OSError:
+        return []
+
+
+def _setup_set_folder(ui, store, report: _SetupReport, unit_key: str, probe=_probe,
+                      folder=None) -> bool:
+    """[p]: put a folder of the unit first on the user PATH (also to switch
+    versions by choice). `folder` given (a download) skips the question."""
+    unit = _setup_unit(unit_key)
+    fixed = folder is not None
+    while True:
+        if fixed:
+            cand = Path(folder)
+        else:
+            text = ui.ask_text("setup.folder", f"Folder of {unit.label} "
+                               f"({', '.join(unit.programs)}), or a file in it (Enter = back)", "")
+            if not text.strip():
+                return False
+            cand = _folder_from_answer(text)
+        problem, info, ansi = _check_tool_folder(unit, cand, probe)
+        if ansi:
+            ui.warn(problem)
+            short = _short_path(cand)
+            if short and _ansi_safe(short):
+                if ui.confirm("setup.confirm", f"Use its short name {short} instead?",
+                              default=True):
+                    problem, info, _ = _check_tool_folder(unit, Path(short), probe)
+                    if problem:
+                        ui.warn(problem)
+                    else:
+                        cand = Path(short)
+            else:
+                ui.line("This volume gives it no short name: download the tested version "
+                        "([d]), which goes to a folder ExifTool can read.")
+        elif problem:
+            ui.warn(problem)
+        if problem:
+            if fixed:
+                return False
+            continue
+        break
+    tested = _SETUP_TESTED_TOOLS[unit.key]["version"]
+    ui.line(f"{unit.label} {info['version']} in {cand}: it runs"
+            + (" (the tested version)." if not info["untested"] else f" (tested: {tested})."))
+    if info["untested"]:
+        if not ui.confirm("setup.confirm", f"{unit.label} {info['version']} is not the version "
+                          f"this release was tested with ({tested}). Use it anyway?",
+                          default=False):
+            ui.line("Nothing was changed.")
+            return False
+    new_entry = str(cand)
+    before, btype = store.read("user")
+    user_keys = {_path_key(e) for e in _path_entries(before)}
+    st = report.units[unit.key]
+    remove = []
+    old_folders = []
+    for c in st.winners.values():
+        if (c and c.scope == "user" and _path_key(c.folder) != _path_key(new_entry)
+                and _path_key(c.folder) in user_keys and c.folder not in old_folders):
+            old_folders.append(c.folder)
+    for old in old_folders:
+        others = _other_programs(old, unit)
+        listing = ", ".join(others[:12]) + (" ..." if len(others) > 12 else "")
+        if ui.confirm("setup.remove_old",
+                      f"Also remove the old folder {old} from the user PATH?"
+                      + (f" It also holds: {listing}." if others
+                         else " It holds no other program."), default=not others):
+            remove.append(old)
+    for c in st.winners.values():
+        if c and c.scope == "system" and _path_key(c.folder) != _path_key(new_entry):
+            ui.line(f"Note: {c.path} is on the SYSTEM PATH, which Windows puts first: it will "
+                    f"still win. The check after this offers to remove its entry (administrator).")
+            break
+    after = _path_edit(before, remove=remove, prepend=[new_entry])
+    return _confirm_and_write(ui, store, "user", before, btype, after,
+                              reason=f"{unit.label} {info['version']}: {new_entry}")
+
+
+def _setup_remove_entries(ui, store, scope, entries, units=None, strict=True,
+                          unit_key=None) -> bool:
+    """Remove PATH entries (every occurrence). A Windows folder never; with
+    `strict` (a suggested fix) not a folder that holds a copy that runs
+    either — [r] in a tool's menu, the person's own pick, only says so.
+    The other programs each folder holds are named before the question."""
+    before, btype = store.read(scope)
+    after = _path_edit(before, remove=entries)
+    for e in entries:
+        why = _setup_protected_for_system(_expand_entry(e))
+        if why is None and units is not None and scope == "user":
+            held = _setup_protected(_expand_entry(e), units)
+            if held and strict:
+                why = held
+            elif held:
+                ui.line(f"Note: {e} — {held}.")
+        if why:
+            ui.line(f"{e} is not removed: {why}.")
+            return False
+    for e in entries:
+        others = _programs_besides(_expand_entry(e), unit_key)
+        if others:
+            ui.line(f"{e} also holds {_programs_listing(others)}: they leave the PATH too.")
+    return _confirm_and_write(ui, store, scope, before, btype, after,
+                              reason=f"remove {'; '.join(entries)}")
+
+
+def _setup_short_path(ui, store, folder) -> bool:
+    short = _short_path(folder)
+    if not short or not _ansi_safe(short):
+        ui.line(f"{folder} has no short name ExifTool can read: download the tested version.")
+        return False
+    key = _path_key(folder)
+    for scope in ("user", "system"):
+        before, btype = store.read(scope)
+        if any(_path_key(e) == key for e in _path_entries(before)):
+            return _confirm_and_write(ui, store, scope, before, btype,
+                                      _path_replace(before, folder, short),
+                                      reason=f"short name of {folder}")
+    ui.line(f"{folder} is not on the PATH any more.")
+    return False
+
+
+def _tools_base(arg, ui=None) -> Optional[Path]:
+    """Where the tested downloads go: --tools-dir, else
+    %LOCALAPPDATA%\\jxl-photo\\tools. ANSI-safe (ExifTool's launcher): its
+    short name, else %SystemDrive%\\jxl-photo-tools, asked first."""
+    if arg:
+        base = Path(os.path.abspath(os.path.expanduser(_expand_env(str(arg)))))
+    else:
+        local = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        base = Path(local) / "jxl-photo" / "tools"
+    if _ansi_safe(str(base)):
+        return base
+    base.mkdir(parents=True, exist_ok=True)
+    short = _short_path(base)
+    if short and _ansi_safe(short):
+        return Path(short)
+    fallback = Path((os.environ.get("SystemDrive") or "C:") + "\\") / "jxl-photo-tools"
+    if ui is None or not ui.confirm(
+            "setup.base_folder", f"{base} has characters ExifTool cannot read and no short "
+            f"name. Put the downloads in {fallback} instead?", default=False):
+        return None
+    return fallback
+
+
+def _clear_read_only(path) -> None:
+    import stat
+    try:
+        os.chmod(path, stat.S_IREAD | stat.S_IWRITE | (stat.S_IEXEC if os.path.isdir(path) else 0))
+    except OSError:
+        pass
+
+
+def _rmtree_force(path) -> None:
+    """shutil.rmtree that also removes read-only entries: ExifTool's zip
+    extracts its folders read-only, and Windows refuses to remove those."""
+    def again(func, p, *_):
+        _clear_read_only(p)
+        try:
+            func(p)
+        except OSError:
+            pass
+    if not os.path.lexists(str(path)):
+        return
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=again)
+    else:
+        shutil.rmtree(path, onerror=again)
+
+
+def _make_writable(root: Path) -> None:
+    """Every file and folder of an installed copy writable, so it can be
+    deleted later like any other folder (jxl-photo-exe does the same)."""
+    for d, dirs, files in os.walk(root):
+        _clear_read_only(d)
+        for name in dirs + files:
+            _clear_read_only(os.path.join(d, name))
+
+
+def _first_in(root: Path, name: str) -> Path:
+    found = sorted((p for p in root.rglob(name) if p.is_file()), key=lambda p: len(p.parts))
+    if not found:
+        raise FileNotFoundError(f"{name} is not in the archive")
+    return found[0]
+
+
+def _lay_out_tool(unit_key: str, src: Path, dest: Path) -> None:
+    """The archive's files as jxl-photo-exe's build.py lays them out."""
+    if unit_key == "libjxl":
+        for exe in ("cjxl.exe", "djxl.exe", "jxlinfo.exe"):
+            shutil.copy2(_first_in(src, exe), dest / exe)
+        lic = next((p for p in src.rglob("licenses") if p.is_dir()), None)
+        if lic is not None:
+            shutil.copytree(lic, dest / "licenses")
+    elif unit_key == "exiftool":
+        k = _first_in(src, "exiftool(-k).exe")
+        # Renamed: exiftool(-k).exe waits for a key after every call.
+        shutil.copy2(k, dest / "exiftool.exe")
+        shutil.copytree(k.parent / "exiftool_files", dest / "exiftool_files")
+        if (k.parent / "README.txt").is_file():
+            shutil.copy2(k.parent / "README.txt", dest / "README.txt")
+    else:
+        m = _first_in(src, "magick.exe")
+        shutil.copy2(m, dest / "magick.exe")
+        for f in m.parent.iterdir():
+            if f.is_file() and (f.suffix.lower() in (".xml", ".icc")
+                                or f.name in ("LICENSE.txt", "NOTICE.txt")):
+                shutil.copy2(f, dest / f.name)
+
+
+def _download_tested(unit, base, ui, probe=_probe, opener=None) -> Optional[Path]:
+    """Part B: the tested version of a unit into <base>\\<unit>-<version>,
+    its SHA-256 checked before anything is extracted or run. Returns that
+    folder, or None. The PATH question is the caller's (_setup_set_folder)."""
+    import hashlib
+    import urllib.request
+    unit = _setup_unit(unit) if isinstance(unit, str) else unit
+    spec = _SETUP_TESTED_TOOLS[unit.key]
+    base = Path(base)
+    vdir = base / f"{unit.key}-{spec['version']}"
+    if vdir.is_dir():
+        problem, info, _ = _check_tool_folder(unit, vdir, probe)
+        if not problem and info["version"] == spec["version"]:
+            ui.line(f"{unit.label} {spec['version']} is already in {vdir}: using it.")
+            return vdir
+    opener = opener or urllib.request.urlopen
+    request = urllib.request.Request(spec["url"], headers={"User-Agent": "jxl-photo-setup"})
+    part, archive = base / (spec["archive"] + ".part"), base / spec["archive"]
+    try:
+        response = opener(request, timeout=300)
+    except Exception as e:
+        ui.warn(f"Could not reach {spec['url']} ({e}): nothing was downloaded.")
+        return None
+    digest = hashlib.sha256()
+    try:
+        try:
+            size = int((getattr(response, "headers", None) or {}).get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        if size > _SETUP_MAX_DOWNLOAD:
+            ui.warn(f"The server announces {size / 1e6:.0f} MB, more than the "
+                    f"{_SETUP_MAX_DOWNLOAD // (1024 * 1024)} MB this setup takes: nothing was "
+                    f"downloaded.")
+            return None
+        if not ui.confirm("setup.download",
+                          f"Download {unit.label} {spec['version']} "
+                          f"({f'{size / 1e6:.1f} MB' if size else 'size not given'}) from "
+                          f"{spec['url']} into {base}? Its SHA-256 is checked before anything "
+                          f"is extracted or run.", default=False):
+            ui.line("Nothing was downloaded.")
+            return None
+        base.mkdir(parents=True, exist_ok=True)
+        done, shown_at, shown_pct = 0, time.monotonic(), 0
+        try:
+            with open(part, "wb") as f:
+                while True:
+                    chunk = response.read(1 << 20)
+                    if not chunk:
+                        break
+                    done += len(chunk)
+                    if done > _SETUP_MAX_DOWNLOAD:
+                        raise OSError(f"more than {_SETUP_MAX_DOWNLOAD // (1024 * 1024)} MB")
+                    f.write(chunk)
+                    digest.update(chunk)
+                    pct = int(done * 100 / size) if size else 0
+                    if time.monotonic() - shown_at >= 2 or (size and pct >= shown_pct + 5):
+                        ui.line(f"  {done / 1e6:.1f} MB" + (f" of {size / 1e6:.1f} MB ({pct} %)"
+                                                            if size else ""))
+                        shown_at, shown_pct = time.monotonic(), pct
+            if size and done != size:
+                raise OSError(f"incomplete: {done} of {size} bytes")
+        except Exception as e:
+            part.unlink(missing_ok=True)
+            ui.warn(f"The download failed ({e}): nothing was installed.")
+            return None
+    finally:
+        try:
+            response.close()
+        except Exception:
+            pass
+    got = digest.hexdigest()
+    if got != spec["sha256"]:
+        part.unlink(missing_ok=True)
+        ui.warn(f"SHA-256 mismatch: got {got}, expected {spec['sha256']}. The file was deleted; "
+                f"nothing was run or installed.")
+        return None
+    ui.line(f"SHA-256 checked: {got}.")
+    os.replace(part, archive)
+    tar = Path(os.environ.get("SystemRoot") or r"C:\Windows") / "System32" / "tar.exe"
+    if not tar.is_file():
+        ui.warn(f"No {tar} to extract {archive}: extract it yourself and use [p] with the "
+                f"folder.")
+        return None
+    stage = vdir.with_name(vdir.name + ".tmp")
+    # A name no "<unit>-<version>" listing below can take for a version.
+    extract = Path(tempfile.mkdtemp(prefix=f".extract-{unit.key}-", dir=str(base)))
+    try:
+        r = subprocess.run([str(tar), "-xf", str(archive), "-C", str(extract)],
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=900)
+        if r.returncode != 0:
+            ui.warn(f"tar could not extract {archive.name} "
+                    f"({_common._stderr_tail(r.stderr or r.stdout)}): nothing was installed.")
+            return None
+        _rmtree_force(stage)
+        stage.mkdir()
+        _lay_out_tool(unit.key, extract, stage)
+        (stage / "VERSION.txt").write_text(f"{spec['version']}\n{spec['sha256']}\n",
+                                           encoding="utf-8")
+        _make_writable(stage)
+        if vdir.exists():
+            aside = vdir.with_name(f"{vdir.name}.old-{time.strftime('%Y%m%d_%H%M%S')}")
+            os.replace(vdir, aside)
+            ui.line(f"The copy there that did not work was moved to {aside}.")
+        os.replace(stage, vdir)
+    except (OSError, subprocess.SubprocessError) as e:
+        ui.warn(f"Installing failed ({e}): nothing was installed.")
+        return None
+    finally:
+        _rmtree_force(extract)
+        _rmtree_force(stage)
+        archive.unlink(missing_ok=True)
+    problem, info, _ = _check_tool_folder(unit, vdir, probe)
+    if problem:
+        ui.warn(f"The installed copy does not work: {problem}")
+        return None
+    ui.line(f"{unit.label} {spec['version']} installed in {vdir}.")
+    older = sorted(str(p) for p in base.glob(f"{unit.key}-*")
+                   if p.is_dir() and p != vdir and not p.name.endswith(".tmp")
+                   and (p / "VERSION.txt").is_file())
+    if older:
+        ui.line("Other versions stay where they are (to go back: [p] with one of them): "
+                + "; ".join(older))
+    return vdir
+
+
+def _setup_unit_menu(ui, store, report: _SetupReport, unit_key: str, args, probe=_probe,
+                     opener=None) -> None:
+    unit = _setup_unit(unit_key)
+    st = report.units[unit_key]
+    copies = st.all_copies()
+    ui.section(unit.label)
+    if not copies:
+        ui.line("No copy on the PATH a new program gets.")
+    for c in copies:
+        won = any(w is not None and w.real == c.real for w in st.winners.values())
+        ui.line(f"  {c.path}  ({c.scope} PATH, {c.version or 'no version'}, "
+                f"{'runs' if c.ok else 'does not run'}{', used' if won else ''})")
+    options = [("p", "Use another folder (also to switch versions)")]
+    if os.name == "nt":
+        options.append(("d", f"Download the tested version "
+                             f"({_SETUP_TESTED_TOOLS[unit_key]['version']})"))
+    options += [("r", "Remove a copy from the PATH"), ("0", "Back")]
+    choice = ui.choose("setup.unit", unit.label, options, default="0")
+    if choice == "p":
+        _setup_set_folder(ui, store, report, unit_key, probe)
+    elif choice == "d":
+        base = _tools_base(getattr(args, "tools_dir", None), ui)
+        if base is None:
+            ui.line("Nothing was downloaded.")
+            return
+        folder = _download_tested(unit, base, ui, probe, opener)
+        if folder is not None:
+            _setup_set_folder(ui, store, report, unit_key, probe, folder=folder)
+    elif choice == "r":
+        folders = []
+        for c in copies:
+            if (c.folder, c.scope) not in folders:
+                folders.append((c.folder, c.scope))
+        if not folders:
+            return
+        picks = [(str(i), f"{f} ({s} PATH)") for i, (f, s) in enumerate(folders, 1)]
+        pick = ui.choose("setup.unit", "Remove which folder from the PATH?",
+                         picks + [("0", "Back")], default="0")
+        if pick == "0":
+            return
+        folder, scope = folders[int(pick) - 1]
+        _setup_remove_entries(ui, store, scope, [folder], report.units, strict=False,
+                              unit_key=unit_key)
+
+
+def _setup_packages(ui, py: Dict, run=None) -> None:
+    """[p]: pip install, shown first, asked, run without capture (pip shows
+    its own progress)."""
+    run = run or subprocess.run
+    if py.get("venv"):
+        ui.line(f"A virtual environment: the packages go into {py['prefix']}.")
+    if not py.get("pip"):
+        cmd = [sys.executable, "-m", "ensurepip", "--upgrade"]
+        ui.line("pip is not installed for this Python.")
+        ui.line("Command: " + subprocess.list2cmdline(cmd))
+        how = (f"Reinstall Python from python.org with 'pip' ticked, or run: "
+               f"{sys.executable} -m ensurepip")
+        if ui.confirm("setup.confirm", "Install pip with it?", default=False):
+            r = run(cmd)
+            if getattr(r, "returncode", 1) != 0:
+                ui.warn(how)
+        else:
+            ui.line(how)
+        return
+    choice = ui.choose("setup.packages", "Python packages",
+                       [("i", "Install the missing ones"), ("u", "Upgrade all five"),
+                        ("t", "The tested versions ("
+                         + ", ".join(f"{n} {v}" for n, v in _SETUP_TESTED_PACKAGES.items()) + ")"),
+                        ("0", "Back")], default="0")
+    if choice == "0":
+        return
+    cmd = _pip_command(choice, py)
+    if not cmd:
+        ui.line("Nothing is missing.")
+        return
+    ui.line("Command: " + subprocess.list2cmdline(cmd))
+    if not ui.confirm("setup.confirm", "Run it?", default=False):
+        ui.line("Nothing was installed.")
+        return
+    r = run(cmd)
+    code = getattr(r, "returncode", 1)
+    ui.line("pip finished." if code == 0 else f"pip ended with exit code {code}.")
+
+
+def _setup_fix_all(ui, store, args, report: _SetupReport, findings, probe=_probe,
+                   opener=None, py=None, pip_run=None) -> None:
+    """[f]: each suggested fix in turn, each with its own question."""
+    opened = set()
+    for f in findings:
+        kind = f.fix[0]
+        ui.line(f"{f.severity.upper()} {f.code} ({f.unit}): {f.message}")
+        if kind in ("set_folder", "download"):
+            if f.unit in opened:
+                continue
+            opened.add(f.unit)
+            _setup_unit_menu(ui, store, report, f.unit, args, probe, opener)
+        elif kind == "remove_entries":
+            _setup_remove_entries(ui, store, f.fix[1], list(f.fix[2]), report.units,
+                                  unit_key=f.unit if f.unit in ("libjxl", "exiftool", "magick")
+                                  else None)
+        elif kind == "remove_duplicates":
+            before, btype = store.read(f.fix[1])
+            _confirm_and_write(ui, store, f.fix[1], before, btype,
+                               _path_remove_later_duplicates(before, f.fix[2]),
+                               reason=f"repeated entry {f.fix[2]}")
+        elif kind == "short_path":
+            _setup_short_path(ui, store, f.fix[1])
+        elif kind == "packages":
+            if "packages" in opened:
+                continue
+            opened.add("packages")
+            _setup_packages(ui, py or {}, pip_run)
+
+
+def _setup_session(ui, store, args, probe=_probe, python_report=None, pip_run=None,
+                   opener=None, process_path=None) -> int:
+    """The interactive setup: the report, then the fixes the person picks."""
+    while True:
+        report = _diagnose(store, probe, process_path)
+        py = (python_report or _python_report)()
+        findings = report.findings + _python_findings(py)
+        _show_setup_report(ui, report, py, findings, store)
+        fixable = [f for f in findings if f.fix and f.severity in ("error", "warning")]
+        options = ([("f", "Fix what is suggested")] if fixable else []) + [
+            ("1", "libjxl (cjxl, djxl, jxlinfo)"), ("2", "ExifTool"), ("3", "ImageMagick"),
+            ("p", "Python packages"), ("z", "Undo the last PATH change"),
+            ("r", "Check again"), ("0", "Done")]
+        choice = ui.choose("setup.main", "Setup", options, default="0")
+        if choice == "0":
+            return 0
+        if choice == "f":
+            _setup_fix_all(ui, store, args, report, fixable, probe, opener, py, pip_run)
+        elif choice in ("1", "2", "3"):
+            _setup_unit_menu(ui, store, report, ("libjxl", "exiftool", "magick")[int(choice) - 1],
+                             args, probe, opener)
+        elif choice == "p":
+            _setup_packages(ui, py, pip_run)
+        elif choice == "z":
+            _undo_last_change(store, ui)
+
+
+def _setup_default_args() -> argparse.Namespace:
+    return argparse.Namespace(check=False, tools_dir=None, apply_system_path=None, sha256=None)
+
+
+def _setup_main(argv) -> int:
+    """`python jxl_photo.py setup [--check] [--tools-dir DIR]`."""
+    if getattr(sys, "frozen", False):
+        print("jxl-photo.exe carries its own tools; setup is for the Python version.")
+        return 2
+    parser = argparse.ArgumentParser(
+        prog="jxl_photo.py setup", allow_abbrev=False,
+        description="Check the tools the scripts find on PATH (libjxl, ExifTool, ImageMagick) "
+                    "and the Python packages; fix what is wrong, switch a tool's version, or "
+                    "download the tested ones.")
+    parser.add_argument("--check", action="store_true",
+                        help="Report only: ask nothing, write nothing. Exit 1 on an ERROR.")
+    parser.add_argument("--tools-dir", metavar="DIR",
+                        help="Folder for the tested downloads (default: "
+                             "%%LOCALAPPDATA%%\\jxl-photo\\tools)")
+    parser.add_argument("--apply-system-path", metavar="FILE",
+                        help="Internal: used by the setup's own elevated step")
+    parser.add_argument("--sha256", metavar="HEX",
+                        help="Internal: used by the setup's own elevated step")
+    args = parser.parse_args(argv)
+    why = _common._long_temp_problem()
+    if why:
+        print(f"ERROR: {why}")
+        return 2
+    _common._utf8_console()
+    ui = RichUI() if (RICH_AVAILABLE and console) else PlainUI()
+    try:
+        store = _path_store()
+        if args.apply_system_path:
+            return _apply_system_path_plan(store, Path(args.apply_system_path), args.sha256)
+        if args.check:
+            return _setup_check(store)
+        return _setup_session(ui, store, args)
+    except KeyboardInterrupt:
+        print("\nCancelled (Ctrl+C).")
+        return 130
+    except EOFError:
+        print("\nCancelled (end of input).")
+        return 130
+    except (OSError, ValueError) as e:
+        print(f"ERROR: the PATH values cannot be read ({e}).")
+        return 1
+
+
+# === END OF SETUP ============================================================
+
+
 def main():
     try:
         _main()
@@ -11710,6 +13593,7 @@ def _main():
 
     if not status.get('cjxl') and not status.get('djxl'):
         print("\nERROR: cjxl/djxl not found!")
+        print(f"Run '{Path(sys.executable).stem} jxl_photo.py setup' to find or install them.")
         sys.exit(1)
 
     if args.run_preset:
@@ -11840,6 +13724,14 @@ def _main():
                 print(_thumb_upd)
                 menu._thumb_tip = True
                 menu._thumb_update = True
+            if menu.ui.ask_yes(
+                    "deps.setup",
+                    "Fix or change the tools on PATH and the Python packages (setup)?",
+                    "\nFix or change the tools on PATH and the Python packages (setup)? [y/N]: ",
+                    False):
+                _setup_session(menu.ui, _path_store(), _setup_default_args())
+                status = checker.check_dependencies(force=True)
+                menu.display_status(status)
 
         elif choice == "_reset":
             confirm = menu.ui.ask_yes(
@@ -11915,4 +13807,6 @@ def _main():
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1].lower() == "setup":
+        sys.exit(_setup_main(sys.argv[2:]))
     main()      # a backend command never gets here: see _run_backend's call

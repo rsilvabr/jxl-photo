@@ -70,6 +70,8 @@ pip install tifffile numpy pillow rich imagecodecs
 
 plus three tools on PATH: [cjxl / djxl / jxlinfo](https://github.com/libjxl/libjxl/releases) (the `jxl-x64-windows-static.zip`), [ExifTool](https://exiftool.org) and [ImageMagick](https://imagemagick.org). Then run `py jxl_photo.py`: its first line shows what it found. Step by step, with the PATH setup and troubleshooting: [docs/install.md](docs/install.md).
 
+`python jxl_photo.py setup` checks and fixes the tools on PATH and the Python packages.
+
 ---
 
 ## Quick Start — Interactive Wrapper

@@ -63,6 +63,27 @@ import site as _site  # noqa: E402
 os.environ.setdefault("PYTHONUSERBASE", _site.getuserbase())
 _TEST_APPDATA = tempfile.mkdtemp(prefix="jxlphoto_test_appdata_")
 os.environ["APPDATA"] = _TEST_APPDATA
+# `jxl_photo.py setup` reads and writes PATH values: under the suite, a JSON
+# copy (JXLPHOTO_SETUP_PATH_STORE), never the registry, and its backups go to
+# a throwaway LOCALAPPDATA (test_setup_tools.py asserts both).
+_TEST_SETUP_DIR = tempfile.mkdtemp(prefix="jxlphoto_test_setup_")
+os.environ["JXLPHOTO_SETUP_PATH_STORE"] = os.path.join(_TEST_SETUP_DIR, "path_store.json")
+_TEST_LOCALAPPDATA = tempfile.mkdtemp(prefix="jxlphoto_test_localappdata_")
+os.environ["LOCALAPPDATA"] = _TEST_LOCALAPPDATA
+# And should a test drop that variable (or build a _PathStore), its write still
+# never reaches the registry: every winreg writer refuses under the suite.
+if os.name == "nt":
+    import winreg as _winreg
+
+    def _registry_write_refused(name):
+        def refuse(*a, **k):
+            raise PermissionError(f"winreg.{name} refused under the test suite "
+                                  f"(tests/conftest.py): no test writes the registry")
+        return refuse
+
+    for _name in ("SetValue", "SetValueEx", "DeleteValue", "DeleteKey", "DeleteKeyEx"):
+        if hasattr(_winreg, _name):
+            setattr(_winreg, _name, _registry_write_refused(_name))
 
 # A wide console for rich: it wraps at the terminal width, so a phrase the
 # tests look for could be split by the wrap — and under pytest-xdist
@@ -89,6 +110,8 @@ def pytest_sessionfinish(session, exitstatus):
     logging.shutdown()
     shutil.rmtree(_TEST_LOG_DIR, ignore_errors=True)
     shutil.rmtree(_TEST_APPDATA, ignore_errors=True)
+    shutil.rmtree(_TEST_SETUP_DIR, ignore_errors=True)
+    shutil.rmtree(_TEST_LOCALAPPDATA, ignore_errors=True)
 
 
 @functools.lru_cache(maxsize=None)

@@ -17,6 +17,7 @@ and the logs. Only dry runs and audits run, on that empty library; nothing
 outside FOLDER is read or written, and the update check is off.
 """
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -43,7 +44,8 @@ def _sessions(lib: Path):
         # 8 questions since rc6: "Confirm before delete?" is gone (#728).
         "10_settings_defaults": "9\n1\n" + "\n" * 8 + "0\n0\n",
         "11_script_settings": "9\n2\n1\n0\n0\n0\n",
-        "12_dependencies": "D\n0\n",
+        # n: D's "Fix or change the tools ... (setup)?" question.
+        "12_dependencies": "D\nn\n0\n",
         "13_job_archive_review": f"1\n1\n{lib}\n\n6\n\n\n\nc\nx\n\nq\n0\n",
         "14_job_all_options": f"1\n1\n{lib}\n\n6\n\n\n\na\n\nq\n0\n",
         # 15-17 reach the review earlier than their first scripts assumed: the
@@ -57,6 +59,26 @@ def _sessions(lib: Path):
         "21_job_dry_run": f"1\n1\n{lib}\n\n6\n\n\n\nd\nq\n0\n",
         "22_job_save_preset": f"1\n1\n{lib}\n\n6\n\n\n\ns\nNEW [x] 5%\nq\n3\nb\n0\n",
     }
+
+
+# `jxl_photo.py setup ...` sessions: (arguments after jxl_photo.py, keys). Kept
+# apart from _sessions, whose keys tools/wizard_transcripts.py types into the
+# wizard itself. Their PATH values come from a JSON copy in FOLDER
+# (JXLPHOTO_SETUP_PATH_STORE): nothing reaches the registry, ever.
+SETUP_SESSIONS = {
+    "23_setup": (["setup"], "1\n0\np\n0\n0\n"),
+    "24_setup_check": (["setup", "--check"], ""),
+}
+
+
+def _setup_store(root: Path) -> Path:
+    """A JSON copy of the PATH values: the user PATH is this run's PATH, the
+    system one empty."""
+    store = root / "setup_path_store.json"
+    store.write_text(json.dumps({"user": {"value": os.environ.get("PATH", ""), "type": 2},
+                                 "system": {"value": None, "type": None}},
+                                ensure_ascii=False), encoding="utf-8")
+    return store
 
 
 def _seed_config(app: Path, home: Path, lib: Path, env: dict) -> None:
@@ -86,21 +108,25 @@ def main() -> int:
         p.mkdir(parents=True, exist_ok=True)
     for name in SCRIPTS:
         shutil.copy2(REPO / name, app / name)
+    (root / "localappdata").mkdir(exist_ok=True)
     env = dict(os.environ, USERPROFILE=str(home), HOME=str(home),
                JXLPHOTO_LOG_DIR=str(root / "logs"), JXLPHOTO_NO_UPDATE_CHECK="1",
-               PYTHONIOENCODING="utf-8", COLUMNS="110", JXLPHOTO_JXL_THUMB="0")
+               PYTHONIOENCODING="utf-8", COLUMNS="110", JXLPHOTO_JXL_THUMB="0",
+               JXLPHOTO_SETUP_PATH_STORE=str(_setup_store(root)),
+               LOCALAPPDATA=str(root / "localappdata"))
     env.pop("JXLPHOTO_SETTINGS", None)
     _seed_config(app, home, lib, env)
 
-    sessions = _sessions(lib)
+    sessions = {name: ([], keys) for name, keys in _sessions(lib).items()}
+    sessions.update(SETUP_SESSIONS)
     unknown = [s for s in args.sessions if s not in sessions]
     if unknown:
         print(f"unknown session(s): {', '.join(unknown)}; known: {', '.join(sessions)}")
         return 2
-    for name, keys in sessions.items():
+    for name, (argv, keys) in sessions.items():
         if args.sessions and name not in args.sessions:
             continue
-        r = subprocess.run([sys.executable, str(app / "jxl_photo.py")], input=keys,
+        r = subprocess.run([sys.executable, str(app / "jxl_photo.py"), *argv], input=keys,
                            capture_output=True, text=True, encoding="utf-8",
                            errors="replace", env=env, cwd=str(app), timeout=300)
         text = r.stdout + ("\n--- stderr ---\n" + r.stderr if r.stderr.strip() else "")

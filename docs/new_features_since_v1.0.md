@@ -1,5 +1,20 @@
 # New Features Since v1.0
 
+## Next release (not released yet)
+
+### `python jxl_photo.py setup`: the tools on PATH and the Python packages (wrapper)
+
+Shows which libjxl, ExifTool and ImageMagick a new program runs (folder,
+version, user or system PATH) and the Python packages, finds what is wrong
+(missing, not running, a libjxl split across folders or versions, old or Q8
+builds, conflicting copies, stale or repeated PATH entries, an ExifTool in a
+folder the code page cannot hold) and fixes it: the user PATH only, each change
+shown, asked and backed up (`[z]` undoes it), a system-PATH entry through one
+administrator prompt. It also switches a tool to another folder on request,
+installs the packages with pip and downloads the tested tool versions with a
+SHA-256 check. `--check` only reports. Menu `D` offers it after its check. See
+[install.md](install.md#the-easy-way-python-jxl_photopy-setup).
+
 ## v2.25.0 (2026-11-06)
 
 ### The TIFF's byte order is kept (encoder, recompressor, transcoder, decoder)

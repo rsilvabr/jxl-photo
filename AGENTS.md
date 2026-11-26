@@ -1202,6 +1202,31 @@ changes first.
   (`_MAGICK_KEEP_ICCP`, the recompressor's `_TEMP_PNG_ARGS`). A test for this
   needs a RECOGNISED profile (`sRGB Color Space Profile.icm`): one built by
   littleCMS/Pillow never triggers it — which is how the whole suite missed it.
+- **`jxl_photo.py setup` (the tools on PATH, `# === SETUP` section).** It
+  writes PATH values only through `_write_path` (re-read and compare-and-swap
+  against what the diagnosis read, a backup in
+  `%LOCALAPPDATA%\jxl-photo\path-backups\`, the write, the
+  `WM_SETTINGCHANGE` broadcast, a `changes.log` line), never `setx` (it cuts
+  at 1024 characters) and never PowerShell; the system PATH only through the
+  elevated `--apply-system-path` plan (`_elevated_system_path_edit` →
+  `_apply_system_path_plan`, the plan's SHA-256 checked). The suite and
+  `tools/ui_tour.py` set `JXLPHOTO_SETUP_PATH_STORE` (a JSON copy of the
+  values, `_JsonPathStore`) and a throwaway `LOCALAPPDATA` — conftest pins
+  them, `tests/test_setup_tools.py` asserts it: no test touches the
+  registry, and neither may a by-hand run (only the read-only `--check`).
+  conftest also replaces winreg's writers (`SetValueEx`, `DeleteValue`, ...)
+  with a refusal, so a test that drops the variable still writes nothing.
+  Each backup names its store (`_store_id`: `registry` or `json:<file>`) and
+  `[z]` restores only one of the store in use. A suggested fix (`[f]`) never
+  removes a user folder that holds other programs (a losing copy does no
+  harm; `[r]` still can, naming them); a folder with `;` or `%NAME%` in its
+  path is never written into PATH.
+  `_SETUP_TESTED_TOOLS` / `_SETUP_TESTED_PACKAGES` change together with
+  jxl-photo-exe's `build.py` (`TOOLS`, `REQUIREMENTS`) and the "Tested with"
+  sentence of `docs/install.md` (the same test enforces it). The winner of
+  each tool mirrors the scripts: PATH order, and for ExifTool the NAME order
+  first (`exiftool`, `exiftool-k`, `exiftool(-k)`); every probe runs with
+  stdin NUL.
 - **Wrapper options live in `REGISTRY`** (`jxl_photo.py`, `# === OPTION
   REGISTRY ===`). Both the direct run and every manifest entry build the
   child's argv through `build_child_cmd`; never add a flag to a builder by
@@ -1429,9 +1454,10 @@ changes first.
   `JXLPHOTO_FIXTURES`; the layout is in the script's docstring) and are never
   modified.
 - **Wizard screens by eye** — `python tools/ui_tour.py [--out FOLDER]` walks
-  every screen of `jxl_photo.py` with Rich (22 sessions: menus, every task to
+  every screen of `jxl_photo.py` with Rich (24 sessions: menus, every task to
   its review, [a]/[c]/[x]/[d]/[s], Auto Mode, [D], settings, the maintenance
-  menus) in a throw-away home and a hostile library folder, and saves each
+  menus, `setup` and `setup --check` on a JSON copy of the PATH values) in a
+  throw-away home and a hostile library folder, and saves each
   screen to `FOLDER/screens/`. Read them after any change to what the wizard
   shows (rc 130 = that session ran out of answers: see where in its file).
 - **Refactor proofs: old against new** (none of them touches the repo's
@@ -1644,7 +1670,8 @@ must-fix / should-fix items and a commit verdict.
   published (regular releases since v2.16.0-exe2, built by GitHub since
   v2.16.2-exe1; jxl-thumb's releases are built the same way). A change
   to jxl-thumb that the exe bundles (its `TOOLS["jxl-thumb"]` URL + SHA-256)
-  goes in the same way.
+  goes in the same way, and `_SETUP_TESTED_TOOLS` in `jxl_photo.py` when the
+  exe's TOOLS change.
 
 ## Pending list
 The owner keeps one list of everything still pending, across all repos, in
