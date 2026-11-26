@@ -1357,9 +1357,11 @@ changes first.
 - After editing any script, run `python -m py_compile` on the changed files.
 - Tests: `python -m pytest tests/ -n 16 -q` (pytest-xdist; ~3.5 min on the
   owner's machine — 32 logical CPUs; `-n 8` took 7.8 min on 2026-11-04, so
-  16 is the measured choice — ~16 min serial). On the owner's machine `py` resolves to a
-  Python 3.13 without pytest/numpy/tifffile; `python` (3.12) has them — use
-  `python` for the suite, the pre-fix proofs and the battery. A test must be
+  16 is the measured choice — ~16 min serial). On the owner's machine
+  `python` is 3.12 and `py` is 3.13 (`%LOCALAPPDATA%\py.ini`; 3.9–3.15 are
+  installed, each with the packages and pytest: `py -3.X -m pytest`) — use
+  `python` for the suite, the pre-fix proofs and the battery, and `py -3.13`
+  when a change depends on the Python version (#766). A test must be
   safe in parallel: its own `tmp_path`, no fixed temp/home path, no assertion
   on a phrase rich may wrap (conftest sets `COLUMNS=240`; normalise
   whitespace when a long path precedes the phrase).
@@ -1384,7 +1386,9 @@ changes first.
   never reach the disk, read into memory in the calling thread — the same
   no-reader-thread rules; `_run_captured`'s stdout is a temp FILE by design)
   and `_spawn_exiftool_server` (the kept-open ExifTool, v2.31.0, read the same
-  way); `tests/test_subprocess_capture.py` enforces it.
+  way); `tests/test_subprocess_capture.py` enforces it. A child's input goes
+  through `_write_stdin` (common), never `subprocess.run(input=...)`: since
+  Python 3.13 that starts a writer thread on Windows (#766).
 - Prefer verifying real behavior against real photos over reasoning alone — the
   test suite is synthetic/mocked, so codec-path bugs (ICC, bit depth,
   multi-page, channel counts) only show up against actual files.

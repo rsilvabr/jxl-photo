@@ -5,7 +5,8 @@
 
 ## The easy way: `python jxl_photo.py setup`
 
-Install Python 3.9+ (from python.org, with "pip" and "Add to PATH" ticked), copy
+Install Python 3.9 or newer — 3.12 or newer recommended ([why](#which-python)) —
+(from python.org, with "pip" and "Add to PATH" ticked), copy
 the release's files into one folder, then, from that folder:
 
 ```powershell
@@ -51,13 +52,29 @@ The wizard's menu `D` (dependencies) offers the same setup after its check.
 
 ## By hand
 
-### 1. Python 3.9+ and packages
+### 1. Python 3.9+ (3.12+ recommended) and packages
 
 ```powershell
 pip install tifffile numpy pillow rich imagecodecs
 ```
 
 Install them in the same Python you will run the scripts with.
+
+#### Which Python
+
+Every Python from 3.9 to 3.15 runs the scripts and writes the same files. 3.12
+or newer is recommended, because before **Python 3.12.7** the output folder must
+come right after the input, before any option:
+
+```powershell
+python jxl_tiff_encoder.py "D:\Photos\TIFF" "D:\Photos\JXL" --mode 2    # every Python
+python jxl_tiff_encoder.py "D:\Photos\TIFF" --mode 2 "D:\Photos\JXL"    # 3.12.7+ only
+```
+
+On an older Python the second form stops with a usage error (exit code 2) and
+writes nothing (on 3.13.0 too). That is Python's own command-line parser, fixed
+in 3.12.7 and 3.13.1; the
+wizard, its presets and its manifests always use the first form.
 
 ### 2. External tools (download the executables, not the source code)
 

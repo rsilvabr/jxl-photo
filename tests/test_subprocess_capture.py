@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -237,6 +238,38 @@ def test_run_captured_feeds_input_without_a_thread(mod, monkeypatch):
     r = mod._run_captured(cmd, 30, input=b"abc")
     assert r.returncode == 0
     assert r.stdout == b"cba"
+
+
+# #766: since Python 3.13, subprocess.run(input=) writes the input from a
+# thread on Windows; _run_captured writes it itself. Its timeout and a child
+# that stops reading must behave as subprocess.run's did.
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows reader threads")
+def test_run_captured_input_times_out_and_kills_the_child(monkeypatch):
+    def _no_thread(*_a, **_k):
+        raise AssertionError("a thread was started")
+
+    monkeypatch.setattr(threading.Thread, "start", _no_thread)
+    cmd = [sys.executable, "-c", "import time; time.sleep(60)"]
+    t0 = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        enc._run_captured(cmd, 2, input=b"abc")
+    assert time.monotonic() - t0 < 20
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows reader threads")
+@pytest.mark.parametrize("mod", [enc, rec], ids=["encoder", "recompressor"])
+def test_run_captured_input_to_a_child_that_stops_reading(mod, monkeypatch):
+    def _no_thread(*_a, **_k):
+        raise AssertionError("a thread was started")
+
+    monkeypatch.setattr(threading.Thread, "start", _no_thread)
+    cmd = [sys.executable, "-c",
+           "import sys; sys.stderr.write('bad input'); sys.exit(3)"]
+    # Far more than a pipe holds: the write meets a closed pipe.
+    r = mod._run_captured(cmd, 30, input=b"\0" * (32 << 20))
+    assert r.returncode == 3
+    assert b"bad input" in r.stderr
 
 
 # ---------------------------------------------------------------------------

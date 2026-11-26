@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #766.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #767.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -32,6 +32,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-97 — Python 3.13's thread for a child's input](#round-97--python-313s-thread-for-a-childs-input-2026-11-27) | 2026-11-27 | not released yet | #766 (1) |
 | [Round-96 — the recompressor's counts in the manifest table](#round-96--the-recompressors-counts-in-the-manifest-table-2026-11-26) | 2026-11-26 | not released yet | #765 (1) |
 | [Round-95 — the sibling-rule sweep of rc7](#round-95--the-sibling-rule-sweep-of-rc7-2026-11-23) | 2026-11-23 | v2.31.0-rc8 | #746–#764 (19) |
 | [Round-94 — the targeted review, after rc6](#round-94--the-targeted-review-after-rc6-2026-11-22) | 2026-11-22 | v2.31.0-rc7 | #729–#745 (17) |
@@ -114,6 +115,17 @@ were never tagged and never shipped.
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
 
 ---
+
+## Round-97 — Python 3.13's thread for a child's input (2026-11-27)
+
+Found by running the suite on every Python from 3.9 to 3.15: on 3.13, 3.14
+and 3.15 `test_run_captured_feeds_input_without_a_thread` failed. Fixed with
+that test and two new ones (`tests/test_subprocess_capture.py`), which fail on
+v2.31.0 under Python 3.13. No file the toolkit writes changes.
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 766 | Round 45 (#473) keeps threads out of every codec call: under memory exhaustion a thread can fail in its start-up and `Thread.start()` then waits forever. `_run_captured` handed a child's input to `subprocess.run(input=...)`, which up to Python 3.12 writes it from the calling thread; since 3.13 it starts a thread on Windows to write it, so every full-size cjxl of the encoder (its PNG on stdin) and the transcoder's memory route started one. `_run_captured` now writes the input itself and waits with `Popen.wait(timeout)`, as `subprocess.run` did up to 3.12 (same timeout, a child that stops reading ends the write quietly); `_run_to_memory` shares the writer (`_write_stdin`). | common | Fixed |
 
 ## Round-96 — the recompressor's counts in the manifest table (2026-11-26)
 

@@ -1453,7 +1453,7 @@ def test_zero_byte_output_marked_error_encoder(monkeypatch, tmp_path):
     monkeypatch.setattr(enc, "apply_d50_policy", lambda icc, p: icc)
     monkeypatch.setattr(enc, "reorder_jxl_boxes", lambda p: None)
 
-    def fake_run(cmd, **kw):
+    def fake_run(cmd, *_a, **kw):
         if "cjxl" in str(cmd[0]):
             # cjxl "succeeds" but wrote 0 bytes — written to the OUTPUT
             # argument (a uuid temp beside `final` since the atomic-rename
@@ -1463,6 +1463,8 @@ def test_zero_byte_output_marked_error_encoder(monkeypatch, tmp_path):
         return _FakeRun()
 
     monkeypatch.setattr(enc.subprocess, "run", fake_run)
+    # cjxl gets its PNG on stdin, which _run_captured writes itself (#766).
+    monkeypatch.setattr(enc, "_run_captured", fake_run)
     enc.setup_logger()
     enc.OVERWRITE = True
 

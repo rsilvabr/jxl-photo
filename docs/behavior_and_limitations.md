@@ -137,6 +137,10 @@ ExifTool reads a `%` in the name of a file it writes, or reads a tag from, as a 
 
 On Windows, a process whose TMP (its TEMP when TMP is not set) is 261 characters or longer hangs when it starts another program, with nothing on the screen; Python starting `cmd` hangs the same way. The scripts start cjxl, djxl and ExifTool for every photo, so every script, a serve process and the wizard stop at their start (exit code 2, the variable named) when TMP is that long. Windows' own TMP is far shorter: only a program that points TMP at a very deep folder meets it. `TEMP_DIR` is not concerned. Since v2.31.0-rc4; before it, such a run waited forever on its first program.
 
+## Before Python 3.12.7: the output folder before the options
+
+Python's command-line parser before 3.12.7 does not take the output folder after an option: `script INPUT --mode 2 OUTPUT` stops with a usage error (exit code 2, nothing written), while `script INPUT OUTPUT --mode 2` works on every Python. Python 3.12.7 and 3.13.1 fixed it (3.13.0 still has it). The wizard, its presets and its manifests always write the second form. [Which Python](install.md#which-python)
+
 ## Modes 6/7: which `_EXPORT` counts, and what is left out
 
 The anchor is the first folder matching the marker at or below the input folder; only when there is none below it, the closest one above it. A library kept under a folder whose name also matches (`Lightroom_Export`, `C1_Export`) is not anchored there — unless the run is pointed at that very folder, which then counts as the marker: point it at the year or event folder inside. Below the marker, the decoder and the recompressor leave out the other scripts' output folders (by the names in their settings), and these two and the transcoder's decode leave out every derivative (by its `jxlphoto-derived` marker, wherever it sits), unless mode 7 asks for that folder by name.

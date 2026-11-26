@@ -229,13 +229,15 @@ def test_encoder_codec_writes_to_a_uuid_temp_beside_final(tmp_path, monkeypatch)
 
     cjxl_targets = []
 
-    def fake_run(cmd, **kw):
+    def fake_run(cmd, *_a, **kw):
         if "cjxl" in str(cmd[0]):
             cjxl_targets.append(Path(cmd[2]))
             Path(cmd[2]).write_bytes(b"jxl-bytes")
         return _FakeRun()
 
     monkeypatch.setattr(enc.subprocess, "run", fake_run)
+    # cjxl gets its PNG on stdin, which _run_captured writes itself (#766).
+    monkeypatch.setattr(enc, "_run_captured", fake_run)
     enc.setup_logger()
     monkeypatch.setattr(enc, "OVERWRITE", True)
 
@@ -266,7 +268,7 @@ def test_encoder_failed_codec_leaves_nothing_at_final(tmp_path, monkeypatch):
 
     cjxl_targets = []
 
-    def fake_run(cmd, **kw):
+    def fake_run(cmd, *_a, **kw):
         if "cjxl" in str(cmd[0]):
             cjxl_targets.append(Path(cmd[2]))
             Path(cmd[2]).write_bytes(b"PARTIAL")
@@ -274,6 +276,8 @@ def test_encoder_failed_codec_leaves_nothing_at_final(tmp_path, monkeypatch):
         return _FakeRun()
 
     monkeypatch.setattr(enc.subprocess, "run", fake_run)
+    # cjxl gets its PNG on stdin, which _run_captured writes itself (#766).
+    monkeypatch.setattr(enc, "_run_captured", fake_run)
     enc.setup_logger()
     monkeypatch.setattr(enc, "OVERWRITE", True)
 

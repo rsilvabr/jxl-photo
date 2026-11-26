@@ -4652,9 +4652,11 @@ def _run_captured(g, cmd, timeout, text=False, input=None, stall=None):
     the child). With files there is no thread: a failed spawn raises OSError,
     which the callers already handle.
 
-    `input` (bytes) goes to the child's stdin, written from THIS thread:
-    communicate() starts reader threads only for PIPE stdout/stderr, never
-    for stdin.
+    `input` (bytes) goes to the child's stdin, written from THIS thread
+    (_write_stdin), then the child is waited for with Popen.wait(timeout),
+    which starts no thread either. Never subprocess.run(input=...): since
+    Python 3.13 its communicate() on Windows writes `input` from a thread of
+    its own (#766) — every full-size cjxl of the encoder started one.
 
     `stall` (seconds) is for the planning-time exiftool BATCH reads (#537):
     the child is stopped only when its stdout has not grown for `stall`
@@ -4672,13 +4674,32 @@ def _run_captured(g, cmd, timeout, text=False, input=None, stall=None):
     cmd, _argfile_bytes = g._argfile_via_stdin(cmd)
     if _argfile_bytes is not None:
         input = _argfile_bytes
-    stdin_kw = {"stdin": g._DEVNULL} if input is None else {"input": input}
     with tempfile.TemporaryFile(dir=g.TEMP_DIR) as out, \
             tempfile.TemporaryFile(dir=g.TEMP_DIR) as err:
-        if stall is None:
+        if stall is None and input is None:
             r = subprocess.run(cmd, stdout=out, stderr=err, timeout=timeout,
-                               **stdin_kw)
+                               stdin=g._DEVNULL)
             rc, o, e = r.returncode, r.stdout, r.stderr
+        elif stall is None:
+            # What subprocess.run(input=) did up to Python 3.12: the whole
+            # input written from this thread, then the wait, the timeout
+            # counted from the start.
+            deadline = time.monotonic() + timeout
+            p = subprocess.Popen(cmd, stdout=out, stderr=err,
+                                 stdin=subprocess.PIPE, bufsize=0)
+            try:
+                _write_stdin(p, input)
+                rc = p.wait(timeout=max(0.0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                p.kill()
+                p.wait()
+                raise subprocess.TimeoutExpired(cmd, timeout) from None
+            except BaseException:
+                # Like subprocess.run: a Ctrl+C never leaves the child running.
+                p.kill()
+                p.wait()
+                raise
+            o = e = None
         else:
             p = subprocess.Popen(cmd, stdout=out, stderr=err,
                                  stdin=g._DEVNULL if input is None else subprocess.PIPE)
@@ -4718,6 +4739,28 @@ def _run_captured(g, cmd, timeout, text=False, input=None, stall=None):
         if isinstance(e, bytes):
             e = e.decode("utf-8", "replace").replace("\r\n", "\n")
     return g._CompletedProcess(cmd, rc, o, e)
+
+
+def _write_stdin(p, data):
+    """Writes all of `data` to the stdin of `p` (a Popen with stdin=PIPE,
+    bufsize=0) from THIS thread, then closes it. A child that stops reading
+    (it failed) ends the write quietly: its exit code and stderr say why."""
+    try:
+        # A raw write may take less than all of it (one write is capped at
+        # 2 GiB - 1): write until everything is written (Fable's review, S5).
+        view = memoryview(data).cast("B")
+        while view:
+            n = p.stdin.write(view)
+            if not n:
+                break
+            view = view[n:]
+    except OSError:
+        pass
+    finally:
+        try:
+            p.stdin.close()
+        except OSError:
+            pass
 
 
 _PIPE_CHUNK = 1 << 23
@@ -4807,23 +4850,7 @@ def _run_to_memory(g, cmd, timeout, input=None):
         os.close(wfd)       # the child's copy is its own: EOF comes when it closes it
         try:
             if input is not None:
-                try:
-                    # A raw write may take less than all of it (one write is
-                    # capped at 2 GiB - 1): write until everything is written
-                    # (Fable's review, S5).
-                    view = memoryview(input).cast("B")
-                    while view:
-                        n = p.stdin.write(view)
-                        if not n:
-                            break
-                        view = view[n:]
-                except OSError:
-                    pass    # it stopped reading (it failed): its exit code and stderr say why
-                finally:
-                    try:
-                        p.stdin.close()
-                    except OSError:
-                        pass
+                _write_stdin(p, input)
             out = _read_pipe_until_eof(rfd, deadline)
             if out is None:
                 raise subprocess.TimeoutExpired(cmd, timeout)
