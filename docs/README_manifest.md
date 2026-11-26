@@ -452,8 +452,11 @@ Manifest complete: 3 entries - 2 ok, 1 with failures, 0 cancelled
 ===========================================================================
 ```
 
-The first line counts **entries**; the table counts **files**. The two failure
-sections are deliberately separate:
+The first line counts **entries**; the table counts **files**. `OK` is every
+file written, new or over an existing output; `ovw` is the part of `OK` that
+replaced an existing output, so a run with `--overwrite` over a finished folder
+reads the same number in both. The two failure sections are deliberately
+separate:
 
 | Section | Meaning |
 |---------|---------|

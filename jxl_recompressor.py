@@ -864,6 +864,10 @@ _OUTPUT_ICC_BYTES = None
 _OUTPUT_ICC_PATH = None      # the profile written once to a temp file for magick
 _SRGB_ICC_PATH = None        # assigned to sources that decode without any profile (A3)
 _FORCE_REDERIVE = set()      # final paths whose derived marker names another target
+# Sources whose verbatim copy replaced an existing output (not in place): the
+# summary counts them as overwrites too — "ovw" is "an existing output was
+# replaced", whether by a re-encode or by a copy. Run state, reset in main().
+_COPIED_OVER_EXISTING = set()
 
 # --output-icc: how this run's colour conversions were done, for the line at
 # the end of the run (D8 of plan 261120 srgb-fast). Reset at the top of main().
@@ -3726,6 +3730,8 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
                 raise RuntimeError("the copy is not the source byte for byte (size/MD5), "
                                    "or failed the JXL integrity check")
             logger.info(f"[{n}/{total}] COPY | {jxl_path.name} -> {final_path.name}")
+            if existed_before:
+                _COPIED_OVER_EXISTING.add(str(jxl_path))
             return (str(jxl_path), "copied", str(final_path))
 
         # action == "convert"
@@ -3764,6 +3770,8 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
                                        "(size/MD5), or failed the JXL integrity check")
                 logger.info(f"[{n}/{total}] COPY (lossy ICC blob) | {jxl_path.name} "
                             f"-> {final_path.name}")
+                if existed_before:
+                    _COPIED_OVER_EXISTING.add(str(jxl_path))
                 return (str(jxl_path), "copied", str(final_path))
 
         # Metadata: everything the source JXL carries (EXIF, XMP, the base64 ICC
@@ -3909,6 +3917,8 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
         else:
             label = ("RECOMPRESS" if status == "ok" else "COPY")
         logger.info(f"[{n}/{total}] {label} | {jxl_path.name} -> {final_path.name}")
+        if overwritten and status == "copied":
+            _COPIED_OVER_EXISTING.add(str(jxl_path))
         return (str(jxl_path), "overwrite" if overwritten and status == "ok" else status,
                 str(final_path))
 
@@ -5858,6 +5868,7 @@ def main():
     _OUTPUT_ICC_PATH = None
     _SRGB_ICC_PATH = None
     _FORCE_REDERIVE = set()
+    _COPIED_OVER_EXISTING.clear()
     _COLOUR_ROUTES = {"python": 0, "magick": 0}
     _COLOUR_TRANSFORMS = {}
     RESIZE_MODE = None
@@ -6620,12 +6631,21 @@ def main():
 
     # The wrapper's manifest recap pops the deletion labels by name: one
     # spelling, in jxl_photo_common.py ("deleted sources" was invisible there).
-    extras = {"recompressed": ok, "copied (policy/not smaller)": copied,
+    # The wrapper's table reads "ovw" as PART of "OK" (the other three scripts
+    # count an overwrite in both, since v1.8.3): ok holds every file written,
+    # re-encoded or copied, new or over an existing output; overwritten the
+    # ones that replaced an existing output, by a re-encode or by a copy.
+    # Sent as separate buckets, a --overwrite run read "OK 0 | ovw 8438".
+    reencoded = ok + overwritten
+    copied_over = sum(1 for _src, (_s, _f) in results.items()
+                      if _s == "copied" and _src in _COPIED_OVER_EXISTING)
+    extras = {"recompressed": reencoded, "copied (policy/not smaller)": copied,
               _common.SUMMARY_DELETED: _delete_stats["deleted"],
               _common.SUMMARY_DELETED_ARCHIVED: _delete_stats["deleted_archived"],
               _common.SUMMARY_KEPT: _delete_stats["kept"],
               _common.SUMMARY_REFUSED: len(provenance_refused)}
-    emit_summary_json(args.summary_json, ok=ok + copied, overwritten=overwritten,
+    emit_summary_json(args.summary_json, ok=reencoded + copied,
+                      overwritten=overwritten + copied_over,
                       skipped=skipped, errors=errors, log_file=log_file,
                       extras=extras, failures=failures)
     _report_staging_leftovers(TEMP2_DIR)

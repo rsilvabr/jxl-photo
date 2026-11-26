@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #765.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #766.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -32,6 +32,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-96 — the recompressor's counts in the manifest table](#round-96--the-recompressors-counts-in-the-manifest-table-2026-11-26) | 2026-11-26 | not released yet | #765 (1) |
 | [Round-95 — the sibling-rule sweep of rc7](#round-95--the-sibling-rule-sweep-of-rc7-2026-11-23) | 2026-11-23 | v2.31.0-rc8 | #746–#764 (19) |
 | [Round-94 — the targeted review, after rc6](#round-94--the-targeted-review-after-rc6-2026-11-22) | 2026-11-22 | v2.31.0-rc7 | #729–#745 (17) |
 | [Round-93 — the second sweep, after rc5](#round-93--the-second-sweep-after-rc5-2026-11-22) | 2026-11-22 | v2.31.0-rc6 | #712–#728 (17) |
@@ -113,6 +114,18 @@ were never tagged and never shipped.
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
 
 ---
+
+## Round-96 — the recompressor's counts in the manifest table (2026-11-26)
+
+Found by the owner on a real run: a JXL → JXL manifest with `--overwrite` that
+rewrote every file without an error read `OK 0 | ovw 8438` in the wrapper's
+table. Fixed with a test that fails on v2.31.0
+(`tests/test_recompressor_summary_counts.py`). No file the toolkit writes
+changes.
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 765 | The manifest table reads "ovw" as part of "OK" (since v1.8.3 the encoder, the decoder and the transcoder count an overwrite in both; #257 aligned the transcoder's auto mode). The recompressor sent its re-encodes over an existing output in "ovw" only, so a `--overwrite` run showed OK 0, and a verbatim copy over an existing output (a jbrd archive, keep-smaller, a lossy ICC blob) in "OK" only. Its `--summary-json` now counts every file written in `ok` and every existing output it replaced, re-encoded or copied, in `overwritten`; its "recompressed" count includes the re-encodes over an existing output. The run's own `Done:` line is unchanged. | recompressor | Fixed |
 
 ## Round-95 — the sibling-rule sweep of rc7 (2026-11-23)
 
