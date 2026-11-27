@@ -470,10 +470,13 @@ An entry whose child crashed, was killed, or was cancelled shows `(no summary -
 failed)` instead of zeros, so a dead child is never mistaken for a clean
 folder.
 
-Ctrl+C cancels cleanly: the running child is killed, the summary block above is
-still rendered (the interrupted entry marked `cancelled`, the rest
-`not started`), and the wrapper exits `130` — the accounting of what *did*
-complete survives the interruption.
+Ctrl+C stops cleanly. The first press lets the running script finish its
+files in progress and print its own summary; then the summary block above is
+rendered (that entry marked `interrupted`, or `ok` when it had already
+finished; the rest `not started`), no other row starts, and the wrapper exits
+`130` — the accounting of what *did* complete survives the interruption. A
+second press stops the running script now (it gets 15 s to clean up, a third
+press ends it at once; that entry is then `cancelled`).
 
 **`Logs/jxl_photo/<timestamp>.log`** holds the same block plus the untruncated
 folder paths (the table shortens them to fit the terminal) and the complete

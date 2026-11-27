@@ -128,7 +128,7 @@ strips any record the source carries.
 | `jxlphoto-grayscale` | the page was single-channel grey | encoder | decoder |
 | `jxlphoto-thumb` | the page was the TIFF's embedded thumbnail | encoder | decoder |
 | `jxlphoto-icc:inherited` | the page had no ICC of its own and used page 0's | encoder | decoder, recompressor derivatives |
-| `jxlphoto-pixsum:<pages>:<md5>` | a hash of the pixels the decoder wrote, so a TIFF edited later is never overwritten | decoder (on the TIFF) | the next encode |
+| `jxlphoto-pixsum:<pages>:<md5>` / `jxlphoto-pixsum:c1:<md5>` | `<pages>:<md5>` on a TIFF the decoder wrote (a hash of its pixels); `c1:<md5>` on a JPEG/PNG the transcoder exported from a JXL (a hash of its coded image data, since 2.31.1-dev2) — so a file edited later is never overwritten. Reveals nothing (a hash) | decoder (on the TIFF), transcoder (on the JPEG/PNG) | the next decode / export; removed by the encoder and by a lossy JPEG/PNG → JXL. It can still ride inside a JXL, unread: a lossless JPEG archive (jbrd) keeps the JPEG's own XMP byte for byte, token included, and the recompressor's re-encode of such an archive (`--jbrd-policy convert`) carries that XMP into a normal JXL. No reader takes it from a JXL: the decoder and the transcoder drop an inherited one and write their own |
 | `jxlphoto-derived:<recipe>` | this file is a **derivative**, and how it was made: target profile (or `keep`), `@long<px>`/`@short<px>`/`@pct<n>` (`+up` when upscaling was allowed), `+<sharpen>`, and in the recompressor `/d<d>e<e>` (`s` when cjxl streamed), in the transcoder's JPEG `/q<quality>` (since v2.25.0). Examples: `sRGB@long2048+screen/d3e9`, `sRGB@long2048+screen/q70` | recompressor, transcoder (derivatives only) | decoder |
 
 The decoder removes the tokens that describe the JXL (page structure, depth,
@@ -234,7 +234,9 @@ big-endian) — except:
 - **JPEG → JXL lossless (the `jbrd` reconstruction container)**: no XMP at all.
   Adding any breaks `djxl --reconstruct_jpeg`, the bit-exact way back to your
   JPEG. The proof of origin lives in `checksums.md5`, a file next to the
-  outputs, instead.
+  outputs, instead. (`jxlphoto-lock` is not a mark of any photo either: it is
+  the text inside `checksums.md5.lock`, the short-lived file that keeps two
+  writers of that list apart, deleted after each line.)
 - **JXL → JPEG bit-exact reconstruction**: the JPEG comes back byte for byte.
 - **Verbatim copies** in the recompressor (a `jbrd` file kept as it is, or a
   re-encode that was not smaller): the bytes are the source's.

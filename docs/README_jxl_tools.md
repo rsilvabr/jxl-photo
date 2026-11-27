@@ -757,6 +757,13 @@ finished file and, during planning, one per slow exiftool batch
 batch slower than that (a huge drum scan at effort 10, a very slow network
 share). Edit the value in the config file while the wrapper is closed.
 
+**Ctrl+C while a job runs** — the first press lets the running script
+finish its files in progress and print its summary, then the wizard ends
+(`Cancelled (Ctrl+C).`, exit 130); a second press stops the script now (it
+gets 15 s to clean up), a third ends it at once. Since 2.31.1-dev2 the codecs
+do not receive the Ctrl+C: the files in progress really finish. Ctrl+Break,
+or closing the window, still stops everything at once.
+
 Alongside these defaults the config keeps the **last-run answers** the wizard
 offers back as defaults — among them `last_exclude_folders`, the raw
 `';'`-separated string of the last TIFF↔JXL run's folder-exclusion answer

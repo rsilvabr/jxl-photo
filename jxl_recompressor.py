@@ -27,7 +27,7 @@ import struct, atexit
 import math
 import re
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 import time
 from typing import Dict, Optional
 import argparse
@@ -39,7 +39,7 @@ import numpy as np
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.31.1-dev1"
+TOOLKIT_VERSION = "2.31.1-dev2"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 
@@ -159,6 +159,7 @@ _abort_lock = threading.Lock()
 _abort_reason = None
 _ctrl_c_seen = False        # Ctrl+C pressed during this run (#702)
 _ctrl_c_armed = True        # False while a planning still stops at once
+_LIVE_CHILDREN = {}         # the tools running now, id -> Popen (C4: _kill_live_children)
 
 
 # (size, mtime_ns) of every source as this run was about to READ it, keyed by
@@ -273,6 +274,7 @@ def _signal_abort(*a, **k): return _common._signal_abort(_G, *a, **k)
 def _ctrl_c_finishes_the_run(*a, **k): return _common._ctrl_c_finishes_the_run(_G, *a, **k)
 def _end_if_interrupted(*a, **k): return _common._end_if_interrupted(_G, *a, **k)
 def _interrupted(*a, **k): return _common._interrupted(_G, *a, **k)
+_as_completed = _common._as_completed
 
 
 def _abort_if_disk_full(*a, **k): return _common._abort_if_disk_full(_G, *a, **k)
@@ -4354,7 +4356,7 @@ def process_group(items, workers: int):
     try:
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futures = {_submit(ex, it): it for it in items}
-            for fut in as_completed(futures):
+            for fut in _as_completed(futures):
                 it = futures[fut]
                 # One crashing future must not take the whole batch down: record
                 # the item as an error and keep settling the rest.
@@ -5251,7 +5253,16 @@ def _refresh_explorer_thumbnails(files, workers: int, dry_run: bool) -> int:
             (logger.error if status == "error" else logger.info)(msg)
 
     with ThreadPoolExecutor(max_workers=max(1, min(workers, 4))) as pool:
-        list(pool.map(work, files))
+        _futs = [pool.submit(work, f) for f in files]
+        try:
+            for _f in _as_completed(_futs):
+                _f.result()
+        except BaseException:
+            # What list(pool.map(...)) did when it was left: the queued files
+            # are not started (a Ctrl+C here stops the mode; the pool's exit
+            # waited for every one of them).
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise
     logger.info(f"Explorer thumbnails: {counts['written']} written, {counts['removed']} removed, "
                 f"{counts['current']} already current, {counts['skipped']} skipped, "
                 f"{counts['error']} error(s)")
@@ -6658,6 +6669,7 @@ def main():
 
 
 if __name__ == "__main__":
+    _common._ctrl_c_stops_children(_G)      # C4
     try:
         main()
     except KeyboardInterrupt:       # #702

@@ -22,12 +22,27 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO))
+SCRIPTS = Path(os.environ.get("JXLPHOTO_SCRIPTS_UNDER_TEST") or REPO)
+sys.path.insert(0, str(SCRIPTS))
 import jxl_photo as wp  # noqa: E402
+
+# The real lookup (item 4 of 261127), kept before the autouse fixture below
+# stubs it for every test.
+_REAL_PREPATH_FOLDERS = getattr(wp, "_prepath_folders", None)
 
 HOSTILE = "工具 [x] 100%off %d"
 WINDOWS = os.name == "nt"
 pytestmark = pytest.mark.skipif(not WINDOWS, reason="the setup's PATH model is Windows'")
+
+
+@pytest.fixture(autouse=True)
+def _fake_tools_are_startable(monkeypatch):
+    """The fake tools are .cmd files, which Windows never starts by a bare
+    name: every test sees them as .exe would be (the tests of that rule undo
+    it), and nothing next to this test's python.exe or in its current folder
+    is judged."""
+    monkeypatch.setattr(wp, "_SETUP_STARTABLE_EXTS", (".exe", ".cmd"), raising=False)
+    monkeypatch.setattr(wp, "_prepath_folders", lambda: [], raising=False)
 
 # getattr: the pre-fix proof of the wizard's probe (test 9) imports this file
 # against a jxl_photo.py that has no setup at all.
@@ -985,3 +1000,159 @@ def test_undo_never_takes_a_backup_of_another_store(env, tmp_path):
     ui = wp.ScriptedUI({"setup.undo": None})
     assert wp._undo_last_change(env.store, ui)
     assert env.store.read("user") == (r"C:\a", 2)
+
+
+# --- 11. What Windows really starts (item 4 of 261127) -------------------------------
+
+def exe_tool(folder: Path, name: str, line: str = None) -> Path:
+    """A fake .exe: a .cmd body under an .exe name (fake_probe only reads it)."""
+    p = tool(folder, name, line)
+    q = p.with_suffix(".exe")
+    p.rename(q)
+    return q
+
+
+@pytest.fixture
+def exe_only(monkeypatch):
+    monkeypatch.setattr(wp, "_SETUP_STARTABLE_EXTS", (".exe",))
+
+
+def _exe_tools(root: Path):
+    a = root / "libjxl exe"
+    for n in ("cjxl", "djxl", "jxlinfo"):
+        exe_tool(a, n)
+    b = root / "exiftool exe"
+    exe_tool(b, "exiftool")
+    c = root / "magick exe"
+    exe_tool(c, "magick")
+    return a, b, c
+
+
+def test_a_cmd_only_tool_is_not_an_exe(env, exe_only, capsys):
+    a, b, c = all_tools(env.root)
+    env.set_path(user=[a, b, c])
+    rep = wp._diagnose(env.store, fake_probe, "")
+    assert codes(rep, "libjxl").count(("NOT_AN_EXE", "error")) == 3
+    assert ("MISSING", "error") not in codes(rep, "libjxl")
+    assert ("NOT_AN_EXE", "error") in codes(rep, "exiftool")
+    assert ("MISSING", "error") not in codes(rep, "exiftool")
+    assert ("NOT_AN_EXE", "warning") in codes(rep, "magick")
+    for key in ("libjxl", "exiftool", "magick"):
+        assert rep.units[key].main is None, key
+    assert wp._setup_check(env.store, fake_probe, py_ok, "") == 1
+    out = capsys.readouterr().out
+    assert out.count("not found") >= 3
+    assert "is not an .exe" in out
+
+
+def test_an_exe_after_a_cmd_shim_wins(env, exe_only):
+    shims = libjxl(env.root / "shims A")
+    good = env.root / "real B"
+    for n in ("cjxl", "djxl", "jxlinfo"):
+        exe_tool(good, n)
+    env.set_path(user=[shims, good])
+    rep = wp._diagnose(env.store, fake_probe, "")
+    st = rep.units["libjxl"]
+    for n in ("cjxl", "djxl", "jxlinfo"):
+        assert Path(st.winners[n].path) == good / f"{n}.exe"
+    assert not any(code == "NOT_AN_EXE" for code, _ in codes(rep, "libjxl"))
+    notused = [f.message for f in rep.findings if f.code == "CONFLICT" and f.unit == "libjxl"]
+    assert notused and str(shims / "cjxl.cmd") in notused[0] and "is not used" in notused[0]
+
+
+def test_an_exiftool_cmd_shim_hides_a_working_exiftool_k(env, exe_only):
+    a, b = env.root / "shim A", env.root / "k B"
+    tool(a, "exiftool")
+    exe_tool(b, "exiftool-k")
+    env.set_path(user=[a, b])
+    rep = wp._diagnose(env.store, fake_probe, "")
+    assert rep.units["exiftool"].main is None
+    f = next(f for f in rep.findings if f.unit == "exiftool" and f.code == "NOT_AN_EXE")
+    assert f.severity == "error"
+    assert "`exiftool`" in f.message and "the working copy is never reached" in f.message
+
+
+def test_a_copy_next_to_python_is_reported(env, exe_only, monkeypatch):
+    a, b, c = _exe_tools(env.root)
+    py = env.root / "python folder"
+    other = exe_tool(py, "cjxl")
+    env.set_path(user=[a, b, c])
+    monkeypatch.setattr(wp, "_prepath_folders", lambda: [(str(py), "python")])
+    rep = wp._diagnose(env.store, fake_probe, "")
+    found = [f for f in rep.findings if f.code == "PYTHON_FOLDER_COPY"]
+    assert len(found) == 1
+    f = found[0]
+    assert f.severity == "warning" and f.fix is None and f.unit == "libjxl"
+    assert str(other) in f.message and str(a / "cjxl.exe") in f.message
+    assert Path(rep.units["libjxl"].winners["cjxl"].path) == a / "cjxl.exe"
+    assert wp._setup_check(env.store, fake_probe, py_ok, "") == 0
+    # The python folder on the PATH: the PATH scan judges it, no finding here.
+    env.set_path(user=[py, a, b, c])
+    rep = wp._diagnose(env.store, fake_probe, "")
+    assert not [f for f in rep.findings if f.code == "PYTHON_FOLDER_COPY"]
+
+
+def test_a_copy_in_the_current_folder_is_an_info(env, exe_only, monkeypatch):
+    a, b, c = _exe_tools(env.root)
+    here = env.root / "current folder"
+    exe_tool(here, "magick")
+    env.set_path(user=[a, b, c])
+    monkeypatch.setattr(wp, "_prepath_folders", lambda: [(str(here), "current")])
+    rep = wp._diagnose(env.store, fake_probe, "")
+    found = [f for f in rep.findings if f.code == "CURRENT_FOLDER_COPY"]
+    assert len(found) == 1 and found[0].severity == "info" and found[0].fix is None
+    assert found[0].unit == "magick" and str(c / "magick.exe") in found[0].message
+
+
+def test_prepath_folders_are_python_then_cwd(tmp_path, monkeypatch):
+    real = _REAL_PREPATH_FOLDERS
+    assert real is not None
+    here = tmp_path / HOSTILE
+    here.mkdir()
+    monkeypatch.chdir(here)
+    out = real()
+    assert out[0][1] == "python"
+    assert any(p.name.lower().startswith("python") and p.suffix.lower() == ".exe"
+               for p in Path(out[0][0]).iterdir())
+    assert len(out) == 2 and out[1] == (str(here), "current")
+    monkeypatch.chdir(out[0][0])
+    assert real() == [out[0]]
+
+
+def test_process_only_ignores_a_cmd(env, exe_only):
+    here = libjxl(env.root / "launcher only")
+    env.set_path(user="")
+    rep = wp._diagnose(env.store, fake_probe, str(here))
+    assert not [f for f in rep.findings if f.code == "PROCESS_ONLY"]
+
+
+def test_no_new_finding_can_write(env, exe_only, monkeypatch):
+    a, b, c = _exe_tools(env.root)
+    py, here = env.root / "python folder", env.root / "current folder"
+    exe_tool(py, "cjxl")
+    exe_tool(here, "magick")
+    env.set_path(user=[a, b, c])
+    monkeypatch.setattr(wp, "_prepath_folders",
+                        lambda: [(str(py), "python"), (str(here), "current")])
+    rep = wp._diagnose(env.store, fake_probe, "")
+    new = [f for f in rep.findings if f.code in ("PYTHON_FOLDER_COPY", "CURRENT_FOLDER_COPY")]
+    assert len(new) == 2
+    assert all(wp._fix_text(f) is None for f in new)
+    store_before = env.store.file.read_bytes()
+    # No finding has a fix, so the session does not even offer [f].
+    with pytest.raises(AssertionError, match="'f' is not an option"):
+        _session(env, {"setup.main": ["f", "0"], "setup.confirm": True})
+    _session(env, {"setup.main": "0"})
+    assert env.store.file.read_bytes() == store_before
+    assert not env.backups.exists() or not list(env.backups.iterdir())
+
+
+def test_set_folder_refuses_a_folder_of_cmd_shims(env, exe_only):
+    shims = libjxl(env.root / "shims")
+    problem, info, _ = wp._check_tool_folder(wp._setup_unit("libjxl"), shims, fake_probe)
+    assert info is None and "is not an .exe" in problem
+    ex = env.root / "exif shims"
+    tool(ex, "exiftool")
+    exe_tool(ex, "exiftool-k")
+    problem, info, _ = wp._check_tool_folder(wp._setup_unit("exiftool"), ex, fake_probe)
+    assert info is None and "is not an .exe" in problem and "`exiftool`" in problem

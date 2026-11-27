@@ -38,7 +38,7 @@ import uuid
 import zlib
 from pathlib import Path
 from stat import S_ISLNK, S_ISREG
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import time
 from typing import Optional
@@ -48,7 +48,7 @@ from typing import Optional
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.31.1-dev1"
+TOOLKIT_VERSION = "2.31.1-dev2"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 
@@ -378,6 +378,7 @@ _abort_lock = threading.Lock()
 _abort_reason = None
 _ctrl_c_seen = False        # Ctrl+C pressed during this run (#702)
 _ctrl_c_armed = True        # False while a planning still stops at once
+_LIVE_CHILDREN = {}         # the tools running now, id -> Popen (C4: _kill_live_children)
 
 
 # (size, mtime_ns) of every source as this run was about to READ it, keyed by
@@ -437,6 +438,7 @@ def _signal_abort(*a, **k): return _common._signal_abort(_G, *a, **k)
 def _ctrl_c_finishes_the_run(*a, **k): return _common._ctrl_c_finishes_the_run(_G, *a, **k)
 def _end_if_interrupted(*a, **k): return _common._end_if_interrupted(_G, *a, **k)
 def _interrupted(*a, **k): return _common._interrupted(_G, *a, **k)
+_as_completed = _common._as_completed
 
 
 def _abort_if_disk_full(*a, **k): return _common._abort_if_disk_full(_G, *a, **k)
@@ -849,7 +851,7 @@ _EXIFTOOL_POOL = _common._ExiftoolPool()
 _SERVE_LOG = None
 _SERVE_FILE_CACHES = ("_content_id_cache", "_JXLINFO_CACHE", "_SOURCE_TAGS_CACHE",
                       "_planned_outputs", "_JXLINFO_NOTES",     # notes once per JOB (#711)
-                      "_ORIGIN_UNREAD")
+                      "_ORIGIN_UNREAD", "_EDITED_REPLACED")
 _SERVE_TOOL_FACTS = ("_EXIFTOOL_BATCH",)
 _SERVE_REFUSED = ("repair_jbrd",)
 
@@ -894,6 +896,12 @@ _RELATION_BATCH_HEAD = _common._RELATION_BATCH_HEAD
 
 SRC_PREFIX = "jxlphoto-src:"
 SRCSUM_PREFIX = "jxlphoto-srcsum:"
+# The coded image of a JPEG/PNG export, as this tool wrote it (L2): a later
+# run never writes over one that was edited since. The decoder's token for a
+# TIFF, in the form "c1:<md5>" (_coded_image_sum). Never written into a JXL
+# (a lossless archive of an export holds the JPEG's own XMP as it is, token
+# included: harmless, only a JPEG/PNG/TIFF is judged by it).
+PIXSUM_PREFIX = "jxlphoto-pixsum:"
 # Must match the encoder's SRC_XMP_PREFIX / SRCSUM_XMP_PREFIX: they record
 # WHICH source made an output, so a later run can refuse to overwrite one
 # archive with a different file that happens to share its name.
@@ -1093,7 +1101,9 @@ def _copy_metadata(src_path: Path, dst_path: Path) -> None:
         # decoder (jxlphoto-tifftag: the IPTC and Photoshop blocks, a
         # scanner's private tags): only a JXL -> TIFF decode reads them, and
         # they are up to 8 KB of hex per tag in a file meant to be light.
-        _drop = (ICC_PROFILE_PREFIX, ORIENTATION_PREFIX)
+        # An inherited pixel record (L2: the source's own, when the source is
+        # an export) never rides into an output, in either direction.
+        _drop = (ICC_PROFILE_PREFIX, ORIENTATION_PREFIX, PIXSUM_PREFIX)
         if src_path.suffix.lower() in JXL_EXTS:
             _drop += (TIFFTAG_PREFIX,)
         strip = ["-XMP-dc:Relation-=" + _argfile_safe(t)
@@ -1391,6 +1401,9 @@ SUMMARY_MAX_FAILURES = 200
 
 _run_summary = {"ok": 0, "overwritten": 0, "skipped": 0, "errors": 0,
                 "dry_run": False, "extras": {}, "failures": [], "log": ""}
+# The edited exports an --overwrite run replaced (L2, Q1): their paths, said
+# again at the end of the run (_log_edited_replaced). Run state.
+_EDITED_REPLACED = []
 
 
 def record_summary(*, ok=0, overwritten=0, skipped=0, errors=0, log_file="",
@@ -1412,7 +1425,9 @@ def _log_failure_recap(*a, **k): return _common._log_failure_recap(_G, *a, **k)
 def emit_summary_json(enabled):
     """Print one JSON line the wrapper can aggregate. Without the flag the
     failed files are named once more at the end of the log
-    (_log_failure_recap)."""
+    (_log_failure_recap). The edited exports an --overwrite replaced are
+    named again either way (_log_edited_replaced)."""
+    _log_edited_replaced()
     if not enabled:
         _log_failure_recap(_run_summary["failures"])
         return
@@ -1454,9 +1469,92 @@ CHECKSUMS_FILENAME = "checksums.md5"
 _MD5_LOCK_TIMEOUT_S = 30.0
 _MD5_LOCK_STALE_S = 120.0
 _MD5_LOCK_RELEASE_S = 5.0
+# A lock file younger than this is never opened by a waiter: a writer holds
+# it for one append (milliseconds), and an open handle of a waiter delays the
+# holder's delete.
+_MD5_LOCK_SUSPECT_S = 1.0
+# The byte of the lock file its holder keeps locked (far from the marker at
+# its start, which stays readable).
+_MD5_LOCK_BYTE = 1 << 20
+_MD5_LOCK_MAGIC = b"jxlphoto-lock 2 "
+# An EMPTY lock whose byte is free and older than this is taken over in
+# place (review 261128, S2, the owner's yes): a writer of this version holds
+# its byte within microseconds of the create and for at most 2 s without it
+# (and fails closed if it lost the lock meanwhile), so such a lock is a
+# writer's killed before its marker — or an older version's writer stuck for
+# more than 10 s inside one append (normally half a millisecond). Must stay
+# well above the creator's 2 s and below _MD5_LOCK_TIMEOUT_S, so no waiter
+# drops its line. Internal, not a setting.
+_MD5_LOCK_EMPTY_S = 10.0
 
 
-def _release_checksum_lock(lock_path: Path) -> None:
+def _lock_byte_taken(fd: int, seconds: float = 0.0) -> bool:
+    """Take the lock byte of the open lock file `fd` (Windows: a byte-range
+    lock belongs to this handle and ends with it — when it is closed or its
+    process dies, however it dies). False when another handle holds it, or
+    where there is no such lock (not Windows, a file system without them)."""
+    if os.name != "nt":
+        return False
+    import msvcrt
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            os.lseek(fd, _MD5_LOCK_BYTE, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            return True
+        except OSError:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.01)
+
+
+def _lock_file_text(lock_path: Path):
+    """The first bytes of the lock file; None when it cannot be read now
+    ("cannot tell"); b"" when it is gone or empty."""
+    try:
+        fd = os.open(lock_path, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+    except FileNotFoundError:
+        return b""
+    except OSError:
+        return None
+    try:
+        return os.read(fd, 128)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def _take_over_abandoned_lock(lock_path: Path, age: float):
+    """The open lock file (an fd whose lock byte this thread holds) when the
+    existing lock was abandoned, else None (#769). Abandoned: nobody holds its
+    lock byte, and it carries this version's marker (its writer died, or
+    closed it and has not deleted it yet — it writes nothing more either way),
+    or it is EMPTY and older than _MD5_LOCK_EMPTY_S (a writer killed before
+    its marker), or it is older than _MD5_LOCK_STALE_S (an older version's,
+    which holds no byte). Taken over IN PLACE — never deleted and created
+    again: two waiters that both judged it abandoned could delete each
+    other's new lock."""
+    if os.name != "nt" or age <= _MD5_LOCK_SUSPECT_S:
+        return None
+    try:
+        fd = os.open(lock_path, os.O_RDWR | getattr(os, "O_BINARY", 0))
+    except OSError:
+        return None
+    try:
+        if _lock_byte_taken(fd):
+            os.lseek(fd, 0, os.SEEK_SET)
+            head = os.read(fd, len(_MD5_LOCK_MAGIC))
+            if (head == _MD5_LOCK_MAGIC or age > _MD5_LOCK_STALE_S
+                    or (head == b"" and age > _MD5_LOCK_EMPTY_S)):
+                return fd
+    except OSError:
+        pass
+    os.close(fd)
+    return None
+
+
+def _release_checksum_lock(lock_path: Path, marker: bytes = None) -> None:
     """Remove the lock file, retrying a refused delete (#612).
 
     Windows refuses a delete while another program (an antivirus scanning
@@ -1464,10 +1562,20 @@ def _release_checksum_lock(lock_path: Path) -> None:
     replaces swallowed that error: the lock outlived its writer, every other
     worker of the folder waited the whole timeout and dropped its provenance
     line (fail closed — the JPEGs were kept, twelve at once in the real-photo
-    battery of 2026-11-05) until the lock was old enough to be reclaimed."""
+    battery of 2026-11-05) until the lock was old enough to be reclaimed.
+
+    With `marker` (the text this holder wrote into the lock), the file is
+    removed only while it still carries it (#769): a lock another writer took
+    over meanwhile is that writer's."""
     deadline = time.monotonic() + _MD5_LOCK_RELEASE_S
     while True:
         try:
+            if marker is not None:
+                text = _lock_file_text(lock_path)
+                if text is not None and text != marker:
+                    return                      # gone, or another writer's now
+                if text is None:
+                    raise PermissionError(13, "the lock file cannot be read", str(lock_path))
             os.unlink(lock_path)
             return
         except FileNotFoundError:
@@ -1479,6 +1587,17 @@ def _release_checksum_lock(lock_path: Path) -> None:
                 return
             time.sleep(0.05)
 
+
+def _ends_without_newline(path: Path) -> bool:
+    """Does this file end in the middle of a line? (missing or empty: no)"""
+    try:
+        with open(path, "rb") as f:
+            f.seek(-1, os.SEEK_END)
+            return f.read(1) != b"\n"
+    except OSError:
+        return False
+
+
 def _append_checksum_line(db_path: Path, entry: str):
     """Append one line to checksums.md5, serialized ACROSS PROCESSES.
 
@@ -1488,16 +1607,23 @@ def _append_checksum_line(db_path: Path, entry: str):
     sibling `<db>.lock` file created O_EXCL with backoff. Fail-CLOSED on every
     path: a lock that cannot be taken means the line is NOT written (a missing
     entry reads as "no provenance recorded", which blocks deletions) — never a
-    possibly-corrupt write. A lock older than _MD5_LOCK_STALE_S is from a
-    crashed process and is reclaimed.
+    possibly-corrupt write. On Windows the holder keeps the lock file open
+    with one byte of it locked and its marker in it (#769): a lock whose
+    writer was killed is known at once (the byte is free, the marker is
+    there) and taken over in place, and so is an EMPTY lock whose byte is free
+    once it is older than _MD5_LOCK_EMPTY_S (a writer killed before its
+    marker). Any other lock without the marker (its byte held, or no byte
+    lock to test) is reclaimed when it is older than _MD5_LOCK_STALE_S, as
+    before.
     """
     lock_path = db_path.parent / (db_path.name + ".lock")
     deadline = time.monotonic() + _MD5_LOCK_TIMEOUT_S
     last_err = None
+    held = False            # this thread already holds the lock byte of `fd`
     while True:
         try:
-            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.close(fd)
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_RDWR
+                         | getattr(os, "O_BINARY", 0))
             break
         except (FileExistsError, PermissionError) as e:
             # Windows answers a create on a lock file another writer is still
@@ -1510,12 +1636,19 @@ def _append_checksum_line(db_path: Path, entry: str):
                 age = time.time() - lock_path.stat().st_mtime
             except OSError:
                 age = 0.0  # vanished between open and stat: retry immediately
+            fd = _take_over_abandoned_lock(lock_path, age)
+            if fd is not None:
+                held = True
+                break
             if age > _MD5_LOCK_STALE_S:
+                # The route for a lock no handle holds (an older version's, or
+                # a file system without byte locks): Windows refuses to delete
+                # a lock a writer of this version keeps open.
                 try:
                     lock_path.unlink()
                     continue
                 except OSError:
-                    pass  # someone else reclaimed it first
+                    pass  # someone else reclaimed it first, or its holder is alive
             if time.monotonic() >= deadline:
                 if isinstance(last_err, PermissionError):
                     logger.warning(f"Could not lock {lock_path} ({last_err}) — provenance "
@@ -1530,13 +1663,54 @@ def _append_checksum_line(db_path: Path, entry: str):
             logger.warning(f"Could not lock {lock_path} ({e}) — provenance line "
                            f"NOT recorded (fail closed)")
             return False
+    # The lock is this thread's (created, or taken over). Windows: its lock
+    # byte is held for as long as the file is open, and the marker says so —
+    # a waiter that finds the marker and can take the byte knows the writer
+    # is gone. Elsewhere, or where the byte cannot be locked: the file alone,
+    # as before (reclaimed by its age).
+    marker = None
+    byte = held
+    try:
+        byte = held or _lock_byte_taken(fd, 2.0)
+        if byte:
+            marker = _MD5_LOCK_MAGIC + f"{os.getpid()}.{uuid.uuid4().hex[:12]}\n".encode("ascii")
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.write(fd, marker)
+            os.ftruncate(fd, len(marker))
+    except OSError:
+        marker = None
+    if marker is None:
+        # The file alone is the lock only where no byte can be locked. The
+        # byte was ours and the marker failed, or the file is no longer
+        # empty (another writer took it over and wrote its marker): not ours.
+        # The file is read, not the error code: which errno a file system
+        # without byte locks answers could not be measured.
+        taken = byte
+        if not taken:
+            try:
+                os.lseek(fd, 0, os.SEEK_SET)
+                taken = os.read(fd, 1) != b""
+            except OSError:
+                taken = True
+        os.close(fd)
+        fd = None
+        if taken:
+            # Not ours to use (fail closed).
+            logger.warning(f"Could not lock {lock_path} — provenance line NOT recorded "
+                           f"(fail closed)")
+            return False
     try:
         with _md5_db_lock:
+            # S1: a writer killed inside its append leaves half a line — the
+            # next line starts on a line of its own.
+            torn = _ends_without_newline(db_path)
             with open(db_path, "a", encoding="utf-8") as f:
-                f.write(entry)
+                f.write(("\n" if torn else "") + entry)
         return True
     finally:
-        _release_checksum_lock(lock_path)
+        if fd is not None:
+            os.close(fd)
+        _release_checksum_lock(lock_path, marker)
 
 def store_md5_db(jxl_path: Path, md5: str):
     db_path = jxl_path.parent / CHECKSUMS_FILENAME
@@ -3091,7 +3265,16 @@ def cmd_repair_jbrd(args) -> int:
                 logger.info(f" [{done}/{len(files)}]{eta}")
 
     with ThreadPoolExecutor(max_workers=max(1, min(getattr(args, "workers", 1) or 1, 8))) as pool:
-        list(pool.map(run_one, files))
+        _futs = [pool.submit(run_one, f) for f in files]
+        try:
+            for _f in _as_completed(_futs):
+                _f.result()
+        except BaseException:
+            # What list(pool.map(...)) did when it was left: the queued files
+            # are not started (a Ctrl+C here stops the mode; the pool's exit
+            # waited for every one of them).
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise
     ok, repaired = counts["ok"], counts["repaired"]
     still_broken, no_jbrd = counts["broken"], counts["no_jbrd"]
     unread, mismatch = counts["unread"], counts["mismatch"]
@@ -3231,7 +3414,7 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
         else:
             futures = {ex.submit(encode_one_transcode, s, w, f, reconvert_val, effort, smart): (s, w, f)
                        for s, w, f in tasks}
-        for fut in as_completed(futures):
+        for fut in _as_completed(futures):
             task = futures[fut]
             try:
                 result = fut.result()
@@ -5826,13 +6009,88 @@ _DERIVED_INPUT_LABELS: dict = {}
 _XMP_APP1_HEADS = (b"http://ns.adobe.com/xap/1.0/\x00", b"http://ns.adobe.com/xmp/extension/\x00")
 
 
+def _image_xmp_find(path: Path, fn):
+    """The walk of _image_xmp_mentions with a callback: `fn` gets each XMP
+    payload (a JPEG's APP1 that starts with one of _XMP_APP1_HEADS, a PNG's
+    XMP text) and returns None to go on or a value to stop with. Returns
+    (True, value) when `fn` stopped it, (False, None) when the image data
+    came first, (None, None) when the file cannot be read or is not what its
+    name says — "cannot tell". Read in Python, the headers only."""
+    import zlib
+    try:
+        with open(path, "rb") as f:
+            head = f.read(8)
+            if head[:2] == b"\xff\xd8":
+                f.seek(2)
+                while True:
+                    seg = f.read(4)
+                    if len(seg) < 4 or seg[0] != 0xFF:
+                        return (None, None)
+                    marker = seg[1]
+                    if marker == 0xFF:
+                        f.seek(-3, 1)
+                        continue
+                    if marker == 0x01 or 0xD0 <= marker <= 0xD8:
+                        f.seek(-2, 1)
+                        continue
+                    if marker in (0xDA, 0xD9):
+                        return (False, None)
+                    size = struct.unpack(">H", seg[2:4])[0]
+                    if size < 2:
+                        return (None, None)
+                    if marker == 0xE1:
+                        data = f.read(size - 2)
+                        if data.startswith(_XMP_APP1_HEADS):
+                            got = fn(data)
+                            if got is not None:
+                                return (True, got)
+                    else:
+                        f.seek(size - 2, 1)
+            if head == b"\x89PNG\r\n\x1a\n":
+                while True:
+                    ch = f.read(8)
+                    if len(ch) < 8:
+                        return (None, None)
+                    n = struct.unpack(">I", ch[:4])[0]
+                    kind = ch[4:8]
+                    if kind == b"IDAT" or kind == b"IEND":
+                        return (False, None)
+                    if kind == b"iTXt":
+                        data = f.read(n)
+                        f.seek(4, 1)
+                        if data.startswith(b"XML:com.adobe.xmp\x00") and len(data) > 19:
+                            compressed = data[18] == 1
+                            rest = data[20:]
+                            for _ in range(2):          # language tag, translated keyword
+                                rest = rest[rest.index(b"\x00") + 1:]
+                            text = zlib.decompress(rest) if compressed else rest
+                            got = fn(text)
+                            if got is not None:
+                                return (True, got)
+                    else:
+                        f.seek(n + 4, 1)
+            return (None, None)
+    except (OSError, ValueError, zlib.error, struct.error):
+        return (None, None)
+
+
 def _image_xmp_mentions(path: Path, needle: bytes):
     """True when a JPEG's XMP segments (APP1, standard and extended, before
     the image data) or a PNG's XMP chunk (iTXt "XML:com.adobe.xmp", before
     IDAT) hold `needle`; False when they do not; None when the file cannot be
     read or is not what its name says — "cannot tell". Read in Python, the
     headers only: an ExifTool pass reads every JPEG to its end."""
-    import zlib
+    return _image_xmp_find(path, lambda d: True if needle in d else None)[0]
+
+
+def _coded_image_sum(path: Path) -> Optional[str]:
+    """"c1:<md5>" of the coded image of a JPEG or PNG — what an edit of the
+    pixels changes and a metadata write does not (measured: ExifTool copies
+    these bytes as they are) — or None when the file cannot be read or is not
+    what its name says ("cannot tell"). JPEG: every segment before the first
+    scan but APPn and COM, then everything from the first SOS to the end.
+    PNG: IHDR, PLTE, tRNS and the data of every IDAT."""
+    h = hashlib.md5()
     try:
         with open(path, "rb") as f:
             head = f.read(8)
@@ -5849,42 +6107,193 @@ def _image_xmp_mentions(path: Path, needle: bytes):
                     if marker == 0x01 or 0xD0 <= marker <= 0xD8:
                         f.seek(-2, 1)
                         continue
-                    if marker in (0xDA, 0xD9):
-                        return False
+                    if marker == 0xD9:
+                        return None             # the end before any scan
+                    if marker == 0xDA:
+                        h.update(seg)
+                        while True:
+                            block = f.read(1 << 20)
+                            if not block:
+                                break
+                            h.update(block)
+                        return "c1:" + h.hexdigest()
                     size = struct.unpack(">H", seg[2:4])[0]
                     if size < 2:
                         return None
-                    if marker == 0xE1:
-                        data = f.read(size - 2)
-                        if data.startswith(_XMP_APP1_HEADS) and needle in data:
-                            return True
-                    else:
+                    if 0xE0 <= marker <= 0xEF or marker == 0xFE:
                         f.seek(size - 2, 1)
+                        continue
+                    data = f.read(size - 2)
+                    if len(data) != size - 2:
+                        return None
+                    h.update(seg)
+                    h.update(data)
             if head == b"\x89PNG\r\n\x1a\n":
+                seen_idat = False
                 while True:
                     ch = f.read(8)
                     if len(ch) < 8:
                         return None
                     n = struct.unpack(">I", ch[:4])[0]
                     kind = ch[4:8]
-                    if kind == b"IDAT" or kind == b"IEND":
-                        return False
-                    if kind == b"iTXt":
-                        data = f.read(n)
+                    if kind == b"IEND":
+                        return ("c1:" + h.hexdigest()) if seen_idat else None
+                    if kind in (b"IHDR", b"PLTE", b"tRNS", b"IDAT"):
+                        if kind != b"IDAT":
+                            h.update(kind)
+                        else:
+                            seen_idat = True
+                        left = n
+                        while left:
+                            block = f.read(min(left, 1 << 20))
+                            if not block:
+                                return None
+                            h.update(block)
+                            left -= len(block)
                         f.seek(4, 1)
-                        if data.startswith(b"XML:com.adobe.xmp\x00") and len(data) > 19:
-                            compressed = data[18] == 1
-                            rest = data[20:]
-                            for _ in range(2):          # language tag, translated keyword
-                                rest = rest[rest.index(b"\x00") + 1:]
-                            text = zlib.decompress(rest) if compressed else rest
-                            if needle in text:
-                                return True
                     else:
                         f.seek(n + 4, 1)
             return None
-    except (OSError, ValueError, zlib.error, struct.error):
+    except (OSError, struct.error):
         return None
+
+
+def _export_pixsum_lines(out_path: Path) -> list:
+    """The dc:Relation line that records this export's coded image (L2), for
+    the LAST metadata write of decode_to_image: nothing after it changes
+    those bytes. [] (and one warning) when the sum cannot be computed: the
+    export is then judged as one of an older version."""
+    value = _coded_image_sum(out_path)
+    if value is None:
+        logger.warning(f"  >no pixel record written (the file's image data could not "
+                       f"be read back) | {out_path.name}")
+        return []
+    return ["-XMP-dc:Relation+=" + PIXSUM_PREFIX + value]
+
+
+_PIXSUM_VALUE_RE = re.compile(re.escape(PIXSUM_PREFIX.encode("ascii")) + rb"([^<\s\"']+)")
+
+
+def _export_recorded_sum(path: Path, ask_exiftool: bool = True):
+    """The jxlphoto-pixsum value a JPEG/PNG carries: the string, None when it
+    has none, False when that cannot be told. Read in Python (the XMP before
+    the image data); a file with extended XMP (the value could sit across two
+    segments) or one the walk cannot read is asked of ExifTool — never in a
+    dry run (ask_exiftool=False: then "cannot tell" stays False)."""
+    found, extended = [], []
+
+    def cb(d):
+        found.extend(_PIXSUM_VALUE_RE.findall(d))
+        if d.startswith(_XMP_APP1_HEADS[1]):
+            extended.append(1)
+        return None                     # walk to the end
+
+    state = _image_xmp_find(path, cb)[0]
+    # A JPEG whose walk ends early (cut before its first scan) answers "cannot
+    # tell" although the record was already read: use it, so a dry run says
+    # what the real run will (e2e S1, 261127).
+    if not extended and (state is False or found):
+        return found[-1].decode("ascii", "replace") if found else None
+    if not ask_exiftool:
+        return False
+    try:
+        r = _run_exiftool_argfile(["-j", "-XMP-dc:Relation", str(path)],
+                                  timeout=EXIFTOOL_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if r.returncode != 0 or not r.stdout:
+        return False
+    try:
+        rel = json.loads(r.stdout)[0].get("Relation", [])
+    except (ValueError, IndexError, AttributeError, TypeError):
+        return False
+    values = rel if isinstance(rel, list) else [rel]
+    ours = [str(v)[len(PIXSUM_PREFIX):] for v in values if str(v).startswith(PIXSUM_PREFIX)]
+    return ours[-1] if ours else None
+
+
+# Why an export is refused when its image data no longer matches its record;
+# with --overwrite, the one reason that is said when it is replaced (Q1).
+_EXPORT_EDITED_WHY = ("was EDITED after this tool exported it (its image data no longer "
+                      "matches the export)")
+# A file that carries the record but fails the integrity check (cut by a crash,
+# a full disk, a copy that stopped): nobody edited it. Refused the same way,
+# but never called "edited" nor listed with the edited exports (e2e S2).
+_EXPORT_DAMAGED_WHY = ("is DAMAGED (it fails the integrity check — truncated by a crash or a "
+                       "copy that stopped?) and no longer matches the export this tool wrote")
+
+
+def _export_edited(path: Path, ask_exiftool: bool = True) -> Optional[str]:
+    """Why an existing JPEG/PNG export must not be written over — it carries
+    this tool's pixel record and its image data no longer matches it (an
+    editor keeps the marks; _EXPORT_EDITED_WHY), or it is damaged
+    (_EXPORT_DAMAGED_WHY) — or None. No record: None, judged as before.
+    Fails closed: a record that cannot be read or compared is a reason too."""
+    recorded = _export_recorded_sum(path, ask_exiftool)
+    if recorded is None:
+        return None
+    if recorded is False:
+        return ("could not be read (a pixel record, if it has one, could not be checked)"
+                if ask_exiftool else None)
+    now = _coded_image_sum(path)
+    if now != recorded and not _verify_file_integrity(path):
+        return _EXPORT_DAMAGED_WHY
+    if now is None:
+        return "could not be read to compare with the export this tool wrote"
+    if now != recorded:
+        return _EXPORT_EDITED_WHY
+    return None
+
+
+def _dry_edited_exports(dry_pairs, explicit_overwrite) -> list:
+    """[(src, out, why)] of the pairs a real run would refuse for L2: an
+    existing JPEG/PNG export of a JXL, about to be written over without
+    --overwrite, whose image data no longer matches its pixel record. Python
+    only (no ExifTool in a dry run). A file whose record only ExifTool can
+    read is named, not judged."""
+    if explicit_overwrite:
+        return []
+    out = []
+    for f, o, go in dry_pairs:
+        if (go and f.suffix.lower() in JXL_EXTS
+                and o.suffix.lower() in (JPEG_EXTS | PNG_EXTS) and o.exists()):
+            why = _export_edited(o, ask_exiftool=False)
+            if why:
+                out.append((f, o, why))
+            elif _export_recorded_sum(o, ask_exiftool=False) is False:
+                # Extended XMP, or a file the walk cannot read: only ExifTool
+                # can tell, and a dry run starts none (review 3, S2).
+                logger.info(f" DRY | not checked for an edit (its XMP needs ExifTool, which "
+                            f"a dry run does not start; the real run checks it) | {o.name}")
+    return out
+
+
+def _log_dry_replaced_exports(dry_pairs) -> None:
+    """--overwrite --dry-run: one line per existing export the real run will
+    replace although it no longer matches its pixel record — the dry run is
+    where a REBUILD is looked at first, and Q1 is "never silent" (e2e S3).
+    No count changes: those files are converted."""
+    for _f, o, why in _dry_edited_exports(dry_pairs, False):
+        what = ("an edited export" if why == _EXPORT_EDITED_WHY else
+                "a damaged export" if why == _EXPORT_DAMAGED_WHY else
+                "an export whose pixel record could not be checked")
+        logger.warning(f" DRY | would REPLACE {what} | {o.name}")
+
+
+def _log_edited_replaced() -> None:
+    """Q1 (the owner, 2026-11-27): the edited exports --overwrite replaced,
+    once more at the end of the run — WARNING, never ERROR (each was said
+    when it was replaced), the first _RECAP_MAX names, like the failures'
+    recap (_log_failure_recap)."""
+    names = list(_EDITED_REPLACED)
+    if not names:
+        return
+    logger.warning(f"Edited exports replaced ({len(names)}):")
+    for name in names[:_common._RECAP_MAX]:
+        logger.warning(f"  -> {name}")
+    if len(names) > _common._RECAP_MAX:
+        logger.warning(f"  ... and {len(names) - _common._RECAP_MAX} more (each one above)")
+
 
 
 def _output_missing_or_older(src: Path, out: Path) -> bool:
@@ -6104,8 +6513,10 @@ def _derivative_metadata_args(jxl_path: Path, label: str, size) -> list:
     # ICC_PROFILE_PREFIX too: a delivered JPEG/PNG has its profile in the
     # normal place (_copy_metadata strips the copied token the same way).
     # TIFFTAG_PREFIX: only a JXL -> TIFF decode reads those.
+    # PIXSUM_PREFIX (L2): the tokens are re-added from the MASTER after the
+    # clear; a stale pixel record must not come back.
     drop = (SRC_PREFIX, SRCSUM_PREFIX, DERIVED_XMP_PREFIX, ICC_PROFILE_PREFIX,
-            ORIENTATION_PREFIX, TIFFTAG_PREFIX)
+            ORIENTATION_PREFIX, TIFFTAG_PREFIX, PIXSUM_PREFIX)
     if _extrasamples_not_alpha(tokens):
         # D3 (rc6): _output_magick_args left that channel (a scanner's IR) out.
         drop = drop + (_common._EXTRASAMPLES_TOKEN,)
@@ -6284,6 +6695,24 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
         return (str(jxl_path), "skipped", str(final_path), None)
     
     overwritten = final_path.exists()
+    _replaces_edited = False
+    _replaces_unchecked = False
+    if overwritten:
+        # L2: the marks survive a retouch, the image data does not. --overwrite
+        # says "replace it anyway", as for a decoded TIFF — never silently
+        # (Q1, the owner's call): a WARNING when it is replaced, and the
+        # run's end names it again.
+        _edited = _export_edited(final_path)
+        if _edited and not reconvert_val:
+            n, total = next_count()
+            _why = (f"refused: the existing {final_path.name} {_edited}. Move or rename "
+                    f"it, or re-run with --overwrite to replace it anyway")
+            logger.error(f"[{n}/{total}] REFUSED | {jxl_path.name} | {_why}")
+            return (str(jxl_path), "error", _why, None)
+        _replaces_edited = _edited == _EXPORT_EDITED_WHY
+        # A record that could not be read or compared: maybe an edited file,
+        # maybe not — said in its own words, never silently (S1 of the review).
+        _replaces_unchecked = bool(_edited) and not _replaces_edited
     # Initialized before the try so the except handler can never hit an
     # unbound variable (e.g. if mkdir itself raises).
     output_dirty = False
@@ -6544,6 +6973,7 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
             r2 = _run_exiftool_argfile(
                 ["-overwrite_original"]
                 + _derivative_metadata_args(jxl_path, _dlabel, size)
+                + _export_pixsum_lines(actual_out)
                 + _orient
                 + _history_args("derived", jxl_path, actual_out, codec="djxl")
                 + [str(actual_out)], timeout=EXIFTOOL_TIMEOUT)
@@ -6554,6 +6984,7 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
             r_prov = _run_exiftool_argfile(
                 ["-overwrite_original"] + _inherited_marker_removal_lines(actual_out)
                 + _provenance_marker_args(jxl_path)
+                + _export_pixsum_lines(actual_out)
                 + _orient
                 + _history_args("converted", jxl_path, actual_out, codec="djxl")
                 + [str(actual_out)], timeout=EXIFTOOL_TIMEOUT)
@@ -6570,6 +7001,18 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
         if _promote_local:
             _swap_into_place(actual_out, final_path)
 
+        # With staging, said when the new file is in staging: the final one is
+        # replaced when its folder leaves staging (a failed promotion says so).
+        if _replaces_edited:
+            logger.warning(f"replaced an edited export: {final_path.name} (its pixels were "
+                           f"changed after it was written)")
+            _EDITED_REPLACED.append(str(final_path))
+        elif _replaces_unchecked and _edited == _EXPORT_DAMAGED_WHY:
+            logger.warning(f"replaced a damaged export: {final_path.name} (it failed the "
+                           f"integrity check)")
+        elif _replaces_unchecked:
+            logger.warning(f"replaced an export whose pixel record could not be checked: "
+                           f"{final_path.name} ({_edited})")
         n, total = next_count()
         if marks_derivative:
             label = f"DERIVE ({_current_derived_label(output_icc)})"
@@ -6688,7 +7131,7 @@ def process_group_convert(group_pairs: list, workers: int, direction: str,
             futures = {ex.submit(decode_to_image, s, w, f, quality, fmt, bit_depth,
                                 output_icc, use_ram, reconvert_val, smart): (s, w, f)
                        for s, w, f in tasks}
-        for fut in as_completed(futures):
+        for fut in _as_completed(futures):
             task = futures[fut]
             try:
                 result = fut.result()
@@ -6983,14 +7426,27 @@ def cmd_convert(args, from_jxl: bool = True):
         _dlabel = (_current_derived_label(args.icc_profile)
                    if (_is_derivative() or (direction == "from_jxl" and _COLOUR_DERIVATIVE))
                    else None)
+        # L2: an existing export edited since this tool wrote it is refused
+        # by the real run (unless --overwrite).
+        _ed = _dry_edited_exports(_dry_pairs, reconvert_explicit)
+        _ed_why = {(f, o): w for f, o, w in _ed}
+        if reconvert_explicit:
+            _log_dry_replaced_exports(_dry_pairs)
         for f, out, _go in _dry_pairs:
             if not _go:
                 _lbl = "SKIP (up to date)" if smart_mode else "SKIP (exists)"
                 logger.info(f" DRY | {_lbl} | {f.name}")
+            elif (f, out) in _ed_why:
+                logger.info(f" DRY | would REFUSE | {f.name} | the existing {out.name} "
+                            f"{_ed_why[(f, out)]}")
             else:
                 _tag = f" [DERIVE: {_dlabel}]" if _dlabel else ""
                 logger.info(f" DRY | {f.name} -> {out}{_tag}")
-        logger.info(f"Dry run: {len(pairs) - _n_skip} files would be converted"
+        if _ed:
+            logger.warning(f"Dry run: {len(_ed)} existing export(s) no longer match the "
+                           f"export this tool wrote (edited or damaged) and would be "
+                           f"REFUSED, not overwritten (--overwrite replaces them).")
+        logger.info(f"Dry run: {len(pairs) - _n_skip - len(_ed)} files would be converted"
                     + (f"; {_n_skip} would be skipped (output already exists)."
                        if _n_skip else "."))
         # Same bug #267 as cmd_transcode: the ARMED preview only existed in
@@ -6998,7 +7454,7 @@ def cmd_convert(args, from_jxl: bool = True):
         # never mentioned that sources would be destroyed.
         if DELETE_SOURCE:
             logger.warning(
-                f"Dry run: --delete-source is ARMED. Up to {len(pairs) - _n_skip} "
+                f"Dry run: --delete-source is ARMED. Up to {len(pairs) - _n_skip - len(_ed)} "
                 f"source file(s) would be DELETED, each only after its output is "
                 f"written and passes the integrity check.")
         # Same rule as cmd_transcode: without this the wrapper reads the
@@ -7010,8 +7466,8 @@ def cmd_convert(args, from_jxl: bool = True):
             logger.warning(f"Dry run: {len(_refused)} pair(s) would be REFUSED by "
                            f"the provenance check (see above); the real run fails "
                            f"those files.")
-        record_summary(ok=len(pairs) - _n_skip, overwritten=0, skipped=_n_skip,
-                       errors=len(_refused),
+        record_summary(ok=len(pairs) - _n_skip - len(_ed), overwritten=0, skipped=_n_skip,
+                       errors=len(_refused) + len(_ed),
                        log_file=log_file, dry_run=True)
         return (0, False)
 
@@ -7204,14 +7660,14 @@ def _delete_converted_sources(results, pairs, moved_finals):
         if was_skipped and src_path.suffix.lower() in JXL_EXTS:
             # rc8 (Fable's L2): an export of a JXL that was already there is
             # no proof — it may have been retouched since (an editor keeps the
-            # marks), and nothing records its pixels, as the decoder's
-            # jxlphoto-pixsum does for a TIFF: a retouched 16-bit PNG deleted
-            # its master. Only an export this run writes deletes one.
+            # marks): a retouched 16-bit PNG deleted its master. A pixel record
+            # exists since 2.31.1-dev2 (_export_edited), but an export of an
+            # older version has none, and this gate was not widened: only an
+            # export this run writes deletes one.
             _delete_stats["kept"] += 1
             logger.warning(f" KEEP (the existing {final_file.name} was not written by this "
-                           f"run: an export may have been edited since, and nothing records "
-                           f"its pixels — only an export this run writes deletes its "
-                           f"master) | {src_path.name}")
+                           f"run: an export may have been edited since — only an export this "
+                           f"run writes deletes its master) | {src_path.name}")
             continue
         if was_skipped and _lossy_skip_unproven(src_path, final_file, _skip_marks):
             _delete_stats["kept"] += 1
@@ -7810,19 +8266,32 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
                    if (_is_derivative() or (not use_transcode and direction == "from_jxl"
                                             and _COLOUR_DERIVATIVE))
                    else None)
+        # L2: an existing export edited since this tool wrote it is refused
+        # by the real run (unless --overwrite).
+        _ed = _dry_edited_exports(_dry_pairs, args.overwrite)
+        _ed_why = {(f, o): w for f, o, w in _ed}
+        if args.overwrite:
+            _log_dry_replaced_exports(_dry_pairs)
         for f, out, _go in _dry_pairs:
             if not _go:
                 _lbl = "SKIP (up to date)" if args.sync else "SKIP (exists)"
                 logger.info(f" DRY | {_lbl} | {f.name}")
+            elif (f, out) in _ed_why:
+                logger.info(f" DRY | would REFUSE | {f.name} | the existing {out.name} "
+                            f"{_ed_why[(f, out)]}")
             else:
                 _tag = f" [DERIVE: {_dlabel}]" if _dlabel else ""
                 logger.info(f" DRY | {f.name} -> {out}{_tag}")
-        logger.info(f"Dry run: {len(pairs) - _n_skip} file(s) would be processed"
+        if _ed:
+            logger.warning(f"Dry run: {len(_ed)} existing export(s) no longer match the "
+                           f"export this tool wrote (edited or damaged) and would be "
+                           f"REFUSED, not overwritten (--overwrite replaces them).")
+        logger.info(f"Dry run: {len(pairs) - _n_skip - len(_ed)} file(s) would be processed"
                     + (f"; {_n_skip} would be skipped (output already exists)."
                        if _n_skip else "."))
         if DELETE_SOURCE:
             logger.warning(
-                f"Dry run: --delete-source is ARMED. Up to {len(pairs) - _n_skip} "
+                f"Dry run: --delete-source is ARMED. Up to {len(pairs) - _n_skip - len(_ed)} "
                 f"source file(s) in this group would be DELETED.")
         # Zeros for the CONVERSION were wrong (a dry run's topline must model
         # the real run), but the provenance REFUSALS are separate: the real run
@@ -7831,8 +8300,12 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
         # _provenance_filter has already logged each refusal, so they are
         # not invisible.
         _dry_tally = dict(_refused_tally)
-        _dry_tally["ok"] = len(pairs) - _n_skip
+        _dry_tally["ok"] = len(pairs) - _n_skip - len(_ed)
         _dry_tally["skipped"] = _n_skip
+        _dry_tally["err"] = _refused_tally["err"] + len(_ed)
+        _dry_tally["failures"] = (list(_refused_tally["failures"])
+                                  + [(str(f), f"refused: the existing {o.name} {w}")
+                                     for f, o, w in _ed])
         return _dry_tally
 
     if not pairs:
@@ -8560,6 +9033,7 @@ def main():
         globals()[_gname] = _gvalue
     _DERIVED_INPUT_LABELS.clear()       # per run (_drop_derivative_pairs)
     _ORIGIN_UNREAD.clear()              # per run (the delete gate, W3)
+    _EDITED_REPLACED.clear()            # per run (Q1's recap)
     # A run that records nothing reports nothing: never the totals and the
     # failures of the run before it in the same process (a --serve job).
     record_summary()
@@ -8641,6 +9115,7 @@ def main():
         sys.exit(1)
 
 if __name__ == "__main__":
+    _common._ctrl_c_stops_children(_G)      # C4
     if "--serve" in sys.argv[1:]:
         sys.exit(_common._serve(_G, main, sys.argv[1:]))
     try:

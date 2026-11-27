@@ -45,7 +45,7 @@ import zlib
 from datetime import datetime
 from pathlib import Path
 
-TOOLKIT_VERSION = "2.31.1-dev1"
+TOOLKIT_VERSION = "2.31.1-dev2"
 
 
 class Script:
@@ -1966,8 +1966,11 @@ def _tool_version(exe: str):
     that encode say so at their start (_warn_if_version_unknown)."""
     for timeout in _VERSION_PROBE_TIMEOUTS:
         try:
+            # In a process group of its own (C4): a probe killed by the first
+            # Ctrl+C would leave the version unknown for the files that finish.
             r = subprocess.run([exe, "--version"], capture_output=True, text=True,
-                               timeout=timeout, stdin=_VERSION_STDIN)
+                               timeout=timeout, stdin=_VERSION_STDIN,
+                               **(_OWN_GROUP if subprocess.run is _REAL_RUN else {}))
             out = (r.stdout or "") + " " + (r.stderr or "")
         except Exception:
             continue
@@ -2933,7 +2936,8 @@ def _spawn_exiftool_server(exe):
     pipes that _ExiftoolServer reads in the calling thread — no reader thread
     (communicate() is never called; see _run_captured)."""
     return subprocess.Popen([exe, *_EXIFTOOL_SERVER_ARGS], stdin=subprocess.PIPE,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
+                            **_OWN_CONSOLE)
 
 
 def _kill_on_close_job():
@@ -4641,8 +4645,106 @@ def _keep_alpha_flags(exe: str) -> list:
 # === Subprocess and exiftool ===
 
 
+# A tool is started in a process group of its own (C4): Windows then starts it
+# with Ctrl+C disabled, so a press in the console reaches the script alone and
+# the files in progress finish (#702). The script kills its tools itself when
+# it must stop at once (_kill_live_children). The flag is inherited by what
+# the tool starts. Empty off Windows: nothing changes there.
+_OWN_GROUP = ({"creationflags": _REAL_SUBPROCESS.CREATE_NEW_PROCESS_GROUP}
+              if os.name == "nt" else {})
+# ExifTool (Perl) dies of the press all the same in a group of its own — at
+# its next command, exit 1 (measured 2026-11-27, ExifTool 13.59: plain and
+# CREATE_NEW_PROCESS_GROUP die, CREATE_NO_WINDOW and DETACHED_PROCESS live).
+# So it also gets a console of its own, without a window: the press never
+# reaches it. ~10 ms per start (a conhost), on a ~130 ms process; the
+# kept-open ExifTool starts a few times per run. Not DETACHED_PROCESS: a
+# launcher-type exiftool.exe (an old PAR one, a package manager's shim)
+# would hand its child a NEW, visible console window.
+_OWN_CONSOLE = ({"creationflags": _REAL_SUBPROCESS.CREATE_NEW_PROCESS_GROUP
+                 | _REAL_SUBPROCESS.CREATE_NO_WINDOW}
+                if os.name == "nt" else {})
+
+
+def _own_group_for(cmd) -> dict:
+    """The creation flags of a tool (C4): _OWN_CONSOLE for ExifTool (any of
+    its names), _OWN_GROUP for the others."""
+    try:
+        name = os.path.basename(str(cmd[0])).lower()
+    except (IndexError, TypeError):
+        return _OWN_GROUP
+    return _OWN_CONSOLE if name.startswith("exiftool") else _OWN_GROUP
+
+
+@contextlib.contextmanager
+def _tracked_child(g, p):
+    """While the Popen `p` runs, it is one of the script's live children
+    (g._LIVE_CHILDREN): _kill_live_children can stop it. No lock: a dict
+    item set and popped (see _kill_live_children)."""
+    live = _script_get(g, "_LIVE_CHILDREN")
+    if live is not None:
+        live[id(p)] = p
+    try:
+        yield p
+    finally:
+        if live is not None:
+            live.pop(id(p), None)
+
+
+def _kill_live_children(g) -> None:
+    """Kill every tool this script has running now: the children of
+    _run_captured and _run_to_memory, and the kept-open ExifTools (their
+    process only; the thread using one sees it gone, and its pool closes its
+    job). For a Ctrl+C that stops at once (C4): the tools no longer get the
+    press themselves. Called from a signal handler, in the main thread, which
+    may hold any lock: no lock, no log line, nothing that can raise."""
+    live = _script_get(g, "_LIVE_CHILDREN")
+    children = []
+    if live is not None:
+        for _ in range(3):
+            try:
+                children = list(live.values())
+                break
+            except RuntimeError:        # resized by a worker thread meanwhile
+                continue
+    pool = _script_get(g, "_EXIFTOOL_POOL")
+    servers = []
+    if pool is not None:
+        try:
+            servers = [s.proc for s in list(pool.live) if s.proc is not None]
+        except Exception:
+            servers = []
+    for p in children + servers:
+        try:
+            p.kill()
+        except Exception:
+            pass
+
+
+def _ctrl_c_stops_children(g) -> None:
+    """The script's Ctrl+C handler outside a conversion (its planning, a
+    maintenance mode): what Python's own does — KeyboardInterrupt in the main
+    thread — after killing the tools a worker thread has running, which no
+    longer die of the press themselves (C4). Installed by each backend's
+    `__main__`; _ctrl_c_finishes_the_run puts it back when the pool is done.
+    Only in the main thread; elsewhere nothing changes."""
+    import signal
+
+    def stop_now(signum, frame):
+        _kill_live_children(g)
+        raise KeyboardInterrupt
+
+    try:
+        signal.signal(signal.SIGINT, stop_now)
+    except (ValueError, OSError):
+        pass
+
+
 def _run_captured(g, cmd, timeout, text=False, input=None, stall=None):
-    """subprocess.run with stdout/stderr captured through temp FILES.
+    """subprocess.run with stdout/stderr captured through temp FILES. The
+    child is started in a process group of its own (_own_group_for: a console
+    Ctrl+C does not reach it, C4) and is one of the script's live children
+    while it runs (_tracked_child); a test's stand-in for subprocess.run is
+    called exactly as before, with no new keyword.
 
     capture_output=True makes communicate() start two reader threads per call
     on Windows. Under memory exhaustion a thread can fail in its bootstrap
@@ -4676,58 +4778,73 @@ def _run_captured(g, cmd, timeout, text=False, input=None, stall=None):
         input = _argfile_bytes
     with tempfile.TemporaryFile(dir=g.TEMP_DIR) as out, \
             tempfile.TemporaryFile(dir=g.TEMP_DIR) as err:
-        if stall is None and input is None:
+        if stall is None and input is None and subprocess.run is not _REAL_RUN:
+            # A test's stand-in for subprocess.run sees the call it always saw.
             r = subprocess.run(cmd, stdout=out, stderr=err, timeout=timeout,
                                stdin=g._DEVNULL)
             rc, o, e = r.returncode, r.stdout, r.stderr
         elif stall is None:
-            # What subprocess.run(input=) did up to Python 3.12: the whole
-            # input written from this thread, then the wait, the timeout
+            # What subprocess.run did (up to Python 3.12 for an input): the
+            # whole input written from this thread, then the wait, the timeout
             # counted from the start.
             deadline = time.monotonic() + timeout
             p = subprocess.Popen(cmd, stdout=out, stderr=err,
-                                 stdin=subprocess.PIPE, bufsize=0)
-            try:
-                _write_stdin(p, input)
-                rc = p.wait(timeout=max(0.0, deadline - time.monotonic()))
-            except subprocess.TimeoutExpired:
-                p.kill()
-                p.wait()
-                raise subprocess.TimeoutExpired(cmd, timeout) from None
-            except BaseException:
-                # Like subprocess.run: a Ctrl+C never leaves the child running.
-                p.kill()
-                p.wait()
-                raise
+                                 stdin=g._DEVNULL if input is None else subprocess.PIPE,
+                                 bufsize=0, **_own_group_for(cmd))
+            with _tracked_child(g, p):
+                try:
+                    if input is not None:
+                        _write_stdin(p, input)
+                    # In waits of _WAIT_TICK: the main thread running a tool
+                    # hears a Ctrl+C at once (C4, see _as_completed).
+                    while True:
+                        left = deadline - time.monotonic()
+                        try:
+                            rc = p.wait(timeout=max(0.0, min(_WAIT_TICK, left)))
+                            break
+                        except subprocess.TimeoutExpired:
+                            if left <= _WAIT_TICK:
+                                raise
+                except subprocess.TimeoutExpired:
+                    p.kill()
+                    p.wait()
+                    raise subprocess.TimeoutExpired(cmd, timeout) from None
+                except BaseException:
+                    # Like subprocess.run: a Ctrl+C never leaves the child running.
+                    p.kill()
+                    p.wait()
+                    raise
             o = e = None
         else:
             p = subprocess.Popen(cmd, stdout=out, stderr=err,
-                                 stdin=g._DEVNULL if input is None else subprocess.PIPE)
-            try:
-                if input is not None:
-                    p.stdin.write(input)
-                    p.stdin.close()
-                started = grew = time.monotonic()
-                size = 0
-                while True:
-                    try:
-                        rc = p.wait(timeout=1)
-                        break
-                    except subprocess.TimeoutExpired:
-                        pass
-                    now = time.monotonic()
-                    cur = os.fstat(out.fileno()).st_size
-                    if cur != size:
-                        size, grew = cur, now
-                    if now - grew >= stall or now - started >= timeout:
-                        raise subprocess.TimeoutExpired(
-                            cmd, stall if now - grew >= stall else timeout)
-            except BaseException:
-                # Like subprocess.run: a timeout, a Ctrl+C or an fstat error
-                # never leaves the child running.
-                p.kill()
-                p.wait()
-                raise
+                                 stdin=g._DEVNULL if input is None else subprocess.PIPE,
+                                 **_own_group_for(cmd))
+            with _tracked_child(g, p):
+                try:
+                    if input is not None:
+                        p.stdin.write(input)
+                        p.stdin.close()
+                    started = grew = time.monotonic()
+                    size = 0
+                    while True:
+                        try:
+                            rc = p.wait(timeout=1)
+                            break
+                        except subprocess.TimeoutExpired:
+                            pass
+                        now = time.monotonic()
+                        cur = os.fstat(out.fileno()).st_size
+                        if cur != size:
+                            size, grew = cur, now
+                        if now - grew >= stall or now - started >= timeout:
+                            raise subprocess.TimeoutExpired(
+                                cmd, stall if now - grew >= stall else timeout)
+                except BaseException:
+                    # Like subprocess.run: a timeout, a Ctrl+C or an fstat error
+                    # never leaves the child running.
+                    p.kill()
+                    p.wait()
+                    raise
             o = e = None
         out.seek(0)
         err.seek(0)
@@ -4842,27 +4959,28 @@ def _run_to_memory(g, cmd, timeout, input=None):
         rfd, wfd = _output_pipe()
         try:
             p = subprocess.Popen(cmd, stdin=g._DEVNULL if input is None else subprocess.PIPE,
-                                 stdout=wfd, stderr=err, bufsize=0)
+                                 stdout=wfd, stderr=err, bufsize=0, **_own_group_for(cmd))
         except BaseException:
             os.close(rfd)
             os.close(wfd)
             raise
         os.close(wfd)       # the child's copy is its own: EOF comes when it closes it
-        try:
-            if input is not None:
-                _write_stdin(p, input)
-            out = _read_pipe_until_eof(rfd, deadline)
-            if out is None:
-                raise subprocess.TimeoutExpired(cmd, timeout)
-            # The child closed its stdout: it is exiting. A few seconds of
-            # grace even when the deadline came at that very moment.
-            rc = p.wait(timeout=max(5.0, deadline - time.monotonic()))
-        except BaseException:
-            p.kill()
-            p.wait()
-            raise
-        finally:
-            os.close(rfd)
+        with _tracked_child(g, p):
+            try:
+                if input is not None:
+                    _write_stdin(p, input)
+                out = _read_pipe_until_eof(rfd, deadline)
+                if out is None:
+                    raise subprocess.TimeoutExpired(cmd, timeout)
+                # The child closed its stdout: it is exiting. A few seconds of
+                # grace even when the deadline came at that very moment.
+                rc = p.wait(timeout=max(5.0, deadline - time.monotonic()))
+            except BaseException:
+                p.kill()
+                p.wait()
+                raise
+            finally:
+                os.close(rfd)
         err.seek(0)
         return g._CompletedProcess(cmd, rc, out, err.read())
 
@@ -5452,6 +5570,48 @@ def _verify_jxl_integrity(g, jxl_path: Path) -> bool:
 _CTRL_C_REASON = "interrupted (Ctrl+C)"
 
 
+# How long the main thread waits at most before it runs Python again (C4). On
+# Windows Python runs a signal handler only when the main thread executes
+# bytecode, and a wait of concurrent.futures (as_completed, wait, result, the
+# pool's map) or a Popen.wait holds it until it returns: the Ctrl+C handler
+# then ran only when a file completed, and the presses in between arrived as
+# ONE call (measured 2026-11-27, Python 3.12 and 3.13) — a second press did
+# not stop the run, and a file could start after the first. Before C4 the
+# tools died of the press, which ended the wait. Every wait of the main
+# thread while tools run goes through the two helpers below.
+_WAIT_TICK = 0.25
+
+
+def _as_completed(futures):
+    """concurrent.futures.as_completed, read in waits of _WAIT_TICK: the
+    calling thread runs Python between them, so a Ctrl+C handler runs within
+    that time. Each future is yielded once, in the order they finish. One
+    callback per future and a queue: a wait that walks the pending futures
+    at every wake-up (concurrent.futures.wait in a loop) made a re-run of
+    20 000 up-to-date files take 126 s instead of 8 (measured 2026-11-27)."""
+    import queue
+    done = queue.SimpleQueue()
+    pending = set(futures)
+    for fut in pending:
+        fut.add_done_callback(done.put)
+    left = len(pending)
+    while left:
+        try:
+            fut = done.get(timeout=_WAIT_TICK)
+        except queue.Empty:
+            continue
+        left -= 1
+        yield fut
+
+
+def _future_result(fut):
+    """fut.result(), waited for in steps of _WAIT_TICK (see _as_completed)."""
+    import concurrent.futures as cf
+    while not fut.done():
+        cf.wait((fut,), timeout=_WAIT_TICK)
+    return fut.result()
+
+
 @contextlib.contextmanager
 def _ctrl_c_finishes_the_run(g, armed=True):
     """While a run converts, Ctrl+C latches the run's abort switch instead of
@@ -5461,10 +5621,14 @@ def _ctrl_c_finishes_the_run(g, armed=True):
     the run prints its summary; main() then ends as an interrupt
     (_end_if_interrupted: the script exits 130). The pool's `with` used to
     wait for EVERY queued file and the run ended without a summary. Its
-    cjxl/djxl/ExifTool share the console and get the Ctrl+C too: a file whose
-    tool died is an error, its partial output removed, as always. A second
-    Ctrl+C stops at once — also after another abort was latched (a full
-    disk): the press is its own flag, g._ctrl_c_seen, not the abort reason.
+    cjxl/djxl/magick/ExifTool are started in a process group of their own
+    (_own_group_for: ExifTool also in a hidden console of its own) and do
+    not get the press: the files in progress finish. A
+    second Ctrl+C stops at once: the handler kills them (_kill_live_children),
+    and each file whose tool was killed is an error, its partial output
+    removed, as always. That second press stops at once also after another
+    abort was latched (a full disk): the press is its own flag,
+    g._ctrl_c_seen, not the abort reason.
     Enter it after the run's _reset_abort, which clears that flag — or, to
     cover a planning that resets the latch itself (the transcoder's commands),
     enter it unarmed: until the run's _reset_abort arms it, a Ctrl+C stops at
@@ -5475,6 +5639,7 @@ def _ctrl_c_finishes_the_run(g, armed=True):
 
     def on_ctrl_c(signum, frame):
         if g._ctrl_c_seen or not g._ctrl_c_armed:
+            _kill_live_children(g)          # C4: they no longer get the press
             raise KeyboardInterrupt
         g._ctrl_c_seen = True
         if g._abort_reason is None:

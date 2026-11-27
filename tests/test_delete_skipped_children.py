@@ -322,8 +322,9 @@ def test_transcoder_lossy_keeps_by_default(tmp_path, monkeypatch):
 
 def test_transcoder_lossy_delete_skipped_with_this_sources_marker(tmp_path, monkeypatch):
     """rc8 (Fable's L2): even with this source's marker, an export the run did
-    not write never deletes its JXL — it may have been edited since, and
-    nothing records its pixels. Only an export THIS run writes deletes it."""
+    not write never deletes its JXL — it may have been edited since (the pixel
+    record of 2.31.1-dev2 is not a delete proof). Only an export THIS run
+    writes deletes it."""
     assert _tr_lossy(tmp_path, monkeypatch, delete_skipped=True).exists()
 
 

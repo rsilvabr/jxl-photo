@@ -28,7 +28,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.31.1-dev1"
+TOOLKIT_VERSION = "2.31.1-dev2"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 
@@ -2672,6 +2672,11 @@ def _export_folder_name(origin: str, dest: str, override: Optional[str] = None) 
     return _child_setting('jxl_jpeg_transcoder', 'EXPORT_JPEG_FOLDER', 'JPEG_recovered')
 
 
+# After a second Ctrl+C the backend stops at once by itself (it kills its
+# tools and removes its temps): that long before the wizard kills the tree.
+_CHILD_STOP_GRACE = 15
+
+
 def _kill_process_tree(process) -> None:
     """Kill a child script AND what it started (W3 of the 2026-10-08 audit).
 
@@ -2679,11 +2684,14 @@ def _kill_process_tree(process) -> None:
     cjxl/djxl/exiftool it launched kept running and left their
     <uuid>_name.tmp files beside the finals, where no sweep looks. taskkill /T
     takes the whole tree. Only a real Popen gets it: a pid of a stand-in
-    object could name an unrelated process."""
+    object could name an unrelated process. taskkill runs in a process group
+    of its own: a Ctrl+C pressed meanwhile (the user pressing again) must not
+    kill it before it took the tree, which would leave Popen.kill() alone."""
     if os.name == "nt" and isinstance(process, subprocess.Popen):
         try:
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)],
-                           capture_output=True, timeout=30)
+                           capture_output=True, timeout=30,
+                           creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
         except Exception:
             pass
     try:
@@ -5137,6 +5145,43 @@ def _gate_manifest_lossless_recovery(menu, wf, ctx) -> bool:
     return False
 
 
+# The manifest's own steps (InteractiveMenu._manifest_step_*), reached through
+# the table. Each adapter reads its ctx keys FIRST (a path run with a foreign
+# context raises KeyError before it touches `menu`), then calls the step;
+# True = refused (the step has printed why).
+def _gate_manifest_mode7_subfolder(menu, wf, ctx) -> bool:
+    """A mode-7 row whose subfolder cannot be told (the step asks or refuses;
+    it may fill the run's export_subfolder)."""
+    args = (ctx['resolved_entries'], ctx['row_opts_all'], ctx['row_markers'])
+    return not menu._manifest_step_mode7_subfolder(wf, *args)
+
+
+def _gate_manifest_output_folder_names(menu, wf, ctx) -> bool:
+    args = (ctx['origin'], ctx['dest'], ctx['resolved_entries'], ctx['row_export'])
+    return not menu._manifest_step_output_folder_names(*args)
+
+
+def _gate_manifest_source_overlaps(menu, wf, ctx) -> bool:
+    args = (ctx['resolved_entries'],)
+    return not menu._manifest_step_source_overlaps(wf, *args)
+
+
+def _gate_manifest_output_collisions(menu, wf, ctx) -> bool:
+    args = (ctx['origin'], ctx['dest'], ctx['resolved_entries'], ctx['analyzer'],
+            ctx['marker'], ctx['row_export'], ctx['row_effs'], ctx['cross_out_folders'])
+    return not menu._manifest_step_output_collisions(wf, *args)
+
+
+def _gate_manifest_output_feeds_source(menu, wf, ctx) -> bool:
+    args = (ctx['resolved_entries'], ctx['cross_out_folders'])
+    return not menu._manifest_step_output_feeds_source(wf, *args)
+
+
+def _gate_manifest_in_place_unattended(menu, wf, ctx) -> bool:
+    args = (ctx['any_in_place_recompress'], ctx['dry_run'])
+    return not menu._manifest_step_in_place_unattended(wf, *args)
+
+
 def _gate_preset_unattended(menu, wf, ctx) -> bool:
     """A destructive preset cannot run unattended: the delete gates ask for an
     HHMM token nobody can type, and skipping them would let a scheduled task
@@ -5173,7 +5218,10 @@ def _gate_preset_unattended(menu, wf, ctx) -> bool:
 
 
 # (name, paths, rule). Order matters: a path runs its rules top to bottom
-# and stops at the first refusal.
+# and stops at the first refusal. A manifest's own steps (`_manifest_step_*`:
+# they ask a question or need the run's intermediate state) are rules too, on
+# the paths `manifest` / `manifest_outputs` / `manifest_in_place`, called where
+# each state exists.
 _GATE_RULES: Tuple[Tuple[str, frozenset, Callable], ...] = (
     ("ambiguous_delete_flags", frozenset({"common"}), _gate_ambiguous_delete_flags),
     ("expert_flags_parse", frozenset({"common"}), _gate_expert_flags_parse),
@@ -5184,6 +5232,17 @@ _GATE_RULES: Tuple[Tuple[str, frozenset, Callable], ...] = (
     ("manifest_derivatives", frozenset({"manifest"}), _gate_manifest_derivatives),
     ("manifest_lossless_recovery", frozenset({"manifest"}),
      _gate_manifest_lossless_recovery),
+    ("manifest_mode7_subfolder", frozenset({"manifest"}), _gate_manifest_mode7_subfolder),
+    ("manifest_output_folder_names", frozenset({"manifest_outputs"}),
+     _gate_manifest_output_folder_names),
+    ("manifest_source_overlaps", frozenset({"manifest_outputs"}),
+     _gate_manifest_source_overlaps),
+    ("manifest_output_collisions", frozenset({"manifest_outputs"}),
+     _gate_manifest_output_collisions),
+    ("manifest_output_feeds_source", frozenset({"manifest_outputs"}),
+     _gate_manifest_output_feeds_source),
+    ("manifest_in_place_unattended", frozenset({"manifest_in_place"}),
+     _gate_manifest_in_place_unattended),
     ("preset_unattended", frozenset({"preset"}), _gate_preset_unattended),
 )
 
@@ -8737,14 +8796,11 @@ class InteractiveMenu:
         ]
 
         # The derivative rules per ROW (_GATE_RULES, path "manifest"), before
-        # anything is charged or written.
+        # anything is charged or written; then the mode-7 subfolder step.
         if _job_gates(self, workflow, "manifest", origin=origin, dest=dest,
                       advanced=advanced, row_effs=_row_effs,
-                      resolved_entries=resolved_entries):
-            return False
-
-        if not self._manifest_step_mode7_subfolder(
-                workflow, resolved_entries, _row_opts_all, _row_markers):
+                      resolved_entries=resolved_entries,
+                      row_opts_all=_row_opts_all, row_markers=_row_markers):
             return False
 
         # The mode-7 derivation above may have filled the run's export_subfolder.
@@ -8756,23 +8812,16 @@ class InteractiveMenu:
                      for _o in _row_opts_all]
         _row_export = [_row_export_cfg(_w) for _w, _a in _row_effs]
 
-        if not self._manifest_step_output_folder_names(
-                origin, dest, resolved_entries, _row_export):
-            return False
-
-        if not self._manifest_step_source_overlaps(workflow, resolved_entries):
-            return False
-
         # Each row's resolved output folders, filled by the collision scan
         # for the output-feeds-Source step after it.
         cross_out_folders: Dict[int, Set[str]] = {}
-        if not self._manifest_step_output_collisions(
-                workflow, origin, dest, resolved_entries, analyzer, _marker,
-                _row_export, _row_effs, cross_out_folders):
-            return False
-
-        if not self._manifest_step_output_feeds_source(
-                workflow, resolved_entries, cross_out_folders):
+        # The output folder names, the overlapping Sources, the output
+        # collisions and an output that feeds another row's Source
+        # (_GATE_RULES, path "manifest_outputs", in that order).
+        if _job_gates(self, workflow, "manifest_outputs", origin=origin, dest=dest,
+                      resolved_entries=resolved_entries, row_export=_row_export,
+                      row_effs=_row_effs, analyzer=analyzer, marker=_marker,
+                      cross_out_folders=cross_out_folders):
             return False
 
         # delete_source gets --delete-confirm-off from the cmd builder — so the
@@ -8818,8 +8867,8 @@ class InteractiveMenu:
             _wr['_in_place_planned'] = bool(_ip)
         _any_in_place_recompress = any(_row_in_place)
 
-        if not self._manifest_step_in_place_unattended(workflow, _any_in_place_recompress,
-                                                       dry_run):
+        if _job_gates(self, workflow, "manifest_in_place",
+                      any_in_place_recompress=_any_in_place_recompress, dry_run=dry_run):
             return False
 
         # [D] on a manifest whose every row loses its delete (each one a lossy
@@ -8917,15 +8966,24 @@ class InteractiveMenu:
             try:
                 rc = self._run_subprocess(cmd)
             except KeyboardInterrupt:
-                # Ctrl+C: _stream_child has already killed the child. Record
+                # Ctrl+C: the child ended by itself after its files in progress
+                # (C4; exit 130 after its summary, or 0 when it was already done),
+                # or _stream_child killed it (a second press, an old child).
+                # Record
                 # the entry, mark the rest not started and fall through to the
                 # summary — a manifest runs for hours, and the accounting of
                 # what DID complete must survive the interruption. main() then
                 # reports the cancellation and exits 130.
-                error_count += 1
+                _rc_done = getattr(self, "_last_child_rc", None)
+                if _rc_done == 0:
+                    ok_count += 1
+                else:
+                    error_count += 1
                 entry_reports.append({
                     "index": i, "mode": detected_mode, "source": source,
-                    "state": "cancelled", "summary": self._last_child_summary,
+                    "state": ("ok" if _rc_done == 0 else
+                              "interrupted" if _rc_done == 130 else "cancelled"),
+                    "summary": self._last_child_summary,
                     "deletes": "--delete-source" in [str(c) for c in cmd],
                 })
                 for j, (src_rest, _dst_rest, m_rest) in enumerate(
@@ -10542,6 +10600,7 @@ class InteractiveMenu:
         # run's numbers for a child that died before emitting its own.
         self._last_child_usage_error = None
         self._last_child_summary = None
+        self._last_child_rc = None
 
         try:
             process = subprocess.Popen(
@@ -10573,49 +10632,92 @@ class InteractiveMenu:
         reader = threading.Thread(target=_reader, daemon=True)
         reader.start()
 
+        # C4: a Ctrl+C while the child runs is the child's to handle (it
+        # finishes its files in progress and prints its summary); the wizard
+        # only counts the presses here and acts on them in the loop below —
+        # never print from the handler (Rich is not re-entrant).
+        import signal
+        presses = []
+        try:
+            previous = signal.signal(signal.SIGINT, lambda s, f: presses.append(time.time()))
+            installed = True
+        except (ValueError, OSError):
+            previous, installed = None, False
+        announced = 0
+
         deadline = time.time() + idle_timeout
         try:
-            while True:
-                remaining = deadline - time.time()
-                if remaining <= 0:
-                    _kill_process_tree(process)
-                    self._print_error(
-                        f"No output for {idle_timeout // 60} min: process killed "
-                        f"(hidden prompt, hang, or a single file slower than that "
-                        f"— the child prints only on completed files)")
-                    return -1
-                try:
-                    line = q.get(timeout=min(1.0, max(remaining, 0.1)))
-                except queue.Empty:
-                    if not reader.is_alive():
+            try:
+                while True:
+                    if len(presses) >= 3 or (len(presses) >= 2
+                                             and time.time() - presses[1] >= _CHILD_STOP_GRACE):
+                        _kill_process_tree(process)
+                        raise KeyboardInterrupt
+                    if len(presses) > announced:
+                        announced = len(presses)
+                        _note = ("Ctrl+C: the script finishes the files in progress and prints "
+                                 "its summary. Ctrl+C again stops it now."
+                                 if announced == 1 else
+                                 f"Ctrl+C again: stopping now (up to {_CHILD_STOP_GRACE} s for "
+                                 f"the script to clean up).")
+                        self.ui.markup(f"[yellow]{_rich_safe(_note)}[/yellow]", _note)
+                    remaining = deadline - time.time()
+                    if remaining <= 0:
+                        _kill_process_tree(process)
+                        self._print_error(
+                            f"No output for {idle_timeout // 60} min: process killed "
+                            f"(hidden prompt, hang, or a single file slower than that "
+                            f"— the child prints only on completed files)")
+                        return -1
+                    try:
+                        # A short wait (C4): two presses that come while this
+                        # thread waits reach the handler as ONE (Python runs it
+                        # once per wake-up), and a quick second press must
+                        # still count as the second.
+                        line = q.get(timeout=min(0.2, max(remaining, 0.1)))
+                    except queue.Empty:
+                        if not reader.is_alive():
+                            break
+                        continue
+                    if line is None:
                         break
-                    continue
-                if line is None:
-                    break
-                # Progress resets the idle deadline
-                deadline = time.time() + idle_timeout
-                # The machine-readable summary is data for the end-of-run
-                # block, not output: swallow it so the user never sees JSON.
-                if line.lstrip().startswith(CHILD_SUMMARY_PREFIX):
-                    self._last_child_summary = self._parse_child_summary(line)
-                    continue
-                # Kept AND printed: the user should see argparse's own words,
-                # and the exit-2 reporting below needs to know it was argparse.
-                _usage = _CHILD_USAGE_ERROR_RE.match(line.rstrip())
-                if _usage:
-                    self._last_child_usage_error = _usage.group(2)
-                self._print_child_line(line)
-        except KeyboardInterrupt:
-            # Ctrl+C must also take the child down, not leave it running.
-            _kill_process_tree(process)
-            raise
+                    # Progress resets the idle deadline
+                    deadline = time.time() + idle_timeout
+                    # The machine-readable summary is data for the end-of-run
+                    # block, not output: swallow it so the user never sees JSON.
+                    if line.lstrip().startswith(CHILD_SUMMARY_PREFIX):
+                        self._last_child_summary = self._parse_child_summary(line)
+                        continue
+                    # Kept AND printed: the user should see argparse's own words,
+                    # and the exit-2 reporting below needs to know it was argparse.
+                    _usage = _CHILD_USAGE_ERROR_RE.match(line.rstrip())
+                    if _usage:
+                        self._last_child_usage_error = _usage.group(2)
+                    self._print_child_line(line)
+            except KeyboardInterrupt:
+                # Ctrl+C must also take the child down, not leave it running.
+                _kill_process_tree(process)
+                raise
 
-        try:
-            process.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            _kill_process_tree(process)
-            return -1
-        return process.returncode
+            try:
+                process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                _kill_process_tree(process)
+                if presses:
+                    raise KeyboardInterrupt
+                return -1
+            self._last_child_rc = process.returncode
+            if presses:
+                # The child was left to end by itself (C4); the wizard ends as it
+                # always did after a Ctrl+C.
+                raise KeyboardInterrupt
+            return process.returncode
+        finally:
+            if installed:
+                try:
+                    signal.signal(signal.SIGINT, previous)
+                except (ValueError, OSError):
+                    pass
 
     def _run_subprocess(self, cmd: List) -> int:
         """Run subprocess and return its exit code.
@@ -11993,6 +12095,44 @@ def _pathext() -> List[str]:
     return [e for e in (os.environ.get("PATHEXT") or ".COM;.EXE;.BAT;.CMD").split(";") if e]
 
 
+# What Windows starts for a bare name ("cjxl"): CreateProcess adds .exe only,
+# never PATHEXT — a cjxl.cmd is found by `where` and by shutil.which, and no
+# script can start it. (The suite's fake tools are .cmd files: its fixture
+# widens this.)
+_SETUP_STARTABLE_EXTS = (".exe",)
+
+
+def _startable(path) -> bool:
+    """Can the scripts start this copy by its bare name?"""
+    return os.name != "nt" or str(path).lower().endswith(_SETUP_STARTABLE_EXTS)
+
+
+def _prepath_folders() -> List[Tuple[str, str]]:
+    """(folder, "python"|"current") where Windows looks for a bare name BEFORE
+    the PATH: the folder of the program that is running (python.exe — the
+    base one under a virtual environment: it is the process), then the
+    current folder. Empty off Windows."""
+    if os.name != "nt":
+        return []
+    out = []
+    try:
+        import ctypes
+        buf = ctypes.create_unicode_buffer(32768)
+        n = ctypes.windll.kernel32.GetModuleFileNameW(None, buf, len(buf))
+        exe = buf.value if 0 < n < len(buf) else sys.executable
+    except Exception:
+        exe = sys.executable
+    if exe:
+        out.append((os.path.dirname(exe), "python"))
+    try:
+        cwd = os.getcwd()
+    except OSError:
+        cwd = ""
+    if cwd and _path_key(cwd) not in {_path_key(f) for f, _s in out}:
+        out.append((cwd, "current"))
+    return out
+
+
 def _find_copies(name: str, dirs) -> List[Path]:
     """Like `where`: in each folder, in order, `name` with each PATHEXT
     extension (and `name` itself when it already ends in one); one entry per
@@ -12134,6 +12274,14 @@ def _versions_text(copies: List[_Copy]) -> str:
     return ", ".join(sorted({c.version or "?" for c in copies}))
 
 
+def _not_an_exe_text(path, prog) -> str:
+    """Why a copy that is no .exe cannot be the tool (the diagnosis and the
+    folder check say it in the same words)."""
+    return (f"{path} is not an .exe: the scripts start `{prog}` directly, and Windows "
+            f"runs only an .exe that way (a .cmd or .bat is found by `where`, never "
+            f"started).")
+
+
 def _unit_findings(st: _UnitState, units: Dict[str, _UnitState]) -> List[_Finding]:
     u, out = st.unit, []
     tested = _SETUP_TESTED_TOOLS[u.key]["version"]
@@ -12141,10 +12289,23 @@ def _unit_findings(st: _UnitState, units: Dict[str, _UnitState]) -> List[_Findin
     def add(sev, code, msg, fix=None):
         out.append(_Finding(sev, code, u.key, msg, fix))
 
+    def unstartable(programs):
+        """The first copy of these programs that exists but is no .exe."""
+        return next((c for p in programs for c in st.copies.get(p, [])
+                     if not _startable(c.path)), None)
+
     setf = ("set_folder", u.key)
     if u.key == "libjxl":
         missing = [p for p in u.programs if st.winners.get(p) is None]
         present = [st.winners[p] for p in u.programs if st.winners.get(p)]
+        _still_missing = []
+        for p in missing:
+            c = unstartable((p,))
+            if c:
+                add("error", "NOT_AN_EXE", _not_an_exe_text(c.path, p), setf)
+            else:
+                _still_missing.append(p)
+        missing = _still_missing
         if missing:
             add("error", "MISSING", f"{', '.join(missing)} not found on the PATH a new program "
                 f"gets.", setf)
@@ -12171,7 +12332,15 @@ def _unit_findings(st: _UnitState, units: Dict[str, _UnitState]) -> List[_Findin
                 ("download", u.key) if os.name == "nt" else None)
     else:
         w = st.main
-        if w is None:
+        c = unstartable(u.programs) if w is None else None
+        if c is not None:
+            _msg = _not_an_exe_text(c.path, c.program)
+            if u.key == "exiftool" and any(_startable(x.path) for x in st.all_copies()):
+                _msg += (" The scripts take the first of exiftool, exiftool-k, exiftool(-k) "
+                         "that exists: remove this file, or the working copy is never "
+                         "reached.")
+            add("error" if u.key == "exiftool" else "warning", "NOT_AN_EXE", _msg, setf)
+        elif w is None:
             if u.key == "exiftool":
                 add("error", "MISSING", "ExifTool (exiftool, exiftool-k or exiftool(-k)) not "
                     "found on the PATH a new program gets.", setf)
@@ -12317,7 +12486,8 @@ def _process_only_findings(units, view, process_path) -> List[_Finding]:
         if any(st.winners.get(p) for p in names):
             continue
         for prog in names:
-            found = _find_copies(prog, [_expand_entry(d) for d in dirs])
+            found = [f for f in _find_copies(prog, [_expand_entry(d) for d in dirs])
+                     if _startable(f)]
             if found:
                 out.append(_Finding(
                     "info", "PROCESS_ONLY", st.unit.key,
@@ -12325,6 +12495,49 @@ def _process_only_findings(units, view, process_path) -> List[_Finding]:
                     f"it): a program started from elsewhere, a scheduled task included, will "
                     f"not find it.", None))
                 break
+    return out
+
+
+def _prepath_findings(units, view) -> List[_Finding]:
+    """A copy Windows starts BEFORE anything on the PATH: next to the running
+    python.exe (it wins for every script) or in the current folder (it wins
+    for a script started from here). The table's winner is the PATH's; these
+    lines say when another file runs instead. Never a fix: nothing here is a
+    PATH entry."""
+    out = []
+    on_path = {_path_key(f) for f, _s in view}
+    for folder, where in _prepath_folders():
+        if _path_key(folder) in on_path:
+            continue            # the PATH scan already judges that folder
+        for st in units.values():
+            names = st.unit.programs
+            is_exiftool = st.unit.key == "exiftool"
+            if is_exiftool:
+                # Only the NAME the scripts start: the first with any copy on
+                # the PATH (shutil.which), else each of the three in order.
+                _chosen = next((n for n in names if st.copies.get(n)), None)
+                names = (_chosen,) if _chosen else names
+            for prog in names:
+                found = [f for f in _find_copies(prog, [folder]) if _startable(f)]
+                if not found:
+                    continue
+                w = st.winners.get("exiftool" if is_exiftool else prog)
+                if w is not None and os.path.normcase(os.path.realpath(str(found[0]))) == w.real:
+                    continue
+                loses = (f"not {w.path}" if w is not None else "though the PATH has none")
+                if where == "python":
+                    out.append(_Finding(
+                        "warning", "PYTHON_FOLDER_COPY", st.unit.key,
+                        f"{found[0]} sits next to python.exe: Windows starts it before "
+                        f"anything on the PATH, so the scripts run it, {loses}. Move or "
+                        f"delete it by hand if that is not what you want.", None))
+                else:
+                    out.append(_Finding(
+                        "info", "CURRENT_FOLDER_COPY", st.unit.key,
+                        f"{found[0]} is in the current folder: a script started from "
+                        f"here runs it, {loses}.", None))
+                if is_exiftool:
+                    break       # one finding per folder for ExifTool
     return out
 
 
@@ -12348,13 +12561,18 @@ def _diagnose(store, probe=_probe, process_path=None) -> _SetupReport:
                 c.version, c.vtuple, c.quantum = _parse_version(unit.key, prog, c.probe)
                 copies.append(c)
             st.copies[prog] = copies
+        def _first_startable(copies):
+            return next((c for c in copies if _startable(c.path)), None)
+
         if unit.key == "exiftool":
-            # The scripts try the NAMES in order, each over the whole PATH.
-            st.winners["exiftool"] = next((st.copies[n][0] for n in unit.programs
-                                           if st.copies[n]), None)
+            # The scripts try the NAMES in order, each over the whole PATH
+            # (shutil.which: any PATHEXT copy picks the name), then start that
+            # bare name: only an .exe of THAT name runs.
+            _name = next((n for n in unit.programs if st.copies[n]), None)
+            st.winners["exiftool"] = _first_startable(st.copies[_name]) if _name else None
         else:
             for prog in unit.programs:
-                st.winners[prog] = st.copies[prog][0] if st.copies[prog] else None
+                st.winners[prog] = _first_startable(st.copies[prog])
         units[unit.key] = st
     findings: List[_Finding] = []
     for st in units.values():
@@ -12362,6 +12580,7 @@ def _diagnose(store, probe=_probe, process_path=None) -> _SetupReport:
     findings += _entry_findings(values, units)
     findings += _process_only_findings(
         units, view, os.environ.get("PATH", "") if process_path is None else process_path)
+    findings += _prepath_findings(units, view)
     findings.sort(key=lambda f: _SETUP_SEVERITY_ORDER[f.severity])
     return _SetupReport(values, view, units, findings)
 
@@ -12920,17 +13139,29 @@ def _check_tool_folder(unit: _ToolUnit, folder: Path, probe=_probe):
         return (f"{folder} cannot be a PATH entry (a ';' or a %NAME% in its path): move "
                 f"the tool to another folder.", None, False)
     found = {}
+
+    def _not_an_exe(path, prog):
+        return _not_an_exe_text(path, prog), None, False
+
     if unit.key == "exiftool":
-        exe = next((c[0] for n in unit.programs for c in [_find_copies(n, [str(folder)])] if c),
-                   None)
-        if exe is None:
+        # The NAME the scripts would take (the first with any copy), then an
+        # .exe of that name: what Windows starts by the bare name.
+        named = next(((n, c) for n in unit.programs for c in [_find_copies(n, [str(folder)])]
+                      if c), None)
+        if named is None:
             return (f"No ExifTool in {folder} (exiftool.exe, exiftool-k.exe or "
                     f"exiftool(-k).exe).", None, False)
+        exe = next((x for x in named[1] if _startable(x)), None)
+        if exe is None:
+            return _not_an_exe(named[1][0], named[0])
         found["exiftool"] = exe
     else:
         missing = []
         for p in unit.programs:
             c = _find_copies(p, [str(folder)])
+            if c and not any(_startable(x) for x in c):
+                return _not_an_exe(c[0], p)
+            c = [x for x in c if _startable(x)]
             if c:
                 found[p] = c[0]
             else:
@@ -13511,8 +13742,9 @@ def main():
     try:
         _main()
     except KeyboardInterrupt:
-        # Ctrl+C anywhere — at a menu prompt, or in a child (which _stream_child
-        # has already killed, and a manifest run has already summarized). Say so
+        # Ctrl+C anywhere — at a menu prompt, or in a child (which ended by
+        # itself or was stopped by _stream_child, and a manifest run has
+        # already summarized). Say so
         # instead of dumping a traceback; 130 is the conventional 128+SIGINT.
         print("\nCancelled (Ctrl+C).")
         sys.exit(130)

@@ -565,7 +565,7 @@ Options:
 | `1` | One or more files failed, or invalid input |
 | `2` | Aborted (e.g. duplicate output destinations) |
 | `3` | User declined the delete-source confirmation |
-| `130` | Interrupted with Ctrl+C: no file started after it, the files in progress finished, the summary printed (a second Ctrl+C stops at once) |
+| `130` | Interrupted with Ctrl+C: no file started after it, the files in progress finished, the summary printed (a second Ctrl+C stops at once). Since 2.31.1-dev2 the codecs do not receive the Ctrl+C: the files in progress really finish. Ctrl+Break, or closing the window, still stops everything at once. |
 
 A run that had errors names the failed files once more at its end
 (`Errors (N):`, WARNING lines, the first ten), for whoever reads only the last
@@ -907,6 +907,33 @@ including each of the two over the other.
 | (none) | Skip existing files (safest for initial runs) |
 | `--overwrite` | Always overwrite existing files |
 | `--sync` | Only overwrite if source is newer than destination |
+
+### An export you edited is not written over
+
+Since 2.31.1-dev2 every JPEG/PNG this script exports from a JXL (a faithful
+export or a derivative) records its image data in its XMP
+(`jxlphoto-pixsum:c1:<md5>`; see [metadata_written.md](metadata_written.md)).
+An editor keeps that mark when you retouch the file, but the image data no
+longer matches it: a later `--sync` with a newer master, or a run whose
+derivative recipe changed, then **refuses** that file instead of writing over
+your edit — an error for that file (exit 1), until you move or rename it. A
+dry run says `would REFUSE` for it. `--overwrite` replaces it anyway, as the
+decoder does for an edited TIFF, and says so: a WARNING line for each one
+(`replaced an edited export: ...`) and the list again at the end of the run;
+`--overwrite --dry-run` names each one (`DRY | would REPLACE an edited
+export | ...`). A dry run starts no ExifTool: an export whose XMP is in
+extended segments (a long Photoshop history) is listed as `not checked for an
+edit`; the real run checks it.
+A **damaged** export — one that carries the record but fails the integrity
+check, cut by a crash, a full disk or a copy that stopped — is not called
+edited: it is refused as `is DAMAGED (it fails the integrity check ...)`, the
+same way (delete it, or pass `--overwrite`), and `--overwrite` replaces it with
+a WARNING of its own (`replaced a damaged export: ...`), not in the list of
+edited exports. An export whose record cannot be read or compared otherwise
+is refused too; `--overwrite` replaces it with
+`replaced an export whose pixel record could not be checked: ...`.
+A metadata-only edit (a caption, keywords, a rating) is not an edit. Exports
+made by 2.31.1-dev1 or older carry no record and are judged as before.
 
 * * *
 

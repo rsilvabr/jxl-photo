@@ -691,7 +691,7 @@ Options:
 | `1` | One or more files failed |
 | `2` | Aborted (e.g. duplicate output destinations, invalid arguments) |
 | `3` | User declined the delete-source confirmation |
-| `130` | Interrupted with Ctrl+C: no file started after it, the files in progress finished, the summary printed (a second Ctrl+C stops at once) |
+| `130` | Interrupted with Ctrl+C: no file started after it, the files in progress finished, the summary printed (a second Ctrl+C stops at once). Since 2.31.1-dev2 the codecs do not receive the Ctrl+C: the files in progress really finish. Ctrl+Break, or closing the window, still stops everything at once. |
 
 A run that had errors names the failed files once more at its end
 (`Errors (N):`, WARNING lines, the first ten), for whoever reads only the last

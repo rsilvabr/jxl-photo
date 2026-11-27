@@ -16,6 +16,7 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
+| [v2.31.1-dev2](#v2311-dev2) | 2026-11-27 | Development version, not published (tag only). A Ctrl+C lets the files in progress finish (the tools no longer receive it); the transcoder's JPEG/PNG exports record their image data and an edited one is not written over; `setup` says what Windows really starts. |
 | [v2.31.1-dev1](#v2311-dev1) | 2026-11-27 | Development version, not published (tag only). The manifest table's OK and ovw counted like the other scripts; `jxl_photo.py setup`; on Python 3.13+ a codec's input written without a thread (#765, #766) |
 | **[v2.31.0](#v2310)** | 2026-11-23 | Faster with the same files: archiving, decoding and deleting 18–22 %, sRGB copies 8–38 %, recompression 15 %; deletes hardened in many edge cases (colour-converted exports, JPEG archives, Motion Photos, multi-page documents, Ctrl+C); film scans (VueScan RGB + infrared, grey profiles); exact EXIF values; `--serve` and `--verify-roundtrip` for programs; a temp folder with `%` or a TMP of 261+ characters refused; everything in the eight test releases (#684–#764) |
 | [v2.31.0-rc8](#v2310-rc8) | 2026-11-23 | Pre-release. The fixes of a sweep of rc7 by sibling rules (#746–#764): a delete keeps the source in more cases — a profile that could not be read, an export the run did not write, a Motion Photo, a copy out of staging that changed, more channels than one alpha; multi-page groups stay whole after a Ctrl+C or a page held open; long output paths, another program's bare JXL and three wizard paths no longer stop a run; everything in v2.31.0-rc7 |
@@ -119,6 +120,42 @@ GitHub release notes before v1.8.2:
 [v1.7.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.1) ·
 [v1.7.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.0).
 Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refactoring.md).
+
+---
+
+## v2.31.1-dev2
+
+**Not published: a development version** (2026-11-27), tagged in git with
+no GitHub release and no exe. Every file it writes records `2.31.1-dev2` in
+its `xmpMM:History`. Since v2.31.1-dev1:
+
+- A Ctrl+C really lets the files in progress finish (#767): cjxl, djxl,
+  ImageMagick and ExifTool no longer receive the console's Ctrl+C (each is
+  started in a process group of its own, ExifTool also in a hidden console
+  of its own), so the files in progress end OK instead of as errors; a
+  second Ctrl+C still stops at once (the script ends its tools itself, and
+  the script hears it within a quarter of a second, also while it waits for
+  a file: no file starts after the first press). In
+  the wizard, the first Ctrl+C lets the running script finish its files and
+  print its summary, a second one stops it, a third ends it at once.
+  Ctrl+Break, or closing the window, still stops everything at once.
+- A JPEG/PNG the JPEG transcoder exports from a JXL records its image data
+  (`jxlphoto-pixsum:c1:<md5>`, #768): a later `--sync` or a changed recipe
+  no longer writes over an export edited since — that file is refused, an
+  error, as the decoder does for an edited TIFF. `--overwrite` replaces it,
+  with a warning for each one and a list at the end (`--overwrite --dry-run`
+  names them). An export cut by a crash or a copy that stopped is refused
+  too, named as damaged, not edited. A metadata-only edit
+  (caption, keywords) is not an edit; exports made by older versions carry
+  no record and are judged as before. A dry run names an export it cannot
+  check without ExifTool (its XMP in extended segments).
+- JPEG archives: a run stopped by force while it was writing `checksums.md5`
+  no longer makes the next run wait 30 s per file and keep its sources for
+  two minutes (#769).
+- `python jxl_photo.py setup` says what Windows really starts: a `.cmd`/`.bat`
+  shim the scripts cannot start is `NOT_AN_EXE`, and a copy next to
+  `python.exe` or in the current folder, which runs before anything on
+  PATH, is reported.
 
 ---
 

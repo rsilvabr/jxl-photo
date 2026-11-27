@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #767.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #770.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -32,6 +32,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-98 — a Ctrl+C reached the tools; an edited export was written over](#round-98--a-ctrlc-reached-the-tools-an-edited-export-was-written-over-2026-11-27) | 2026-11-27 | v2.31.1-dev2 (not published) | #767–#769 (3) |
 | [Round-97 — Python 3.13's thread for a child's input](#round-97--python-313s-thread-for-a-childs-input-2026-11-27) | 2026-11-27 | v2.31.1-dev1 (not published) | #766 (1) |
 | [Round-96 — the recompressor's counts in the manifest table](#round-96--the-recompressors-counts-in-the-manifest-table-2026-11-26) | 2026-11-26 | v2.31.1-dev1 (not published) | #765 (1) |
 | [Round-95 — the sibling-rule sweep of rc7](#round-95--the-sibling-rule-sweep-of-rc7-2026-11-23) | 2026-11-23 | v2.31.0-rc8 | #746–#764 (19) |
@@ -115,6 +116,19 @@ were never tagged and never shipped.
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
 
 ---
+
+## Round-98 — a Ctrl+C reached the tools; an edited export was written over (2026-11-27)
+
+Plan `261127_Fable_plan_pending-code` (items C4 and L2). Fixed with
+`tests/test_ctrl_c_console.py` (a real console Ctrl+C, in a console of the
+test's own) and `tests/test_export_pixsum.py` (real codecs), which fail on
+v2.31.1-dev1.
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 767 | #702 promised that after one Ctrl+C "the files in progress finish", but cjxl, djxl, ImageMagick and ExifTool shared the console and died of the same press: every file in progress was an error, its partial output removed. The wizard killed the backend at the first press, before its summary. The tools are now started in a process group of their own (`_OWN_GROUP`; ExifTool, which dies of the press all the same, also in a hidden console of its own, `_OWN_CONSOLE`), tracked as the script's `_LIVE_CHILDREN` and killed by the script on a press that stops at once (`_kill_live_children`); the wizard lets the backend end by itself (`_CHILD_STOP_GRACE` after a second press, a third kills at once). With the tools deaf to the press, the main thread's long waits (`as_completed`, a pool's `map`, `Popen.wait`) held the handler until a file completed: the main thread now waits in steps of `_WAIT_TICK` (`_as_completed`, `_future_result`), so a second press stops at once and no file starts after the first. | common, all four backends, wizard | Fixed |
+| 768 | A JPEG/PNG the transcoder exported from a JXL carried the marks but nothing about its pixels: an editor keeps the marks, so a later `--sync` with a newer master or a changed derivative recipe wrote over a retouched export. Each export now records `jxlphoto-pixsum:c1:<md5>` of its coded image (`_coded_image_sum`, in its last metadata write); a run about to write over one whose image data no longer matches refuses that file (`_export_edited`), and `--overwrite` replaces it with a WARNING per file and a recap at the end. No delete gate reads it (#747 stays). | jxl_jpeg_transcoder.py | Fixed |
+| 769 | A writer of `checksums.md5` killed while it held the lock blocked the folder for two minutes. The lock (`<db>.lock`) was the file's existence alone: a writer killed by force left it, and until it was 120 s old (`_MD5_LOCK_STALE_S`) every writer of that folder waited 30 s and dropped its line (fail closed) — a deleting run into that folder took 60 s for 4 JPEGs and deleted none ("KEEP (MD5 not confirmed)"); and two waiters that both judged a lock stale could each delete it, the second deleting the first one's new lock. On Windows the holder now keeps the lock file open with one byte of it locked and a marker in it: a waiter that finds the marker and gets the byte knows the writer is gone and takes the lock over in place (never deleted and created again), and the holder deletes the file only while it carries its own marker. An EMPTY lock whose byte is free (a writer killed between its create and its marker: roughly one kill in four to eight during a hold) is taken over in place once it is older than 10 s (`_MD5_LOCK_EMPTY_S`), under the waiters' 30 s, so no line is dropped; the 120 s rule stays only for an empty lock whose byte is held or cannot be tested (an older version's, a file system without byte locks). A creator refused its own byte for 2 s appends only while the lock is still empty — else another writer took it over: fail closed (the lock fix's review, S1/S2); an append starts on a new line when the file ends without one (a writer killed inside its append). Old code, in every release with the lock file; found by the real-photo battery of the dev2 round (third review, M1/S1). Tests: `tests/test_md5_lock_killed_writer.py`. | jxl_jpeg_transcoder.py | Fixed |
 
 ## Round-97 — Python 3.13's thread for a child's input (2026-11-27)
 

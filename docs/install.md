@@ -134,5 +134,8 @@ You should see: `[✓] cjxl/djxl | [✓] exiftool | [✓] magick | [✓] tifffil
 | `jxl_photo_common.py is missing next to ...` or `jxl_photo_common.py is version ... and ... is ...` | Only some of the files were copied, or files from two releases were mixed | Keep every `.py` file of one release together in the same folder: the five scripts and `jxl_photo_common.py`, which holds the code they share |
 | `ModuleNotFoundError` | Packages in different Python version | Run `python -m pip install tifffile numpy pillow rich imagecodecs` with the Python you run the scripts with |
 | PATH not working | Terminal not restarted | Close and reopen PowerShell completely |
+| The setup says `NOT_AN_EXE` | A `.cmd`/`.bat` shim, for example from a package manager, is on PATH instead of the tool: `where` finds it, but the scripts start `cjxl`, `exiftool`, ... directly and Windows then runs only an `.exe` | Put the folder of the `.exe` itself on PATH (`[p]` in the tool's menu); for ExifTool, remove a shim named `exiftool` that sits before a working `exiftool-k.exe` or `exiftool(-k).exe` |
+| The setup says `PYTHON_FOLDER_COPY` | A copy of the tool sits next to `python.exe`: Windows starts it before anything on PATH, so every script runs it | Move or delete that file by hand if it is not the copy you want (the setup never touches files outside PATH) |
+| The setup says `CURRENT_FOLDER_COPY` | A copy of the tool is in the folder you start the scripts from: a script started there runs it before anything on PATH | Move or delete it by hand, or start the scripts from another folder |
 
 Setup feels heavy? [tiff-workflow](related_projects.md#a-simpler-tiff-only-alternative) needs no libjxl at all.

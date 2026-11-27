@@ -24,7 +24,7 @@ In the wizard the review screen shows the multi-page policy on its own line, and
 
 The encoder's default mode 0 leaves `photo.tif` and `photo.jxl` side by side, and the JXL is newer. A sync decode into that same folder used to overwrite the **original master** with the decode. The decoder now only overwrites TIFFs it wrote itself (they carry its `jxlphoto-src` marker); any other TIFF is **refused** — not decoded over, and its JXL never deleted — and listed at the end of the run. Decode into another folder (`--mode 1`/`3`) or pass `--overwrite` if replacing it is really intended. Details: [decoder README](README_jxl_tiff_decoder.md#original-tiff-masters-are-never-overwritten).
 
-The same goes for a decode you **edited** after decoding it (Photoshop keeps the marker): since v2.8.1 each decode records its pixels, and one whose pixels changed is refused like a master. See [A decode you edited afterwards is not decoded over](README_jxl_tiff_decoder.md#a-decode-you-edited-afterwards-is-not-decoded-over).
+The same goes for a decode you **edited** after decoding it (Photoshop keeps the marker): since v2.8.1 each decode records its pixels, and one whose pixels changed is refused like a master. Since 2.31.1-dev2 the same holds for the JPEG/PNG files the JPEG transcoder exports from a JXL: an export edited afterwards is refused by `--sync` and by a changed recipe, and `--overwrite` replaces it with a warning ([An export you edited is not written over](README_jxl_jpeg_transcoder.md#an-export-you-edited-is-not-written-over)). See [A decode you edited afterwards is not decoded over](README_jxl_tiff_decoder.md#a-decode-you-edited-afterwards-is-not-decoded-over).
 
 ## Lossy is the default: `--distance 0.1`
 

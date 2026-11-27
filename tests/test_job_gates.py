@@ -23,7 +23,7 @@ SCRIPTS = Path(os.environ.get("JXLPHOTO_SCRIPTS_UNDER_TEST") or REPO)
 sys.path.insert(0, str(SCRIPTS))
 import jxl_photo as wp  # noqa: E402
 
-PATHS = ("common", "direct", "manifest", "preset")
+PATHS = ("common", "direct", "manifest", "manifest_outputs", "manifest_in_place", "preset")
 
 
 class _Menu:
@@ -105,7 +105,11 @@ def test_rule_order_is_the_old_order():
     assert [r[0] for r in wp._GATE_RULES] == [
         "ambiguous_delete_flags", "expert_flags_parse", "registry_rules",
         "guard_with_delete", "mode_in_expert_flags", "direct_derivatives",
-        "manifest_derivatives", "manifest_lossless_recovery", "preset_unattended"]
+        "manifest_derivatives", "manifest_lossless_recovery",
+        "manifest_mode7_subfolder", "manifest_output_folder_names",
+        "manifest_source_overlaps", "manifest_output_collisions",
+        "manifest_output_feeds_source", "manifest_in_place_unattended",
+        "preset_unattended"]
 
 
 class _UI:
@@ -132,8 +136,12 @@ def test_the_manifest_lossless_rule_refuses_a_shaped_row(opts, text):
 def test_the_manifest_lossless_rule_only_warns_about_output_icc():
     m = _Menu()
     m.ui = _UI()
+    # The "manifest" path ends with the mode-7 subfolder step (item 3 of
+    # 261127): it needs its context and a menu that answers it.
+    m._manifest_step_mode7_subfolder = lambda wf, *a: True
     ctx = {"origin": "jxl", "dest": "jpeg", "advanced": {},
-           "row_effs": [({}, {"output_icc": "sRGB"})], "resolved_entries": [("a", "x", 1)]}
+           "row_effs": [({}, {"output_icc": "sRGB"})], "resolved_entries": [("a", "x", 1)],
+           "row_opts_all": [{}], "row_markers": [None]}
     wf = _wf(dest_format="jpeg", conversion_type="jxl_to_jpeg_lossless")
     assert wp._job_gates(m, wf, "manifest", **ctx) is False and m.errors == []
     assert "OutputICC is ignored" in m.ui.notes[0]
@@ -182,3 +190,66 @@ def test_execute_workflow_refuses_only_through_the_table_before_the_token():
 def test_the_preset_path_refuses_unattended_only_through_the_table():
     texts = _errors_before(_method("_run_saved_session"), "execute_workflow")
     assert not any("unattended" in t for t in texts), texts
+
+
+_STEPS = ("mode7_subfolder", "output_folder_names", "source_overlaps",
+          "output_collisions", "output_feeds_source", "in_place_unattended")
+
+
+class _StepMenu(_Menu):
+    """Each _manifest_step_* records its name and answers from `answers`."""
+
+    def __init__(self, answers=None):
+        super().__init__()
+        self.calls = []
+        for step in _STEPS:
+            def _f(*a, _s=step):
+                self.calls.append(_s)
+                return (answers or {}).get(_s, True)
+            setattr(self, "_manifest_step_" + step, _f)
+
+
+_OUTPUTS_CTX = {"origin": "jxl", "dest": "jxl", "resolved_entries": [], "row_export": [],
+                "row_effs": [], "analyzer": None, "marker": "_EXPORT",
+                "cross_out_folders": {}}
+
+
+def test_the_manifest_paths_run_their_rules_in_order():
+    m = _StepMenu()
+    assert wp._job_gates(m, {}, "manifest_outputs", **_OUTPUTS_CTX) is False
+    assert m.calls == ["output_folder_names", "source_overlaps",
+                       "output_collisions", "output_feeds_source"]
+    m = _StepMenu({"source_overlaps": False})
+    assert wp._job_gates(m, {}, "manifest_outputs", **_OUTPUTS_CTX) is True
+    assert m.calls == ["output_folder_names", "source_overlaps"]
+    m = _StepMenu({"in_place_unattended": False})
+    assert wp._job_gates(m, {}, "manifest_in_place", any_in_place_recompress=True,
+                         dry_run=False) is True
+    assert m.calls == ["in_place_unattended"]
+
+
+def test_the_manifest_calls_no_step_directly():
+    """Every _manifest_step_* is reached through its _gate_manifest_* rule of
+    _GATE_RULES; _execute_manifest_workflow calls none of them itself."""
+    fn = _method("_execute_manifest_workflow")
+    direct = [n.func.attr for n in ast.walk(fn)
+              if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+              and n.func.attr.startswith("_manifest_step_")]
+    assert direct == [], direct
+    tree = ast.parse((SCRIPTS / "jxl_photo.py").read_text(encoding="utf-8"))
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "InteractiveMenu")
+    steps = [f.name for f in cls.body if isinstance(f, ast.FunctionDef)
+             and f.name.startswith("_manifest_step_")]
+    assert steps
+    rules = {r[2].__name__ for r in wp._GATE_RULES}
+    for step in steps:
+        callers = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for sub in ast.walk(node):
+                    if (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute)
+                            and sub.func.attr == step):
+                        callers.add(node.name)
+        assert len(callers) == 1, (step, callers)
+        (caller,) = callers
+        assert caller.startswith("_gate_manifest_") and caller in rules, (step, caller)

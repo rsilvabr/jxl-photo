@@ -130,7 +130,21 @@
   and PNG groups too, `_label_shared_exports`).
   `checksums.md5` lines are filed per output as it
   lands (staging: when its folder leaves staging; otherwise right AFTER the
-  atomic swap, never before it — #556); a jbrd JXL without its line is
+  atomic swap, never before it — #556). The lock of `checksums.md5`
+  (`<db>.lock`, `_append_checksum_line`) is held on Windows by an open handle
+  with one byte locked and a marker in the file (#769): a waiter that finds
+  the marker and gets the byte knows the writer is gone and takes the lock
+  over IN PLACE — never delete it and create another (two waiters deleted
+  each other's new lock), never delete it without its own marker in it
+  (`_release_checksum_lock(marker=)`); an EMPTY lock whose byte is free (a
+  writer killed before its marker: roughly one kill in four to eight during
+  a hold) is taken over in place once older than 10 s (`_MD5_LOCK_EMPTY_S`,
+  the owner's call: well above the creator's 2 s, below the waiters' 30 s);
+  the 120 s rule stays only for an empty lock whose byte is held or cannot
+  be tested (an older version's writer, no byte locks); a creator refused
+  its own byte for 2 s appends only while the lock file is still empty
+  (else another writer took it over: fail closed); an append starts on a
+  new line when the file ends without one. A jbrd JXL without its line is
   adopted only by a real reconstruction hashed before and after
   (`_adopt_reconstructed_archive`; never in a dry run, which runs no
   subprocess), and an overwrite across such a lineless archive is refused
@@ -150,7 +164,20 @@
   faithful decode embeds exactly that profile, measured) and a master that
   carries `jxlphoto-tifftag` tokens, which no PNG holds (#734). A 16-bit PNG
   export the run did NOT write (skipped) never deletes its master (#747): it
-  may have been retouched since — only an export this run writes does. A
+  may have been retouched since — only an export this run writes does.
+  Since 2.31.1-dev2 (L2) every JPEG/PNG `decode_to_image` writes carries
+  `jxlphoto-pixsum:c1:<md5>` (`_coded_image_sum`: the JPEG's non-APP/COM
+  segments and scans, the PNG's IHDR/PLTE/tRNS/IDAT — bytes ExifTool never
+  rewrites, so the sum rides in the export's LAST metadata write: never add
+  a write after it), and a run about to write over an export whose sum no
+  longer matches refuses that file (`_export_edited`, in the worker); with
+  `--overwrite` it is replaced, never silently (the owner's call): a
+  WARNING per file and `Edited exports replaced (N):` at the end
+  (`_EDITED_REPLACED`, `_log_edited_replaced`; never ERROR). No record =
+  judged as before; cannot compare = refused. Dropped from every copy
+  (`_copy_metadata`, `_derivative_metadata_args`); never written into a JXL
+  (a lossless archive of an export holds the JPEG's own XMP as it is); no
+  delete gate reads it (#747 stays). A
   self-hash line naming other bytes falls back to the reconstruction in
   `_jxl_binds_to_archived_jpeg` (#757), and `--repair-jbrd` re-files it. Its
   ImageMagick route writes into the short `TEMP_DIR` folder and Python moves
@@ -912,7 +939,42 @@ changes first.
   #751, #762: a press waits until the group is done, then the run's handler
   acts). The encoder's planning pools cancel their queued work on the way out
   (#761). The suite's conftest clears the latch and the flag after
-  every test.
+  every test. Since 2.31.1-dev2 (C4) every tool is started in a process
+  group of its own (`_OWN_GROUP`, `CREATE_NEW_PROCESS_GROUP`: Windows starts
+  it with Ctrl+C disabled; ExifTool, which dies of the press all the same,
+  also in a hidden console of its own, `_OWN_CONSOLE` = `+ CREATE_NO_WINDOW`,
+  chosen by `_own_group_for`) and is one of the script's `_LIVE_CHILDREN`
+  (`_tracked_child`); a press that stops at once kills them
+  (`_kill_live_children`: from the #702 handler's second press and from
+  `_ctrl_c_stops_children`, the handler each backend's `__main__`
+  installs). A new owner of a subprocess passes `**_own_group_for(cmd)` and
+  tracks its child; never start the BACKEND that way (the wizard's
+  `_stream_child`: it must hear the press; it lets the backend end by
+  itself, `_CHILD_STOP_GRACE` after a second press, and polls every 0.2 s:
+  presses that come while the main thread waits reach Python's handler as
+  one). `_run_captured` calls `subprocess.run` only for a test's stand-in.
+  A test of a console Ctrl+C runs in a console of its own
+  (`CREATE_NO_WINDOW`) and first calls `SetConsoleCtrlHandler(None, 0)`: the
+  'ignore' is inherited (`tests/test_ctrl_c_console.py`); it waits for its
+  worker threads with a flag, never `Thread.join` (a join a
+  KeyboardInterrupt cuts leaves `is_alive()` False, CPython 3.12). **The
+  main thread never waits for tools in one long wait:** `_as_completed` /
+  `_future_result` (common, waits of `_WAIT_TICK` = 0.25 s) and
+  `_run_captured`'s own wait — on Windows Python runs the SIGINT handler only
+  when the main thread runs Python, and the presses that come during one
+  long wait (`concurrent.futures.as_completed`, `wait`, `result`, a pool's
+  `map`, `Popen.wait`) arrive as ONE call when it returns: a second press did
+  not stop a run, and a file could start after the first (measured
+  2026-11-27, Python 3.12 and 3.13). A new pool is waited for with them
+  (`tests/test_ctrl_c_console.py` pins it: no `as_completed` and no `.map`
+  in the four backends). `_as_completed` is one done-callback per future
+  and a queue read in `_WAIT_TICK` steps — never `concurrent.futures.wait`
+  in a loop: it walks every pending future at each wake-up, and a re-run of
+  20 000 up-to-date files took 126 s instead of 8 (`tests/test_wait_ticks.py`
+  counts the work). A pool waited for outside `_ctrl_c_finishes_the_run` (a
+  planning, a maintenance mode) cancels its queued work when the loop is left
+  (`shutdown(wait=False, cancel_futures=True)`, #761) — `_as_completed` does
+  not do it, a pool's `map` did.
 - **A version probe that does not answer is not "an old cjxl" (#694).**
   `_tool_version` tries twice (`_VERSION_PROBE_TIMEOUTS`, 10 then 60 s) and a
   run whose cjxl version stays unknown warns once (`_warn_if_version_unknown`,
@@ -1226,7 +1288,12 @@ changes first.
   sentence of `docs/install.md` (the same test enforces it). The winner of
   each tool mirrors the scripts: PATH order, and for ExifTool the NAME order
   first (`exiftool`, `exiftool-k`, `exiftool(-k)`); every probe runs with
-  stdin NUL.
+  stdin NUL. A winner is an `.exe` (`_SETUP_STARTABLE_EXTS`, `_startable`:
+  CreateProcess adds `.exe` only — a `.cmd` shim is `NOT_AN_EXE`; the
+  suite's fixture widens it for its `.cmd` fakes), and a copy next to the
+  running python.exe or in the current folder, which Windows starts before
+  the PATH, is a finding without a fix (`_prepath_findings`): only PATH
+  entries are ever written.
 - **Wrapper options live in `REGISTRY`** (`jxl_photo.py`, `# === OPTION
   REGISTRY ===`). Both the direct run and every manifest entry build the
   child's argv through `build_child_cmd`; never add a flag to a builder by
@@ -1325,9 +1392,12 @@ changes first.
   confirmations stay in `_confirm_archive_mode`/`_confirm_in_place_replace`.
   The manifest's refusals that need the run's own intermediate state (the
   mode-7 subfolder it derives, the collision scan's output folders) or ask
-  a question are `_manifest_step_*` methods, called in order by
-  `_execute_manifest_workflow` (`tests/test_manifest_steps.py` pins each one
-  and the order); never an inline refusal there either.
+  a question are `_manifest_step_*` methods, each reached through its
+  `_gate_manifest_*` rule (paths `manifest`, `manifest_outputs`,
+  `manifest_in_place`, called where each state exists;
+  `tests/test_manifest_steps.py` pins each one and the order,
+  `tests/test_job_gates.py` that no step is called directly); never an
+  inline refusal there either.
 
 ## Verification
 - **ALWAYS test with hostile paths** (owner's rule, 2026-10-17: "SEMPRE da erro").

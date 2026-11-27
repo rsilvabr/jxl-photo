@@ -15,7 +15,7 @@ import subprocess, os, platform, tempfile, threading, struct, logging, sys, shut
 import math
 import re
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import time  # noqa: F401 (tests reach the clock through the script: mod.time, AGENTS.md)
 from typing import Any, Dict, Optional
@@ -29,7 +29,7 @@ from PIL import Image
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.31.1-dev1"
+TOOLKIT_VERSION = "2.31.1-dev2"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 
@@ -130,6 +130,7 @@ _abort_lock = threading.Lock()
 _abort_reason = None
 _ctrl_c_seen = False        # Ctrl+C pressed during this run (#702)
 _ctrl_c_armed = True        # False while a planning still stops at once
+_LIVE_CHILDREN = {}         # the tools running now, id -> Popen (C4: _kill_live_children)
 
 
 # (size, mtime_ns) of every source as this run was about to READ it, keyed by
@@ -208,6 +209,8 @@ def _signal_abort(*a, **k): return _common._signal_abort(_G, *a, **k)
 def _ctrl_c_finishes_the_run(*a, **k): return _common._ctrl_c_finishes_the_run(_G, *a, **k)
 def _end_if_interrupted(*a, **k): return _common._end_if_interrupted(_G, *a, **k)
 def _interrupted(*a, **k): return _common._interrupted(_G, *a, **k)
+_as_completed = _common._as_completed
+_future_result = _common._future_result
 
 
 def _abort_if_disk_full(*a, **k): return _common._abort_if_disk_full(_G, *a, **k)
@@ -4154,7 +4157,7 @@ def _mark_sync_same_bytes(items: list, dry_run: bool) -> int:
         with ThreadPoolExecutor(max_workers=min(_SYNC_HASH_THREADS, len(wanted))) as pool:
             futures = {pool.submit(_file_content_id, cands[n][0]): n for n in wanted}
             try:
-                for done, fut in enumerate(as_completed(futures), 1):
+                for done, fut in enumerate(_as_completed(futures), 1):
                     try:
                         digests[futures[fut]] = fut.result()
                     except OSError:
@@ -5842,7 +5845,7 @@ def process_group(group_items: list, workers: int, mode: int = 0):
         futures = {ex.submit(convert_one, t, w, f, p, th, sft, spl, g, gt):
                    (t, w, f, p, th, sft, spl, g, gt)
                    for t, w, f, p, th, sft, spl, g, gt in tasks}
-        for fut in as_completed(futures):
+        for fut in _as_completed(futures):
             task = futures[fut]
             try:
                 result = fut.result()
@@ -6150,7 +6153,7 @@ def _delete_checked_sources(results_by_tiff, tasks, moved_finals, use_staging, c
                 _check = checks.get((tiff_key, _page, r[2]))
                 try:
                     if _check is not None:
-                        ok_v, detail = _check.result()
+                        ok_v, detail = _future_result(_check)
                     else:
                         ok_v, detail = _verify_roundtrip_page(
                             Path(tiff_key), _page, Path(r[2]), _distance_for(tiff_key))
@@ -7561,7 +7564,7 @@ def main():
         futures = {pool.submit(_plan_one, t): i for i, t in enumerate(tiffs)}
         done_count = 0
         try:
-            for fut in as_completed(futures):
+            for fut in _as_completed(futures):
                 idx = futures[fut]
                 try:
                     results_by_index[idx] = fut.result()
@@ -8038,6 +8041,7 @@ def main():
         sys.exit(1)
 
 if __name__ == "__main__":
+    _common._ctrl_c_stops_children(_G)      # C4
     if "--serve" in sys.argv[1:]:
         sys.exit(_common._serve(_G, main, sys.argv[1:]))
     try:
