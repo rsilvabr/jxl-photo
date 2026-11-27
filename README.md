@@ -181,21 +181,25 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 | Document | Contents |
 |----------|----------|
+| **Getting started** | |
 | [docs/install.md](docs/install.md) | Installing the Python version step by step: downloads, PATH, troubleshooting |
 | [docs/README_jxl_tools.md](docs/README_jxl_tools.md) | The interactive wrapper |
 | [docs/commands_and_settings.md](docs/commands_and_settings.md) | Everyday commands of each script, recommended settings, what a re-run redoes |
 | [docs/behavior_and_limitations.md](docs/behavior_and_limitations.md) | Defaults, limits and viewer quirks worth knowing before a large batch |
 | [docs/related_projects.md](docs/related_projects.md) | The Windows program, Explorer thumbnails, the TIFF-only alternative, the backup script |
+| **The scripts, one by one** | |
 | [docs/README_jxl_tiff_encoder.md](docs/README_jxl_tiff_encoder.md) | TIFF → JXL encoding |
 | [docs/README_jxl_tiff_decoder.md](docs/README_jxl_tiff_decoder.md) | JXL → TIFF decoding |
 | [docs/README_jxl_jpeg_transcoder.md](docs/README_jxl_jpeg_transcoder.md) | JPEG ↔ JXL / JXL → PNG |
 | [docs/README_jxl_recompressor.md](docs/README_jxl_recompressor.md) | JXL → JXL recompression |
 | [docs/README_manifest.md](docs/README_manifest.md) | Manifests: every column, what can be omitted, recipes, and manifest → preset → Task Scheduler |
+| **Background** | |
 | [docs/metadata_written.md](docs/metadata_written.md) | Every field the toolkit writes into your photos, and what it reveals |
 | [docs/why_jxl.md](docs/why_jxl.md) | Why JPEG XL: sizes, the grain tests and the measurements behind the settings |
 | [docs/file_sizes.md](docs/file_sizes.md) | File sizes per camera and for film scans, and what effort 9 buys |
 | [docs/performance.md](docs/performance.md) | How the toolkit stays fast on large libraries, in short; every change and its measurements in [performance_details.md](docs/performance_details.md) |
 | [docs/jxl_color_internals.md](docs/jxl_color_internals.md) | Deep dive: XYB, ICC blobs vs primaries, troubleshooting |
+| **Releases** | |
 | [docs/whats_new.md](docs/whats_new.md) | What changed in each release, in a few lines |
 | [docs/upgrading.md](docs/upgrading.md) | What to check when you upgrade from an older version |
 | [docs/known_issues.md](docs/known_issues.md) | The bugs that changed files an earlier version wrote: which versions, how to find those files, what to do |
