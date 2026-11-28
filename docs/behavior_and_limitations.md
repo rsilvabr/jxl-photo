@@ -46,6 +46,10 @@ The default is **near-lossless, not lossless**. At `d=0.1` a 45 MP file drops to
 
 At 0.05 and above both versions write nearly the same file (0.12 is ~1–2% bigger and ~0.2 dB better). Since v2.2.0 the scripts read the installed cjxl version: the dead-zone warning and the recompressor's "same distance" check use 0.05 on libjxl 0.12 and later, and 0.01 before it. libjxl 0.13.0 keeps the 0.05 floor and, at the settings of the size table below, writes byte-identical files to 0.12.0 (measured 2026-11-14).
 
+## Above distance 0.1, --delete-source keeps the TIFF
+
+Above a distance, a JXL is a smaller copy of the photo, not an archive of its TIFF. The encoder's `MASTER_MAX_DISTANCE = 0.1` (a setting at the top of `jxl_tiff_encoder.py`, never in the overlay) is the highest distance at which `--delete-source` deletes a TIFF; a TIFF encoded above it — by its own class: `--distance`, `--scan-distance` or `--eight-bit-distance` — is kept, with a warning, and its JXL is written as usual. `--delete-skipped` judges an existing output by the distance its own record names. See [the encoder's page](README_jxl_tiff_encoder.md#a-jxl-above-distance-01-does-not-replace-its-tiff-master_max_distance).
+
 ## A JPEG archive is rebuilt bit for bit by every libjxl
 
 A lossless JPEG → JXL archive (`jbrd`) must give back the original JPEG with any

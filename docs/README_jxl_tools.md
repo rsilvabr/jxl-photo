@@ -523,7 +523,9 @@ twice, which trains you to answer it twice):
 1. a plain yes/no, so a mis-keyed `D` costs nothing;
 2. the concrete consequence — **how many files, from which folder, to where**. This
    is the one that catches a wrong folder, because the count is visible;
-3. the **HHMM token** at execution time. A dry run never asks for it.
+3. the **HHMM token** at execution time. A dry run never asks for it. Before
+   the token of a TIFF → JXL job, the wizard notes which TIFFs the encoder will
+   keep because their distance is above its `MASTER_MAX_DISTANCE`.
 
 **Already-converted originals** (offered inside `[D]`): sources whose JXL already
 exists are reported as SKIP and normally **kept**, which means an archive

@@ -303,7 +303,7 @@ def test_o4_a_failed_jxl_never_keeps_its_final_name_when_the_rename_fails(
                                                                  dtype=np.uint16),
                      photometric="rgb")
     monkeypatch.setattr(enc, "VERIFY_LOSSY_MIN_PSNR", 500.0)
-    args = [src, out, "--mode", "0", "--distance", "1", "--workers", "1", "--no-preflight",
+    args = [src, out, "--mode", "0", "--distance", "0.05", "--workers", "1", "--no-preflight",
             "--delete-source", "--delete-confirm-off"]
     assert _encoder_main(monkeypatch, enc, *args) == 1
     err = out / "DSC_0001 (2)_jxlphoto-error.jxl"

@@ -39,7 +39,7 @@ import numpy as np
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.31.1-dev2"
+TOOLKIT_VERSION = "2.31.1-dev3"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 
@@ -770,8 +770,8 @@ _OVERLAY_SAFETY_SETTINGS = frozenset({
     "DELETE_SOURCE", "DELETE_CONFIRM", "DELETE_SKIPPED", "DELETE_SOURCE_REQUIRE_MD5",
     "STORE_MD5", "OVERWRITE_GUARD", "VERIFY_ROUNDTRIP", "VERIFY_LOSSY_MIN_MEAN_RATIO",
     "VERIFY_LOSSY_MIN_PSNR", "ALLOW_INCOMPLETE_GROUPS", "PROVENANCE_CHECK",
-    "ADOPT_SCAN", "ADOPT_MIN_PSNR", "OVERWRITE", "STRIP_METADATA", "AUTO_REPAIR_JBRD",
-    "EMBED_ICC_IN_JXL"})
+    "ADOPT_SCAN", "ADOPT_MIN_PSNR", "MASTER_MAX_DISTANCE", "OVERWRITE", "STRIP_METADATA",
+    "AUTO_REPAIR_JBRD", "EMBED_ICC_IN_JXL"})
 
 
 def _settings_overlay_path(*a, **k): return _common._settings_overlay_path(_G, *a, **k)

@@ -401,6 +401,8 @@ def pick_fixtures(fx: Path):
 def encoder_checks(A1, A2, A3, pool_jxl):
     section("Encoder (TIFF -> JXL)")
     FAST = ["--distance", "1", "--effort", "3", "--workers", "8", "--no-preflight"]
+    # within MASTER_MAX_DISTANCE: a run that must delete
+    MASTER = ["--distance", "0.05", "--effort", "3", "--workers", "8", "--no-preflight"]
 
     origins = origins_of(pool_jxl / A1.with_suffix(".jxl").name)
     check("a clean 16-bit TIFF master records jxlphoto-origin:tiff16",
@@ -443,11 +445,29 @@ def encoder_checks(A1, A2, A3, pool_jxl):
 
     e = B / "e_own"
     cp(A1, e / "own.tif")
-    run("enc_own_encode", [ENC, e, "--mode", "8"] + FAST)
+    run("enc_own_encode", [ENC, e, "--mode", "8"] + MASTER)
     rc, _ = run("enc_own_delete", [ENC, e, "--mode", "8", "--sync", "--delete-source",
-                                   "--delete-skipped", "--delete-confirm-off"] + FAST)
+                                   "--delete-skipped", "--delete-confirm-off"] + MASTER)
     check("--delete-skipped: source of its OWN archive is deleted",
           rc == 0 and not (e / "own.tif").exists() and (e / "own.jxl").exists(), f"rc={rc}")
+
+    # MASTER_MAX_DISTANCE: above it a JXL is not an archive of its TIFF.
+    e = B / "e_limit"
+    cp(A1, e / "big.tif")
+    rc, out = run("enc_limit_delete", [ENC, e, "--mode", "8", "--delete-source",
+                                       "--delete-confirm-off"] + FAST)
+    check("above MASTER_MAX_DISTANCE: the TIFF is kept, its JXL written, no error",
+          rc == 0 and (e / "big.tif").exists() and (e / "big.jxl").exists()
+          and "MASTER_MAX_DISTANCE" in out and "| ERROR |" not in out, f"rc={rc}")
+    rc, out = run("enc_limit_skipped", [ENC, e, "--mode", "8", "--sync", "--delete-source",
+                                        "--delete-skipped", "--delete-confirm-off"] + MASTER)
+    check("--delete-skipped: an output recorded above MASTER_MAX_DISTANCE keeps its TIFF",
+          rc == 0 and (e / "big.tif").exists() and "was encoded at distance 1" in out,
+          f"rc={rc}")
+    rc, out = run("enc_limit_overwrite", [ENC, e, "--mode", "8", "--overwrite",
+                                          "--delete-source", "--delete-confirm-off"] + MASTER)
+    check("re-encoded within the limit, the TIFF is deleted",
+          rc == 0 and not (e / "big.tif").exists() and (e / "big.jxl").exists(), f"rc={rc}")
 
     e = B / "e_foreign"
     cp(A2, e / "photo.tif")

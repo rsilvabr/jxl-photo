@@ -39,6 +39,7 @@ READERS = [
     ("jxl_tiff_encoder", "_read_source_markers_batch", "Provenance markers"),
     ("jxl_tiff_encoder", "_read_page_markers_batch", "Page markers"),
     ("jxl_tiff_encoder", "_read_group_markers_batch", "Group markers"),
+    ("jxl_tiff_encoder", "_read_encode_distance_batch", "Encode distances"),
     ("jxl_tiff_decoder", "_read_source_markers_batch", "Provenance markers"),
     ("jxl_tiff_decoder", "_xmp_icc_jxls_batch", "Profile markers"),
     ("jxl_tiff_decoder", "_read_multipage_markers_batch", "Multipage markers"),

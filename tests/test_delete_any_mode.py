@@ -512,6 +512,9 @@ def _skip_run(tmp_path, monkeypatch, *, delete_skipped, integrity=True,
                         lambda paths: {str(p): {"src": enc._source_path_id(src),
                                                 "srcsum": enc._file_content_id(src)}
                                        for p in paths})
+    # the fixture's output is a lossless archive (MASTER_MAX_DISTANCE)
+    monkeypatch.setattr(enc, "_read_encode_distance_batch",
+                        lambda paths: {str(p): 0.0 for p in paths})
     if verify is not None:
         monkeypatch.setattr(enc, "_verify_roundtrip_page",
                             lambda *a, **k: (verify, "stubbed"))

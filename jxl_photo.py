@@ -28,7 +28,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.31.1-dev2"
+TOOLKIT_VERSION = "2.31.1-dev3"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 
@@ -2872,6 +2872,49 @@ def _eight_bit_effective(value, up_to, distance):
     if value == "auto":
         return 0.0 if float(distance) <= float(up_to) else float(distance)
     return float(value)
+
+
+def _master_limit_note(workflow) -> Optional[str]:
+    """The note printed before the HHMM token of a TIFF → JXL deleting run:
+    which classes of TIFF this run encodes above the encoder's
+    MASTER_MAX_DISTANCE (their JXL is written, the TIFF kept). The limit is
+    the child's own setting — no setting, the limit off (None) or the encoder
+    not importable: no note, never a copy of its value."""
+    if workflow.get('origin_format') != 'tiff' or workflow.get('dest_format') != 'jxl':
+        return None
+    limit = _child_number_setting('jxl_tiff_encoder', 'MASTER_MAX_DISTANCE', None)
+    if limit is None:
+        return None
+    # The distances the run gets: the expert flags first (they come last on
+    # the child's command line, so they win — the child's own parse), then the
+    # job's answers, then the child's settings (review N1: a job whose
+    # distance is None runs at the encoder's CJXL_DISTANCE).
+    flags = _child_flags('tiff', 'jxl', workflow.get('expert_flags'))
+    try:
+        limit = float(limit)
+        d = getattr(flags, 'distance', None)
+        if d is None:
+            d = _workflow_or_child(workflow, 'distance', 'jxl_tiff_encoder')
+        d = float(d)
+        adv = workflow.get('advanced_options') or {}
+        sd = (getattr(flags, 'scan_distance', None) or adv.get('scan_distance')
+              or _child_scan_distance())
+        scan = d if str(sd).strip().lower() == "same" else float(sd)
+        eb_child, up_to = _child_eight_bit()
+        eb = (getattr(flags, 'eight_bit_distance', None) or adv.get('eight_bit_distance')
+              or eb_child)
+        eb = str(eb).strip().lower() if str(eb).strip().lower() in ("auto", "same") else eb
+        eight = _eight_bit_effective(eb, up_to, d)
+    except (TypeError, ValueError):
+        return None
+    over = [f"{label} (distance {v:g})"
+            for label, v in (("TIFFs", d), ("film scans", scan), ("8-bit TIFFs", eight))
+            if v > limit]
+    if not over:
+        return None
+    return (f"Note: a TIFF encoded above distance {limit:g} is not deleted "
+            f"(MASTER_MAX_DISTANCE in jxl_tiff_encoder.py): {', '.join(over)}. "
+            f"Its JXL is written and the TIFF stays.")
 
 
 def _mode_title(mode, marker: str = "_EXPORT") -> str:
@@ -10816,6 +10859,9 @@ class InteractiveMenu:
             if _in_place_recompress and not (_flag_delete or _adv_delete):
                 _confirmed = self._confirm_in_place_replace()
             else:
+                _limit_note = _master_limit_note(workflow)
+                if _limit_note:
+                    self.ui.markup(f"[yellow]{_rich_safe(_limit_note)}[/yellow]", _limit_note)
                 _confirmed = self._confirm_archive_mode()
             if not _confirmed:
                 return False

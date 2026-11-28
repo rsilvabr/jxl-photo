@@ -343,7 +343,7 @@ def test_ee_blob_master_verify_names_the_real_reason(tmp_path):
     tifffile.imwrite(str(tif), _gradient(), photometric="rgb", metadata=None,
                      extratags=[(34675, "B", len(icc), icc, False)])
     r = _run("jxl_tiff_encoder.py", src, tmp_path / HOSTILE / "16B_JXL blob", "--mode", "0",
-             "--distance", "1", "--workers", "1", "--icc-png-strategy", "always",
+             "--distance", "0.05", "--workers", "1", "--icc-png-strategy", "always",
              "--delete-source", "--delete-confirm-off", "--no-preflight", check=False)
     log = r.stdout + r.stderr
     assert tif.exists(), "the TIFF of an unverifiable master was deleted"

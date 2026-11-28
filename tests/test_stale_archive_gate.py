@@ -112,14 +112,14 @@ def test_encoder_keeps_a_tiff_replaced_since_its_archive(tmp_path):
     lib = tmp_path / "lib"
     _tiff(lib / "a.tif", 1)
     _tiff(lib / "b.tif", 2)
-    r = _run(ENCODER, lib, "--mode", "0", "--distance", "1", "--effort", "3",
+    r = _run(ENCODER, lib, "--mode", "0", "--distance", "0.05", "--effort", "3",
              "--no-preflight")
     assert r.returncode == 0, _log(r)
     assert (lib / "a.jxl").exists() and (lib / "b.jxl").exists(), _log(r)
 
     _tiff(lib / "a.tif", 99)                 # a new version, same path...
     _age(lib / "a.tif", lib / "a.jxl")       # ...older than its archive
-    r = _run(ENCODER, lib, "--mode", "0", "--distance", "1", "--effort", "3",
+    r = _run(ENCODER, lib, "--mode", "0", "--distance", "0.05", "--effort", "3",
              "--no-preflight", *DELETE)
     assert r.returncode == 0, _log(r)
     assert (lib / "a.tif").exists(), (

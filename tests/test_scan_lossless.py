@@ -208,7 +208,7 @@ def test_mode8_deletes_both_sources_each_verified_at_its_own_distance(tmp_path):
     _tiff(d / "neg.tif", "SilverFast 8.8.0", seed=5)
     _tiff(d / "photo.tif", "Capture One 23", seed=6)
     _run(tmp_path, "jxl_tiff_encoder.py", tmp_path / HOSTILE, "--mode", "8",
-         "--distance", "1", "--effort", "3", "--no-preflight", "--delete-source",
+         "--distance", "0.05", "--effort", "3", "--no-preflight", "--delete-source",
          "--delete-confirm-off", "--verify-roundtrip")
     assert sorted(p.name for p in d.iterdir()) == ["neg.jxl", "photo.jxl"]
 

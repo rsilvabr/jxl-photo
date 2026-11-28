@@ -380,7 +380,7 @@ def test_701_a_failed_check_in_a_deleting_run_is_an_error_and_renames_the_jxl(
     tif = src / "DSC_0001 (2).tif"
     _rgb16_tiff(tif)
     monkeypatch.setattr(enc, "VERIFY_LOSSY_MIN_PSNR", 500.0)
-    code = _encoder_main(monkeypatch, src, out, "--mode", "0", "--distance", "1",
+    code = _encoder_main(monkeypatch, src, out, "--mode", "0", "--distance", "0.05",
                          "--workers", "1", "--no-preflight", "--delete-source",
                          "--delete-confirm-off")
     assert code == 1
@@ -389,7 +389,7 @@ def test_701_a_failed_check_in_a_deleting_run_is_an_error_and_renames_the_jxl(
     assert (out / "DSC_0001 (2)_jxlphoto-error.jxl").exists()
     assert dec.find_jxls_recursive(out) == []       # never a source
     monkeypatch.setattr(enc, "VERIFY_LOSSY_MIN_PSNR", 40.0)
-    code = _encoder_main(monkeypatch, src, out, "--mode", "0", "--distance", "1",
+    code = _encoder_main(monkeypatch, src, out, "--mode", "0", "--distance", "0.05",
                          "--workers", "1", "--no-preflight")
     assert code == 0 and (out / "DSC_0001 (2).jxl").exists()    # encoded again
 
@@ -988,7 +988,7 @@ def test_s2_a_check_that_could_not_run_does_not_rename_the_master(tmp_path, monk
 
     monkeypatch.setattr(enc, "_decode_jxl_for_verify", killed)
     out = tmp_path / HOSTILE / "JXL"
-    _encoder_main(monkeypatch, src, out, "--mode", "0", "--distance", "1", "--effort", "1",
+    _encoder_main(monkeypatch, src, out, "--mode", "0", "--distance", "0.05", "--effort", "1",
                   "--workers", "1", "--no-preflight", "--delete-source", "--delete-confirm-off")
     assert (src / "DSC_0001 (2).tif").exists()
     assert (out / "DSC_0001 (2).jxl").exists()
@@ -1129,7 +1129,7 @@ def test_701_every_failing_page_of_a_multi_page_tiff_is_renamed(tmp_path, monkey
             w.write(rng.integers(0, 65535, (64, 96, 3), dtype=np.uint16), photometric="rgb")
     monkeypatch.setattr(enc, "VERIFY_LOSSY_MIN_PSNR", 500.0)
     out = tmp_path / HOSTILE / "JXL"
-    code = _encoder_main(monkeypatch, src, out, "--mode", "0", "--distance", "1",
+    code = _encoder_main(monkeypatch, src, out, "--mode", "0", "--distance", "0.05",
                          "--effort", "1", "--workers", "1", "--no-preflight",
                          "--delete-source", "--delete-confirm-off")
     assert code == 1

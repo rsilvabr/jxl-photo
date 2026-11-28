@@ -11,6 +11,25 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
+## v2.31.1-dev3 (development version, 2026-11-28): --delete-source keeps a TIFF encoded above distance 0.1
+
+An existing `--delete-source` command line of the TIFF encoder at a distance
+above 0.1 now keeps those TIFFs, and says so (a `KEEP source` line per TIFF
+and one line at the end; no error, same exit code). The same for
+`--scan-distance` and `--eight-bit-distance` above 0.1, and for
+`--delete-skipped` over outputs written above 0.1 (at any step of their
+encode record: one encoded at 1 and recompressed at 0.05 since still counts
+as 1). The JXLs are written as before, and nothing earlier versions wrote is
+wrong.
+
+What to do: nothing — or lower the distance to delete such TIFFs (`--overwrite`
+for the ones already encoded), or, if a high-distance JXL really is meant to
+replace its TIFF, raise `MASTER_MAX_DISTANCE` at the top of
+`jxl_tiff_encoder.py` (`None` = the old behaviour). See
+[the encoder's page](README_jxl_tiff_encoder.md#a-jxl-above-distance-01-does-not-replace-its-tiff-master_max_distance).
+
+---
+
 ## v2.31.0 (from v2.30.2): what to check
 
 Coming from v2.30.2 or earlier, every v2.31.0 section below applies; each is

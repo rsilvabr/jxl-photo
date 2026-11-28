@@ -54,7 +54,26 @@
   20 dB), and a `DateTimeOriginal`/`SubSecTimeOriginal`/`ImageUniqueID` both
   files carry that differs refuses it first (`_capture_identity_mismatch`). A
   #701 rename that fails tries `<stem> (n)_jxlphoto-error.jxl`, never over a
-  file, then deletes the failed JXL (`_set_failed_output_aside`, #741)
+  file, then deletes the failed JXL (`_set_failed_output_aside`, #741).
+  `MASTER_MAX_DISTANCE` (2.31.1-dev3, the owner's call): above it a JXL is
+  not an archive — `--delete-source` keeps the TIFF (WARNING, never ERROR;
+  `_master_limit_reasons`, read by `_delete_checked_sources` after the
+  provenance of a skipped output and before the pixel check, which
+  `_check_worth_starting` never starts for it); judged per class
+  (`_distance_for`); a skipped output by the HIGHEST `cjxl d=` of its OWN
+  whole chain, never the last nor the newest History record only
+  (`_read_encode_distance_batch` → `_chain_max_distance`: every History
+  entry + dc:Description + Software; a d=1 master recompressed at 0.05, or at
+  0 with `--encode-tag off`, is a d=1 image; `False` = cannot tell — also an
+  entry that does not parse — = keep, `None` = no entry anywhere = keep unless
+  `_jxl_is_lossless`); an explicit `--verify-roundtrip` in a deleting run
+  still checks the pages of a TIFF it keeps in `convert_one`, JP-20's code
+  and lines (`_verify_page_here`, `_VERIFY_ABOVE_LIMIT`), and the gate checks
+  the fresh pages of a source a skipped page keeps
+  (`_limit_check_fresh_pages`); a safety setting, in
+  `_OVERLAY_SAFETY_SETTINGS` of the four; the JXL keeps `jxlphoto-src`/`srcsum`
+  and is never a derivative; the wizard only notes it (`_master_limit_note`,
+  the child's setting, no literal)
 - `jxl_tiff_decoder.py` — JXL → TIFF (uses `djxl`). Also accepts
   `--exclude-folders` (same semantics as the encoder's). Smart sync never
   overwrites a TIFF that lacks its own `jxlphoto-src` marker (an original

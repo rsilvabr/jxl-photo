@@ -227,6 +227,13 @@ DELETE_SOURCE = False
 # default since v2.18.0) — decodes back to the source pixels.
 # WARNING: irreversible. Only enable after testing on a small batch first.
 
+MASTER_MAX_DISTANCE = 0.1
+# [DELETE_SOURCE only] The highest distance at which a JXL may REPLACE its
+# TIFF. A TIFF encoded above it is never deleted by --delete-source: its JXL
+# is written as usual (same markers, same record), but it is a smaller copy,
+# not an archive of the TIFF. Judged per class (--distance, --scan-distance,
+# --eight-bit-distance). None = no limit. Not in the overlay, no flag.
+
 # — Safety (DELETE_SOURCE, any mode) —
 DELETE_CONFIRM = True
 # True  → require interactive confirmation before deleting source files
@@ -248,6 +255,43 @@ deletes in other modes now — [upgrading](upgrading.md#coming-from-v191-or-earl
 The confirmation is only charged when the plan can actually delete something: a
 re-run of an already-archived folder produces only skips, deletes nothing and
 exits `0` without a prompt.
+
+#### A JXL above distance 0.1 does not replace its TIFF (MASTER_MAX_DISTANCE)
+
+Above a distance, a JXL is a smaller copy of the photo, not an archive of the
+TIFF. `MASTER_MAX_DISTANCE = 0.1` (a setting at the top of the script) is the
+highest distance at which `--delete-source` may delete a TIFF:
+
+- A TIFF encoded above it is **kept**. Its JXL is written as usual, with the
+  same markers (`jxlphoto-src`/`jxlphoto-srcsum`) and the same encode record;
+  the log has a `KEEP source (… above MASTER_MAX_DISTANCE …)` line for it, a
+  warning at the start of the run and one line at the end. It is never an
+  error, and the exit code does not change.
+- Each TIFF is judged by the distance of its own class: `--distance`,
+  `--scan-distance` (film scans) or `--eight-bit-distance` (8-bit TIFFs). In a
+  run at `--distance 1`, the film scans — lossless by default — are still
+  deleted; the other TIFFs are kept.
+- With `--delete-skipped`, an output that already exists is judged by the
+  distance its OWN encode record names — the highest `cjxl d=` of its whole
+  chain (every `xmpMM:History` entry, `dc:Description`, `Software`), not the
+  last one and not this run's distance: a master encoded at d=1 and
+  recompressed in place at 0.05, or lossless with `--encode-tag off`, is
+  still a d=1 image. An output whose record cannot be read, or has an entry
+  that does not parse, keeps its TIFF; an output with no record anywhere
+  (`--encode-tag off` from the start) keeps it unless it is lossless.
+- `--verify-roundtrip` typed with `--delete-source`: a TIFF kept by the limit
+  never reaches the delete gate's pixel check, so its pages are checked as
+  without `--delete-source` — before each takes its final name, with the same
+  `>Round-trip verified page N` log line; a page that fails is an error and
+  gets no JXL. The TIFF is still kept. Without the flag (the setting
+  `VERIFY_ROUNDTRIP` alone) such a TIFF is not decoded.
+
+Why 0.1: it is the shipped `--distance`, and colour grain stays identical only
+up to d=0.1 (measured 2026-11-05). To change it, edit the setting in the
+script (`None` = no limit, as before); it is a safety setting, so the settings
+overlay never changes it, and there is no flag for it. To delete such a TIFF
+after all, encode it again at a distance within the limit with `--overwrite
+--delete-source`.
 
 
 
@@ -473,6 +517,9 @@ Options:
                   destination and verified. Works in EVERY mode. IRREVERSIBLE.
                   A TIFF changed on disk since this run read it (re-exported
                   during a long batch) is KEPT: its new version was never archived
+                  A TIFF encoded above MASTER_MAX_DISTANCE (a setting at the top
+                  of the script) is kept: its JXL is written, but it is not an
+                  archive of the TIFF.
   --provenance path|content|adopt
                   [with --delete-source, modes 2/4/5/6/7] Those modes DROP folder
                   structure, so two files with the same name in different folders
@@ -568,7 +615,8 @@ Options:
                   re-encode, or stamp it once with --provenance adopt in a
                   folder-collapsing mode. Pair it with --verify-roundtrip as
                   well: the marker proves the pairing, the round-trip proves
-                  the pixels
+                  the pixels. An output recorded above MASTER_MAX_DISTANCE, or
+                  whose distance cannot be told, keeps its TIFF.
   --verify-roundtrip
                   Decode each JXL and compare it with its TIFF page.
                   --distance 0: the pixels must match exactly. Lossy: a
@@ -581,7 +629,9 @@ Options:
                   one is left as it was). About a fifth more time on a TIFF run
                   (+18 % measured on 69 real TIFFs). Until v2.30.x the flag did
                   nothing without --delete-source.
-                  With --delete-source: the same check gates the deletion.
+                  With --delete-source: the same check gates the deletion (a
+                  TIFF kept by MASTER_MAX_DISTANCE is checked page by page, as
+                  without --delete-source).
                   A JXL this run wrote that FAILS it is an error of the run
                   (exit 1, since v2.31.0-rc5): its TIFF is kept and the JXL
                   stays beside it as <name>_jxlphoto-error.jxl, never under its
@@ -704,7 +754,7 @@ Options:
 |------|---------|
 | `0` | Success (all files converted or legitimately skipped) |
 | `1` | One or more files failed |
-| `2` | Aborted (e.g. duplicate output destinations, invalid arguments) |
+| `2` | Aborted (e.g. duplicate output destinations, invalid arguments, a `MASTER_MAX_DISTANCE` that is not a number from 0 to 25 or `None`) |
 | `3` | User declined the delete-source confirmation |
 | `130` | Interrupted with Ctrl+C: no file started after it, the files in progress finished, the summary printed (a second Ctrl+C stops at once). Since 2.31.1-dev2 the codecs do not receive the Ctrl+C: the files in progress really finish. Ctrl+Break, or closing the window, still stops everything at once. |
 

@@ -45,7 +45,7 @@ import zlib
 from datetime import datetime
 from pathlib import Path
 
-TOOLKIT_VERSION = "2.31.1-dev2"
+TOOLKIT_VERSION = "2.31.1-dev3"
 
 
 class Script:

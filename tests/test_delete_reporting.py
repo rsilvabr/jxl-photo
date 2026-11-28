@@ -149,6 +149,9 @@ def test_mixed_source_is_not_labelled_already_archived(tmp_path, monkeypatch, ca
                         lambda paths: {str(p): {"src": enc._source_path_id(src),
                                                 "srcsum": enc._file_content_id(src)}
                                        for p in paths})
+    # the fixture's output is a lossless archive (MASTER_MAX_DISTANCE)
+    monkeypatch.setattr(enc, "_read_encode_distance_batch",
+                        lambda paths: {str(p): 0.0 for p in paths})
     monkeypatch.setattr(
         enc, "convert_one",
         lambda t, w, f, p=0, *a, **k: (((str(t), p), "skipped", str(f), None)

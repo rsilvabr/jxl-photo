@@ -29,7 +29,7 @@ from PIL import Image
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.31.1-dev2"
+TOOLKIT_VERSION = "2.31.1-dev3"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 
@@ -669,6 +669,23 @@ VERIFY_LOSSY_MIN_PSNR = 20.0
 # turned to noise sits at 5-15 dB. The gap is wide, so this rejects
 # catastrophes without ever second-guessing a legitimate lossy encode.
 
+MASTER_MAX_DISTANCE = 0.1
+# [DELETE_SOURCE only] The highest distance at which a JXL may REPLACE its
+# TIFF. A TIFF encoded above it is never deleted by --delete-source: its JXL
+# is written as usual (same markers, same record), but it is a smaller copy,
+# not an archive of the TIFF. Compared with the distance of each TIFF's own
+# class (--distance, --scan-distance, --eight-bit-distance); with
+# --delete-skipped, with the distance the existing output records (the
+# highest "cjxl d=" of its encode record: its pixels are no better than the
+# worst encode they went through) — an output whose distance cannot be told
+# keeps its TIFF, unless it is lossless. With --verify-roundtrip typed, a
+# page of a TIFF kept by this limit is still checked before it takes its
+# final name, as without --delete-source.
+# 0.1 is the shipped --distance: measured 2026-11-05, colour grain stays
+# identical only up to d=0.1. None = no limit (every distance may replace its
+# TIFF, as before 2.31.1-dev3). A safety setting: never taken from the
+# settings overlay, and there is no flag for it — it is chosen here.
+
 DELETE_SKIPPED = False
 # [DELETE_SOURCE only] Also delete sources whose output ALREADY EXISTS, i.e. the
 # files this run reports as SKIP.
@@ -1220,8 +1237,8 @@ _OVERLAY_SAFETY_SETTINGS = frozenset({
     "DELETE_SOURCE", "DELETE_CONFIRM", "DELETE_SKIPPED", "DELETE_SOURCE_REQUIRE_MD5",
     "STORE_MD5", "OVERWRITE_GUARD", "VERIFY_ROUNDTRIP", "VERIFY_LOSSY_MIN_MEAN_RATIO",
     "VERIFY_LOSSY_MIN_PSNR", "ALLOW_INCOMPLETE_GROUPS", "PROVENANCE_CHECK",
-    "ADOPT_SCAN", "ADOPT_MIN_PSNR", "OVERWRITE", "STRIP_METADATA", "AUTO_REPAIR_JBRD",
-    "EMBED_ICC_IN_JXL"})
+    "ADOPT_SCAN", "ADOPT_MIN_PSNR", "MASTER_MAX_DISTANCE", "OVERWRITE", "STRIP_METADATA",
+    "AUTO_REPAIR_JBRD", "EMBED_ICC_IN_JXL"})
 
 
 def _settings_overlay_path(*a, **k): return _common._settings_overlay_path(_G, *a, **k)
@@ -1341,6 +1358,10 @@ _discard_warned = {"count": 0, "suppressed": 0}
 # thing the tool does never reached emit_summary_json, so the wrapper's
 # end-of-manifest recap could not say a single word about it.
 _delete_stats = {"deleted": 0, "deleted_archived": 0, "kept": 0}
+# Sources the delete gate kept because of MASTER_MAX_DISTANCE (their own
+# count for the summary line; they are in _delete_stats["kept"] too). Not a
+# key of _delete_stats: its three keys are the same in every script.
+_master_limit_kept = {"count": 0}
 
 # Script defaults for every global the CLI mutates, captured at import. main()
 # resets run-scoped state UNCONDITIONALLY at entry (a second in-process run
@@ -3853,6 +3874,26 @@ _SYNC_SAME_BYTES: set = set()
 # (a deleting run checks in its delete gate instead, never twice). Run state,
 # not a setting: assigned by _configure_run at every run (v2.31.0).
 _VERIFY_EACH_PAGE = False
+# True when --verify-roundtrip was TYPED in a deleting run: a TIFF that
+# MASTER_MAX_DISTANCE keeps never reaches the delete gate's pixel check, so
+# its pages are checked in convert_one, as without --delete-source
+# (_verify_page_here; Fable's review S2, the owner's call). Run state,
+# assigned by _configure_run at every run (2.31.1-dev3).
+_VERIFY_ABOVE_LIMIT = False
+
+
+def _verify_page_here(tiff_path) -> bool:
+    """Does convert_one check this TIFF's pages before they take their final
+    name? Always with _VERIFY_EACH_PAGE; in a deleting run with an explicit
+    --verify-roundtrip, for a TIFF encoded above MASTER_MAX_DISTANCE (the
+    gate keeps it without a decode: this is its only check). A page that
+    fails is then an error that leaves no JXL — JP-20's rule and lines."""
+    if _VERIFY_EACH_PAGE:
+        return True
+    if not _VERIFY_ABOVE_LIMIT:
+        return False
+    limit = _master_limit()
+    return limit is not None and float(_distance_for(tiff_path)) > limit
 
 
 def _sync_same_bytes(tiff_path, final_path) -> bool:
@@ -4529,7 +4570,8 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
         tmp_dir = Path(tmp)
         # The thumbnail's decode is kept for the page check only when there is
         # one (_VERIFY_EACH_PAGE); never a decode of another file.
-        _KEPT_DECODE.wanted = bool(_VERIFY_EACH_PAGE)
+        _verify_here = _verify_page_here(tiff_path)
+        _KEPT_DECODE.wanted = bool(_verify_here)
         _KEPT_DECODE.kept = None
         try:
             # 1. Extract raw EXIF binary
@@ -4962,7 +5004,8 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             if not _verify_jxl_integrity(write_path):
                 raise RuntimeError("cjxl returned 0 but the output failed the JXL integrity check")
 
-            # --verify-roundtrip without a deletion (_VERIFY_EACH_PAGE, v2.31.0):
+            # --verify-roundtrip without a deletion (_VERIFY_EACH_PAGE, v2.31.0),
+            # or with one for a TIFF MASTER_MAX_DISTANCE keeps (_verify_page_here):
             # the bytes in write_path are the ones that take the final name
             # (the assembled master, or the temp of the old route; a staging
             # move later does not change them), so the page is decoded and
@@ -4970,7 +5013,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             # fails — or cannot be checked: _verify_roundtrip_page reads
             # "could not tell" as a failure — is an error like any other: the
             # handler below removes the partial output, the TIFF gets no JXL.
-            if _VERIFY_EACH_PAGE:
+            if _verify_here:
                 _page_ok, _page_detail = _verify_roundtrip_page(
                     tiff_path, page_idx, write_path, _dist)
                 _KEPT_DECODE.kept = None
@@ -5925,7 +5968,8 @@ def _delete_sources(results, tasks, moved_finals, use_staging, workers=1):
     threads (the run's memory-capped count: a check needs less memory than
     the encode it follows) for every source the cheap gates before them do
     not already keep (_check_worth_starting: the pages settled, nothing left
-    out of the JXL, the provenance of a skipped output); the loop reads each
+    out of the JXL, the provenance of a skipped output, a distance above
+    MASTER_MAX_DISTANCE); the loop reads each
     result where it called the check before. A source's own check still comes
     before its own delete; another source's may now run first (Fable's B3,
     5.6-b of plan 261113)."""
@@ -5935,10 +5979,14 @@ def _delete_sources(results, tasks, moved_finals, use_staging, workers=1):
         key = result[0][0]  # str(tiff_path)
         results_by_tiff.setdefault(key, []).append(result)
     skip_proof = _skipped_archive_proof_of(results_by_tiff)
+    over_limit = _master_limit_reasons(results_by_tiff, skip_proof)
     checks, check_pool = {}, None
     if VERIFY_ROUNDTRIP:
+        # A source MASTER_MAX_DISTANCE keeps is checked only on the pages this
+        # run wrote, and only when _limit_check_fresh_pages says so.
         todo = [(tk, r[0][1], r[2]) for tk, trs in results_by_tiff.items()
-                if _check_worth_starting(tk, trs, skip_proof) for r in trs]
+                if _check_worth_starting(tk, trs, skip_proof, over_limit) for r in trs
+                if os.path.normcase(tk) not in over_limit or r[1] in ("ok", "overwrite")]
         if todo:
             check_pool = ThreadPoolExecutor(max_workers=max(1, min(int(workers or 1), len(todo))))
             for tk, page, final in todo:
@@ -5947,7 +5995,8 @@ def _delete_sources(results, tasks, moved_finals, use_staging, workers=1):
     verify_errors = {}
     try:
         _delete_checked_sources(results_by_tiff, tasks, moved_finals, use_staging, checks,
-                                skip_proof=skip_proof, verify_errors=verify_errors)
+                                skip_proof=skip_proof, verify_errors=verify_errors,
+                                over_limit=over_limit)
     finally:
         if check_pool is not None:
             check_pool.shutdown(wait=True, cancel_futures=True)
@@ -5975,16 +6024,217 @@ def _skipped_archive_proof_of(results_by_tiff) -> dict:
     return _skipped_archive_proof(pairs) if pairs else {}
 
 
-def _check_worth_starting(tiff_key, tiff_results, skip_proof) -> bool:
+def _master_limit():
+    """MASTER_MAX_DISTANCE as a float, or None (no limit). May raise
+    TypeError/ValueError on a value that is not a number: _configure_run
+    validates the setting (and refuses a bool) before anything else asks."""
+    if MASTER_MAX_DISTANCE is None:
+        return None
+    return float(MASTER_MAX_DISTANCE)
+
+
+_ENCODE_DISTANCE_HEAD = ("-j", "-s", "-s", "-s", "-XMP-dc:Description", "-Software",
+                         "-XMP-xmpMM:HistoryParameters",
+                         "-charset", "FileName=UTF8", "-charset", "UTF8")
+
+
+_RECORD_ENTRY_START_RE = re.compile(r"cjxl\s+d=")
+_RECORD_ENTRY_RE = re.compile(r"cjxl\s+d=([0-9.]+)\s+e=(\d+)")
+
+
+def _chain_max_distance(texts):
+    """The HIGHEST distance any encode record entry in `texts` names (every
+    xmpMM:History entry's parameters, dc:Description, Software), or None
+    when none names one, or False when one cannot be read — pure.
+
+    The whole chain, never the newest record only (Fable's review S1 and
+    R2-S1, the owner's call): pixels never get better than the worst encode
+    they went through — a d=1 master recompressed in place to 0.05, or to 0
+    with --encode-tag off (its newest History entry says "no encode record"),
+    is still a d=1 image. A "no encode record" entry adds nothing and hides
+    nothing. An entry is a " | "-delimited segment that starts with
+    "cjxl d="; one that is not exactly "cjxl d=<number> e=<n>" is "cannot
+    tell" (False), never "no record"."""
+    found = []
+    for text in texts:
+        for seg in str(text or "").split("|"):
+            seg = seg.strip()
+            if not _RECORD_ENTRY_START_RE.match(seg):
+                continue
+            m = _RECORD_ENTRY_RE.fullmatch(seg)
+            if not m:
+                return False
+            try:
+                found.append(float(m.group(1)))
+            except ValueError:
+                return False
+    return max(found) if found else None
+
+
+def _read_encode_distance_batch(paths: list) -> dict:
+    """{str(path): value} — the distance each JXL's encode record names, in
+    as few exiftool calls as possible (the planning engine, _exiftool_batch).
+
+    value is a float: the HIGHEST distance any entry of the file's whole
+    encode chain names — every xmpMM:History entry, dc:Description and
+    Software (_chain_max_distance) — the worst encode its pixels went
+    through; None: ExifTool answered for the file and no entry names a
+    distance; False: cannot tell — the batch failed or stalled, no entry came
+    back for the file, the entry is an Error, or a "cjxl d=" entry does not
+    parse. "Cannot tell" (False) is never "no record" (None) (#563's rule):
+    the MASTER_MAX_DISTANCE gate keeps the TIFF on False."""
+    out = {str(p): False for p in paths}
+    index = {os.path.normcase(str(p)): str(p) for p in paths}
+
+    def on_data(chunk, r, data):
+        for entry in data:
+            src = entry.get("SourceFile")
+            if src is None or entry.get("Error"):
+                continue
+            key = os.path.normcase(str(Path(src)))
+            if key not in index:
+                continue
+            hist = entry.get("HistoryParameters")
+            texts = ([str(v) for v in hist] if isinstance(hist, list)
+                     else ([] if hist is None else [str(hist)]))
+            texts += [str(entry.get("Description") or ""), str(entry.get("Software") or "")]
+            out[index[key]] = _chain_max_distance(texts)
+
+    def on_no_output(chunk, r):
+        logger.warning(f"Encode distances: could not read a batch of {len(chunk)} file(s) "
+                       f"(rc={r.returncode}) — their TIFFs are kept (cannot tell at which "
+                       f"distance they were encoded)")
+
+    def on_error(chunk, e):
+        logger.warning(f"Encode distances: batch failed ({e}); {len(chunk)} file(s) could "
+                       f"not be read — their TIFFs are kept")
+
+    _exiftool_batch(paths, _ENCODE_DISTANCE_HEAD, "Encode distances", on_data,
+                    on_no_output=on_no_output, on_error=on_error)
+    return out
+
+
+def _master_limit_reasons(results_by_tiff, skip_proof) -> dict:
+    """{normcase(source): reason} for every source of these results whose JXL
+    is not an archive under MASTER_MAX_DISTANCE (the owner's call,
+    2026-11-28): a page this run writes is judged by the distance of its
+    TIFF's class (_distance_for), a skipped page — read only when
+    DELETE_SKIPPED and its provenance is proven (skip_proof) — by the
+    highest distance its whole encode chain names
+    (_read_encode_distance_batch). A record that cannot be read, or does not
+    parse, keeps the TIFF; no record keeps it unless jxlinfo says the output
+    is lossless. Per TIFF, all or nothing. {} when the limit is off (None)."""
+    limit = _master_limit()
+    if limit is None:
+        return {}
+    to_read = set()
+    if DELETE_SKIPPED:
+        for tiff_key, trs in results_by_tiff.items():
+            for r in trs:
+                if r[1] == "skipped" and skip_proof.get(
+                        (os.path.normcase(tiff_key), os.path.normcase(r[2])), False):
+                    to_read.add(str(r[2]))
+    recorded = _read_encode_distance_batch(sorted(to_read)) if to_read else {}
+    reasons = {}
+    for tiff_key, trs in results_by_tiff.items():
+        key = os.path.normcase(tiff_key)
+        if any(r[1] in ("ok", "overwrite") for r in trs):
+            d = float(_distance_for(tiff_key))
+            if d > limit:
+                reasons[key] = (
+                    f"encoded at distance {d:g}, above MASTER_MAX_DISTANCE {limit:g}: its "
+                    f"JXL is written, but it is not an archive of this TIFF — encode at "
+                    f"distance {limit:g} or lower to delete it")
+                continue
+        for r in trs:
+            if r[1] != "skipped" or str(r[2]) not in recorded:
+                continue
+            name = Path(r[2]).name
+            d = recorded[str(r[2])]
+            if d is False:
+                reasons[key] = (
+                    f"the encode record of its existing output {name} could not be read, "
+                    f"or an entry of it does not parse, so its distance cannot be told "
+                    f"(MASTER_MAX_DISTANCE {limit:g}) — run again once ExifTool reads the "
+                    f"folder, or encode it again with --overwrite at distance {limit:g} or "
+                    f"lower to delete it")
+                break
+            if d is None:
+                if _jxl_is_lossless(Path(r[2])) is True:
+                    continue
+                reasons[key] = (
+                    f"its existing output {name} carries no encode record and is not "
+                    f"lossless, so its distance cannot be told (MASTER_MAX_DISTANCE "
+                    f"{limit:g}) — encode it again with --overwrite at distance {limit:g} "
+                    f"or lower to delete it")
+                break
+            if d > limit:
+                reasons[key] = (
+                    f"its existing output {name} was encoded at distance {d:g}, above "
+                    f"MASTER_MAX_DISTANCE {limit:g}: it is not an archive of this TIFF — "
+                    f"encode it again with --overwrite at distance {limit:g} or lower to "
+                    f"delete it")
+                break
+    return reasons
+
+
+def _log_master_limit_plan(all_items) -> None:
+    """The start warning of a deleting run: how many TIFFs this run encodes
+    above MASTER_MAX_DISTANCE (their JXL is written, the TIFF kept)."""
+    if not DELETE_SOURCE:
+        return
+    limit = _master_limit()
+    if limit is None:
+        return
+    over = {}
+    for t, j, *_ in all_items:
+        if _would_skip(t, j):
+            continue
+        d = float(_distance_for(t))
+        if d > limit:
+            over[os.path.normcase(str(t))] = d
+    if not over:
+        return
+    total = len({os.path.normcase(str(t)) for t, *_ in all_items})
+    ds = ", ".join(f"{d:g}" for d in sorted(set(over.values())))
+    logger.warning(
+        f"MASTER_MAX_DISTANCE {limit:g}: {len(over)} of {total} TIFF(s) will be encoded above "
+        f"it (distance {ds}). Their JXL is written, but --delete-source keeps those TIFFs: above "
+        f"that distance a JXL is not an archive of its TIFF. To delete them, encode at "
+        f"distance {limit:g} or lower."
+        + (" --verify-roundtrip checks their pages before they take their final name, as "
+           "without --delete-source." if _VERIFY_ABOVE_LIMIT else ""))
+
+
+def _limit_check_fresh_pages(tiff_key, tiff_results, over_limit) -> bool:
+    """Does the gate still check the pixels of the pages THIS run wrote for a
+    source MASTER_MAX_DISTANCE keeps? Only with an explicit --verify-roundtrip
+    in a deleting run (_VERIFY_ABOVE_LIMIT), and only when convert_one did not
+    check them already (_verify_page_here: the TIFF's own distance is within
+    the limit, and a skipped page's record above it keeps the source — Fable's
+    R2-N1). Such a source is still kept; a fresh page that fails is the run's
+    error (#701), as for any source the gate checks."""
+    if not (over_limit and os.path.normcase(tiff_key) in over_limit):
+        return False
+    if not (_VERIFY_ABOVE_LIMIT and VERIFY_ROUNDTRIP) or _verify_page_here(tiff_key):
+        return False
+    return any(r[1] in ("ok", "overwrite") for r in tiff_results)
+
+
+def _check_worth_starting(tiff_key, tiff_results, skip_proof, over_limit=None) -> bool:
     """Would the gate's loop reach the pixel check of this source? False
     when one of the gates before it keeps the source whatever the pixels say
     — a page not settled, a page or content its JXL leaves out, a skipped
     output without its provenance (review S5: a --delete-skipped re-run over
-    old masters decoded every one of them for nothing). The loop judges every
-    source itself; this only spares a decode."""
+    old masters decoded every one of them for nothing), a distance above
+    MASTER_MAX_DISTANCE. The loop judges every source itself; this only
+    spares a decode."""
     if not all(_gate_page_settled(r) for r in tiff_results):
         return False
     key = os.path.normcase(tiff_key)
+    if over_limit and key in over_limit and not _limit_check_fresh_pages(
+            tiff_key, tiff_results, over_limit):
+        return False
     if (key in _discarded_real_page_sources or _unarchived_content_sources.get(key)
             or _origin_unread_of(tiff_key)):
         return False
@@ -5993,13 +6243,14 @@ def _check_worth_starting(tiff_key, tiff_results, skip_proof) -> bool:
 
 
 def _delete_checked_sources(results_by_tiff, tasks, moved_finals, use_staging, checks,
-                            skip_proof=None, verify_errors=None):
+                            skip_proof=None, verify_errors=None, over_limit=None):
     """The gate's loop (_delete_sources): `checks` holds the pixel checks
     already started, by (source, page, output); `skip_proof` the provenance
     of the skipped outputs (_skipped_archive_proof_of, read here when not
     given). `verify_errors` (a dict, filled here) gets each page THIS run
     wrote whose round-trip check failed: (source, page) -> the reason
-    (#701)."""
+    (#701). `over_limit` the sources MASTER_MAX_DISTANCE keeps
+    (_master_limit_reasons, read here when not given)."""
     if verify_errors is None:
         verify_errors = {}
     deleted = 0
@@ -6015,6 +6266,8 @@ def _delete_checked_sources(results_by_tiff, tasks, moved_finals, use_staging, c
     # (_skipped_archive_proof_of): a skip proves nothing on its own.
     _skip_proof = (skip_proof if skip_proof is not None
                    else _skipped_archive_proof_of(results_by_tiff))
+    _over_limit = (over_limit if over_limit is not None
+                   else _master_limit_reasons(results_by_tiff, _skip_proof))
 
     for tiff_key, tiff_results in results_by_tiff.items():
         if _interrupted():
@@ -6141,6 +6394,23 @@ def _delete_checked_sources(results_by_tiff, tasks, moved_finals, use_staging, c
                 logger.warning(f"  KEEP source (JXL integrity check failed) | {Path(tiff_key).name}")
             continue
 
+        # MASTER_MAX_DISTANCE: above it a JXL is a smaller copy, not an archive
+        # of its TIFF — the owner's call, 2026-11-28. After the provenance of a
+        # skipped output (a foreign file's record says nothing about this
+        # photo), before the pixel check, which such a source never starts
+        # (_check_worth_starting).
+        _limit_why = _over_limit.get(os.path.normcase(tiff_key))
+        # R2-N1: with an explicit --verify-roundtrip, the pages this run wrote
+        # for such a source that convert_one did not check are checked below
+        # (their failure is #701's error), and the source is kept after it.
+        _limit_after_check = bool(_limit_why) and _limit_check_fresh_pages(
+            tiff_key, tiff_results, _over_limit)
+        if _limit_why and not _limit_after_check:
+            _delete_stats["kept"] += 1
+            _master_limit_kept["count"] += 1
+            logger.warning(f"  KEEP source ({_limit_why}) | {Path(tiff_key).name}")
+            continue
+
         # Last gate, and the only one that looks at PIXELS. Everything above
         # certifies the FILE; this certifies the IMAGE. Runs per page, so a
         # split multi-page TIFF only dies once every one of its pages came
@@ -6149,6 +6419,8 @@ def _delete_checked_sources(results_by_tiff, tasks, moved_finals, use_staging, c
         if VERIFY_ROUNDTRIP:
             failed_pages = []
             for r in tiff_results:
+                if _limit_after_check and r[1] not in ("ok", "overwrite"):
+                    continue    # a skipped page the limit already judged
                 _page = r[0][1]
                 _check = checks.get((tiff_key, _page, r[2]))
                 try:
@@ -6210,11 +6482,18 @@ def _delete_checked_sources(results_by_tiff, tasks, moved_finals, use_staging, c
                         "if it was archived at a different --distance, re-run "
                         "with that distance or set VERIFY_ROUNDTRIP = False"
                         + _scan_distance_hint(tiff_key)
-                        if skipped_finals else "")
+                        if skipped_finals and not _limit_after_check else "")
                 logger.warning(
                     f"  KEEP source (round-trip verification FAILED on page {_page}: "
                     f"{detail}) | {Path(tiff_key).name}{_pre}")
                 continue
+
+        if _limit_after_check:
+            # Its fresh pages passed; MASTER_MAX_DISTANCE keeps it all the same.
+            _delete_stats["kept"] += 1
+            _master_limit_kept["count"] += 1
+            logger.warning(f"  KEEP source ({_limit_why}) | {Path(tiff_key).name}")
+            continue
 
         src_tiff = Path(tiff_key)
         if _source_changed_since_read(src_tiff):
@@ -6534,7 +6813,10 @@ def build_parser():
     parser.add_argument("--delete-source",   action="store_true",
                         help="Delete source TIFFs after their JXL is written to the "
                              "mode's destination and verified. Works in EVERY mode "
-                             "(0-8), not just 8. IRREVERSIBLE.")
+                             "(0-8), not just 8. IRREVERSIBLE."
+                             " A TIFF encoded above MASTER_MAX_DISTANCE (a setting at "
+                             "the top of the script) is kept: its JXL is written, but "
+                             "it is not an archive of the TIFF.")
     parser.add_argument("--provenance", type=str, default=None,
                         choices=["path", "content", "adopt"],
                         help="How an EXISTING output is matched to the source about to "
@@ -6591,7 +6873,9 @@ def build_parser():
                              "integrity check AND carry this source's provenance "
                              "marker; --verify-roundtrip is still recommended — the "
                              "marker names the source file, it does not compare the "
-                             "pixels.")
+                             "pixels."
+                             " An output recorded above MASTER_MAX_DISTANCE, or whose "
+                             "distance cannot be told, keeps its TIFF.")
     parser.add_argument("--verify-roundtrip", action="store_true",
                         help="Decode each JXL and compare it with its TIFF page: "
                              "pixel-identical for --distance 0, or a brightness+PSNR "
@@ -6599,7 +6883,9 @@ def build_parser():
                              "not quality loss). Without --delete-source every page is "
                              "checked before it takes its final name, and a page that "
                              "fails or cannot be checked is an error (no JXL); with "
-                             "--delete-source the check gates the deletion. One more "
+                             "--delete-source the check gates the deletion (a TIFF kept "
+                             "by MASTER_MAX_DISTANCE is checked page by page, as "
+                             "without --delete-source). One more "
                              "decode per page. Needs djxl (and imagecodecs when "
                              "deleting). The delete gate's check is on by default "
                              "(VERIFY_ROUNDTRIP = True); set it to False at the top of "
@@ -6725,7 +7011,7 @@ def _configure_run(parser, args):
     global MULTIPAGE_TIFF_MODE, OVERWRITE, OVERWRITE_GUARD, PROVENANCE_CHECK
     global SCAN_DISTANCE, SCAN_SCOPE, TEMP2_DIR, THUMBNAIL_MODE, THUMBNAIL_SUFFIX
     global USE_RAM_FOR_PNG, VERIFY_ROUNDTRIP, WARN_DISCARDED_THUMBNAILS
-    global _VERIFY_EACH_PAGE
+    global _VERIFY_EACH_PAGE, _VERIFY_ABOVE_LIMIT
     if args.input is None:
         parser.error("the following arguments are required: input")
 
@@ -6951,6 +7237,7 @@ def _configure_run(parser, args):
         _EIGHT_BIT_PLAN.clear()
     for _k in _delete_stats:
         _delete_stats[_k] = 0
+    _master_limit_kept["count"] = 0
 
     # Rule 2: the guard off PLUS a delete is the exact combination that lost
     # photos — the only copy of another photo overwritten, then its source
@@ -6962,6 +7249,19 @@ def _configure_run(parser, args):
                      "copy of another photo and then delete the file that could "
                      "rebuild it, so it is refused. Turn the guard back on for "
                      "delete runs.")
+        sys.exit(2)
+
+    # MASTER_MAX_DISTANCE is a number from 0 to 25, or None (no limit): a value
+    # the delete gate cannot compare must stop the run, never be read as "no limit".
+    try:
+        _bad_limit = (isinstance(MASTER_MAX_DISTANCE, bool)
+                      or (_master_limit() is not None and not 0 <= _master_limit() <= 25))
+    except (TypeError, ValueError):
+        _bad_limit = True
+    if _bad_limit:
+        logger.error(f"MASTER_MAX_DISTANCE = {MASTER_MAX_DISTANCE!r}: use a number from 0 to "
+                     f"25 (the highest distance at which a JXL may replace its TIFF), or "
+                     f"None for no limit.")
         sys.exit(2)
 
     # Everything below is logged AFTER setup_logger() on purpose: on the
@@ -7086,6 +7386,9 @@ def _configure_run(parser, args):
     # twice; the setting alone (VERIFY_ROUNDTRIP, on by default) gates
     # deletions only, so a run that deletes nothing never pays for a decode.
     _VERIFY_EACH_PAGE = bool(args.verify_roundtrip) and not DELETE_SOURCE
+    # The same flag in a deleting run: the pages of a TIFF MASTER_MAX_DISTANCE
+    # keeps (no gate check for it) are checked as without --delete-source.
+    _VERIFY_ABOVE_LIMIT = bool(args.verify_roundtrip) and DELETE_SOURCE
 
     # --verify-roundtrip needs tools the rest of the encoder does not. Checked
     # up front, and fatally: a verification that silently could not run would
@@ -7669,6 +7972,7 @@ def main():
                  if not _would_skip(t, j)}.values()
     _log_scans_at_scan_distance(_scans_at_scan_distance(_to_write), done=False)
     _log_eight_bit_at_other_distance(_eight_bit_at_other_distance(_to_write), done=False)
+    _log_master_limit_plan(all_items)
 
     # Dry run
     if args.dry_run:
@@ -7714,6 +8018,9 @@ def main():
             _proof = _skipped_archive_proof(
                 [(Path(_src), Path(j)) for _src, _finals in _fully_skipped.items()
                  for j in _finals])
+            _over_preview = _master_limit_reasons(
+                {_src: [((_src, _i), "skipped", str(j), None) for _i, j in enumerate(_finals)]
+                 for _src, _finals in _fully_skipped.items()}, _proof)
             _would_delete, _would_keep = [], []
             for _src, _finals in _fully_skipped.items():
                 if os.path.normcase(_src) in _discarded_real_page_sources:
@@ -7729,6 +8036,8 @@ def main():
                                                 "changed since it was written — "
                                                 "it cannot prove it is an "
                                                 "archive of THIS photo"))
+                elif os.path.normcase(_src) in _over_preview:
+                    _would_keep.append((_src, _over_preview[os.path.normcase(_src)]))
                 elif all(_verify_jxl_integrity(j) for j in _finals):
                     _would_delete.append(_src)
                 else:
@@ -7991,6 +8300,13 @@ def main():
                     + f" | kept by a gate: {_delete_stats['kept']}"
                     + (f" | refused (output belongs to another source): "
                        f"{len(provenance_blocked)}" if provenance_blocked else ""))
+        if _master_limit_kept["count"]:
+            logger.warning(
+                f"Kept above MASTER_MAX_DISTANCE {_master_limit():g}: "
+                f"{_master_limit_kept['count']} source TIFF(s) — their JXL is not an archive "
+                f"of the TIFF (encoded above that distance, or at a distance that cannot be "
+                f"told). The JXLs stay; to delete those TIFFs, encode them again at distance "
+                f"{_master_limit():g} or lower (--overwrite for the ones already encoded).")
 
     logger.info(f"Log: {log_file}")
 

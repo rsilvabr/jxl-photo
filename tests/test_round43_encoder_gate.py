@@ -203,6 +203,9 @@ def test_delete_skipped_deletes_master_when_marker_matches(tmp_path, monkeypatch
     out_mark = {"src": enc._source_path_id(tiff), "srcsum": enc._file_content_id(tiff)}
     monkeypatch.setattr(enc, "_read_source_markers_batch",
                         _marker_reader({str(final): out_mark}))
+    # the fixture's output is a lossless archive (MASTER_MAX_DISTANCE)
+    monkeypatch.setattr(enc, "_read_encode_distance_batch",
+                        lambda paths: {str(p): 0.0 for p in paths})
 
     def _skipped(*a, **k):
         return ((str(a[0]), a[3]), "skipped", str(a[2]), None)
@@ -277,6 +280,9 @@ def test_dry_run_preview_matches_the_marker_gate(tmp_path, monkeypatch):
     for _t, _j, m in outcomes.values():
         all_marks[str(_j)] = m
     monkeypatch.setattr(enc, "_read_source_markers_batch", _marker_reader(all_marks))
+    # the fixture's outputs are lossless archives (MASTER_MAX_DISTANCE)
+    monkeypatch.setattr(enc, "_read_encode_distance_batch",
+                        lambda paths: {str(p): 0.0 for p in paths})
 
     foreign_src, match_src = outcomes["foreign"][0], outcomes["match"][0]
     monkeypatch.setattr(sys, "argv",

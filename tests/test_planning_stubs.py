@@ -97,6 +97,7 @@ def _readers(paths):
         "derived markers": common._read_derived_markers_batch(rec, paths),
         "encoder page markers": enc._read_page_markers_batch(paths),
         "encoder group markers": enc._read_group_markers_batch(paths),
+        "encoder encode distances": enc._read_encode_distance_batch(paths),
         "decoder xmp icc": dec._xmp_icc_jxls_batch(paths),
         "decoder multipage": dec._read_multipage_markers_batch(paths),
         "transcoder thumb markers": tr._read_thumb_markers_batch(paths),

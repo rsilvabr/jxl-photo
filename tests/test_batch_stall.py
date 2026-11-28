@@ -44,6 +44,7 @@ SCRIPTS = ["jxl_tiff_encoder", "jxl_tiff_decoder", "jxl_jpeg_transcoder",
 EXTRA_BATCH_FUNCS = {"_read_mpg_markers"}
 # Batch call sites per script (base commit 4921caf: 11 in all).
 # Encoder: + _read_page_markers_batch (v2.18.0, the leftover split pages, #551).
+# Encoder: + _read_encode_distance_batch (2.31.1-dev3, MASTER_MAX_DISTANCE).
 # Transcoder: + _read_thumb_markers_batch (v2.18.0, no derivative of a thumbnail
 # page, #555).
 # The recompressor's fifth: _read_mpg_pages_batch (#574).
@@ -58,7 +59,8 @@ EXPECTED_SITES = {"jxl_tiff_encoder": 0, "jxl_tiff_decoder": 0,
 # The batch readers, per module: all on the engine.
 BATCH_READERS = {
     "jxl_photo_common": {"_read_source_markers_batch", "_read_derived_markers_batch"},
-    "jxl_tiff_encoder": {"_read_page_markers_batch", "_read_group_markers_batch"},
+    "jxl_tiff_encoder": {"_read_page_markers_batch", "_read_group_markers_batch",
+                         "_read_encode_distance_batch"},
     "jxl_tiff_decoder": {"_xmp_icc_jxls_batch", "_read_multipage_markers_batch"},
     "jxl_jpeg_transcoder": {"_read_thumb_markers_batch"},
     "jxl_recompressor": {"_read_encode_params_batch", "_read_mpg_markers",

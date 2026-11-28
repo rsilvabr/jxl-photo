@@ -16,6 +16,7 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
+| [v2.31.1-dev3](#v2311-dev3) | 2026-11-28 | Development version, not published (tag only). `--delete-source` keeps a TIFF encoded above distance 0.1 (`MASTER_MAX_DISTANCE`): its JXL is written, but it is not an archive of the TIFF. |
 | [v2.31.1-dev2](#v2311-dev2) | 2026-11-27 | Development version, not published (tag only). A Ctrl+C lets the files in progress finish (the tools no longer receive it); the transcoder's JPEG/PNG exports record their image data and an edited one is not written over; `setup` says what Windows really starts. |
 | [v2.31.1-dev1](#v2311-dev1) | 2026-11-27 | Development version, not published (tag only). The manifest table's OK and ovw counted like the other scripts; `jxl_photo.py setup`; on Python 3.13+ a codec's input written without a thread (#765, #766) |
 | **[v2.31.0](#v2310)** | 2026-11-23 | Faster with the same files: archiving, decoding and deleting 18–22 %, sRGB copies 8–38 %, recompression 15 %; deletes hardened in many edge cases (colour-converted exports, JPEG archives, Motion Photos, multi-page documents, Ctrl+C); film scans (VueScan RGB + infrared, grey profiles); exact EXIF values; `--serve` and `--verify-roundtrip` for programs; a temp folder with `%` or a TMP of 261+ characters refused; everything in the eight test releases (#684–#764) |
@@ -120,6 +121,42 @@ GitHub release notes before v1.8.2:
 [v1.7.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.1) ·
 [v1.7.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.0).
 Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refactoring.md).
+
+---
+
+## v2.31.1-dev3
+
+**Not published: a development version** (2026-11-28), tagged in git with
+no GitHub release and no exe. Every file it writes records `2.31.1-dev3` in
+its `xmpMM:History`. Since v2.31.1-dev2:
+
+- Above a distance, a JXL is not an archive of its TIFF: a new setting at the
+  top of `jxl_tiff_encoder.py`, `MASTER_MAX_DISTANCE = 0.1` (the shipped
+  `--distance`; colour grain stays identical only up to d=0.1), and
+  `--delete-source` never deletes a TIFF encoded above it. The JXL is written
+  as before (same markers, same encode record); the TIFF is kept with a
+  `KEEP source` warning that names the setting, a warning at the start of the
+  run and one line at the end. Never an error, and the exit code is the same.
+  `None` = no limit (the behaviour before).
+- Each TIFF is judged by its own class's distance (`--distance`,
+  `--scan-distance`, `--eight-bit-distance`): in a run at `--distance 1` the
+  film scans, lossless by default, are still deleted.
+- `--delete-skipped` judges an existing output by the distance its own encode
+  record names — the highest `cjxl d=` of its whole chain, every History
+  entry included (a d=1 master recompressed in place at 0.05, or lossless
+  with `--encode-tag off`, is still a d=1 image), not the run's: above the
+  limit, or a record that cannot be read or does not parse, keeps the TIFF;
+  an output with no record anywhere keeps it unless it is lossless. A dry run's `--delete-skipped`
+  preview says so.
+- `--verify-roundtrip` typed with `--delete-source` still checks the pages of
+  a TIFF the limit keeps, as without `--delete-source` (before each takes its
+  final name; a page that fails is an error and gets no JXL).
+- The wizard notes, before the HHMM token of a TIFF → JXL deleting run, which
+  TIFFs the encoder will keep for that reason (the encoder's own setting, and
+  the distances of the expert flags).
+- `MASTER_MAX_DISTANCE` is a safety setting: never taken from the settings
+  overlay, and there is no flag for it. A value that is not a number from 0
+  to 25 (or `None`) stops the run (exit 2) before any file.
 
 ---
 

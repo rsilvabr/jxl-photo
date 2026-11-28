@@ -96,6 +96,7 @@ def test_each_table_accepts_the_scripts_own_values(module, mods):
 
 def test_safety_settings_are_the_same_everywhere_and_never_offered(mods):
     first = mods[MODULES[0]]._OVERLAY_SAFETY_SETTINGS
+    assert "MASTER_MAX_DISTANCE" in first
     for module, m in mods.items():
         assert m._OVERLAY_SAFETY_SETTINGS == first, module
         assert not (set(m._OVERLAY_SETTINGS) & first), (module, set(m._OVERLAY_SETTINGS) & first)
@@ -382,6 +383,19 @@ def test_the_original_icc_copy_is_a_safety_setting(tmp_path):
     assert r["v"]["EMBED_ICC_IN_JXL"] is True
     assert r["o"]["applied"] == []
     assert "EMBED_ICC_IN_JXL is a safety setting" in " ".join(r["o"]["warnings"])
+
+
+def test_the_master_limit_is_a_safety_setting(tmp_path):
+    """MASTER_MAX_DISTANCE (2.31.1-dev3): the highest distance at which a JXL
+    may replace its TIFF. Raising it lets --delete-source delete TIFFs behind
+    high-distance JXLs, so it is chosen in the script, never by a file the run
+    does not show."""
+    path = _overlay(tmp_path, {"jxl_tiff_encoder": {"MASTER_MAX_DISTANCE": 25}})
+    r = _values("jxl_tiff_encoder", ["MASTER_MAX_DISTANCE"], path, tmp_path)
+    plain = _values("jxl_tiff_encoder", ["MASTER_MAX_DISTANCE"], "", tmp_path)
+    assert r["v"]["MASTER_MAX_DISTANCE"] == plain["v"]["MASTER_MAX_DISTANCE"]
+    assert r["o"]["applied"] == []
+    assert "MASTER_MAX_DISTANCE is a safety setting" in " ".join(r["o"]["warnings"])
 
 
 @pytest.mark.parametrize("module", ["jxl_tiff_encoder", "jxl_recompressor"])
